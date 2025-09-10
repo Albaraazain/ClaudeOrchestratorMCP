@@ -1,0 +1,51 @@
+[project]
+name = "claude-code-orchestrator"
+version = "1.0.0"
+description = "A powerful MCP server for orchestrating headless Claude agents with anti-spiral protection"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Claude Code Orchestrator Project"}
+]
+keywords = ["claude", "mcp", "orchestrator", "agents", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing"
+]
+dependencies = [
+    "fastmcp>=2.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/claude-code-orchestrator"
+Documentation = "https://github.com/your-org/claude-code-orchestrator#readme"
+Repository = "https://github.com/your-org/claude-code-orchestrator.git"
+"Bug Tracker" = "https://github.com/your-org/claude-code-orchestrator/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+claude-code-orchestrator = "real_mcp_server:mcp.run"
+
+[tool.mcp]
+name = "claude-orchestrator"
+description = "Orchestrate headless Claude agents with anti-spiral protection"
+icon = "🤖"
