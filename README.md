@@ -269,7 +269,7 @@ export CLAUDE_ORCHESTRATOR_MAX_DEPTH=4
 export CLAUDE_EXECUTABLE="/path/to/claude"
 
 # Claude command flags (customize as needed)
-export CLAUDE_FLAGS="--print --output-format stream-json --verbose --dangerously-skip-permissions"
+export CLAUDE_FLAGS="--print --output-format stream-json --verbose --dangerously-skip-permissions --model glm-4.5"
 ```
 
 ### MCP Server Configuration
@@ -357,7 +357,7 @@ Test the MCP server functionality:
 claude mcp list | grep claude-orchestrator
 
 # Test basic functionality in Claude Code
-claude --print "Create a test task using the orchestrator MCP"
+claude --print --model glm-4.5 "Create a test task using the orchestrator MCP"
 
 # Manual testing
 python3 -c "

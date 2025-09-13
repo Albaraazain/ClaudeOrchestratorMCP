@@ -324,7 +324,7 @@ PHASE-SPECIFIC INSTRUCTIONS:
 BEGIN $PHASE NOW!"
 
     # Execute Claude for this phase with timeout enforcement
-    timeout $CHECKPOINT_INTERVAL claude --dangerously-skip-permissions --print "$PHASE_PROMPT" || {{
+    timeout $CHECKPOINT_INTERVAL claude --dangerously-skip-permissions --print --model glm-4.5 "$PHASE_PROMPT" || {{
         echo "⏰ Phase timeout - enforcing checkpoint"
         echo "{{\\"timestamp\\": \\"$(date -Iseconds)\\", \\"agent_id\\": \\"$AGENT_ID\\", \\"action\\": \\"timeout_checkpoint\\", \\"sub_task\\": \\"$PHASE\\", \\"sub_progress\\": 50, \\"overall_progress\\": $PROGRESS, \\"status\\": \\"checkpoint\\", \\"context\\": \\"Forced checkpoint due to ${{CHECKPOINT_INTERVAL}}s timeout\\", \\"eta_subtask\\": \\"0s\\", \\"eta_overall\\": \\"estimated\\"}}" >> "$PROGRESS_FILE"
     }}
@@ -594,7 +594,7 @@ BEGIN YOUR WORK NOW!
         # Run Claude in the calling project's directory, not the orchestrator workspace
         calling_project_dir = os.getcwd()
         claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'claude')
-        claude_flags = os.getenv('CLAUDE_FLAGS', '--print --output-format stream-json --verbose --dangerously-skip-permissions')
+        claude_flags = os.getenv('CLAUDE_FLAGS', '--print --output-format stream-json --verbose --dangerously-skip-permissions --model glm-4.5')
         claude_command = f'cd "{calling_project_dir}" && {claude_executable} {claude_flags} < "{prompt_file}"'
         
         # Create the session in the calling project directory 

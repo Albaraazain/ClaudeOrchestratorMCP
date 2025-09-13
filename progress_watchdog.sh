@@ -35,7 +35,7 @@ while true; do
                     
                     # Also send a gentle prompt to continue
                     CONTINUE_PROMPT="Please continue your work and update progress every 1-2 minutes using the JSONL format. What are you working on right now?"
-                    tmux send-keys -t "$SESSION" "claude --dangerously-skip-permissions --print '$CONTINUE_PROMPT'" Enter
+                    tmux send-keys -t "$SESSION" "claude --dangerously-skip-permissions --print --model glm-4.5 '$CONTINUE_PROMPT'" Enter
                 fi
             fi
         fi
