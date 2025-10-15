@@ -26,6 +26,9 @@ import re
 mcp = FastMCP("Claude Orchestrator")
 
 # Configuration
+# WORKSPACE_BASE: Set via CLAUDE_ORCHESTRATOR_WORKSPACE env var to control where task workspaces are created
+# Example: export CLAUDE_ORCHESTRATOR_WORKSPACE=/Users/yourname/Developer/Projects/yourproject/.agent-workspace
+# Default: Creates .agent-workspace in the MCP server's directory
 WORKSPACE_BASE = os.getenv('CLAUDE_ORCHESTRATOR_WORKSPACE', os.path.abspath('.agent-workspace'))
 DEFAULT_MAX_AGENTS = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_AGENTS', '25'))
 DEFAULT_MAX_CONCURRENT = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_CONCURRENT', '8'))
@@ -37,6 +40,39 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def find_task_workspace(task_id: str) -> str:
+    """
+    Find the workspace directory for a given task ID.
+    Searches in multiple locations:
+    1. Server's WORKSPACE_BASE
+    2. Common project locations (if task was created with client_cwd)
+    
+    Returns the workspace path or None if not found.
+    """
+    # Check server's default workspace
+    workspace = f"{WORKSPACE_BASE}/{task_id}"
+    if os.path.exists(f"{workspace}/AGENT_REGISTRY.json"):
+        return workspace
+    
+    # Search in common project locations (for tasks created with client_cwd)
+    # Look for .agent-workspace directories in parent directories
+    current_dir = os.getcwd()
+    for _ in range(5):  # Search up to 5 levels up
+        candidate = os.path.join(current_dir, '.agent-workspace', task_id)
+        if os.path.exists(f"{candidate}/AGENT_REGISTRY.json"):
+            logger.info(f"Found task {task_id} in client workspace: {candidate}")
+            return candidate
+        parent = os.path.dirname(current_dir)
+        if parent == current_dir:  # Reached root
+            break
+        current_dir = parent
+    
+    # Also check if WORKSPACE_BASE contains the task directly
+    if os.path.exists(f"{WORKSPACE_BASE}/{task_id}/AGENT_REGISTRY.json"):
+        return f"{WORKSPACE_BASE}/{task_id}"
+    
+    return None
 
 def ensure_workspace():
     """Ensure workspace directory structure exists with proper initialization."""
@@ -323,8 +359,8 @@ PHASE-SPECIFIC INSTRUCTIONS:
 
 BEGIN $PHASE NOW!"
 
-    # Execute Claude for this phase with timeout enforcement
-    timeout $CHECKPOINT_INTERVAL claude --dangerously-skip-permissions --print --model glm-4.5 "$PHASE_PROMPT" || {{
+    # Execute Claude for this phase with timeout enforcement - model is sonnet (Claude Sonnet 4.5)
+    timeout $CHECKPOINT_INTERVAL claude --dangerously-skip-permissions --print --model sonnet "$PHASE_PROMPT" || {{
         echo "⏰ Phase timeout - enforcing checkpoint"
         echo "{{\\"timestamp\\": \\"$(date -Iseconds)\\", \\"agent_id\\": \\"$AGENT_ID\\", \\"action\\": \\"timeout_checkpoint\\", \\"sub_task\\": \\"$PHASE\\", \\"sub_progress\\": 50, \\"overall_progress\\": $PROGRESS, \\"status\\": \\"checkpoint\\", \\"context\\": \\"Forced checkpoint due to ${{CHECKPOINT_INTERVAL}}s timeout\\", \\"eta_subtask\\": \\"0s\\", \\"eta_overall\\": \\"estimated\\"}}" >> "$PROGRESS_FILE"
     }}
@@ -351,22 +387,34 @@ echo "🎉 Wrapped Agent $AGENT_ID completed successfully!"
     return wrapper_path
 
 @mcp.tool
-def create_real_task(description: str, priority: str = "P2") -> Dict[str, Any]:
+def create_real_task(description: str, priority: str = "P2", client_cwd: str = None) -> Dict[str, Any]:
     """
     Create a real orchestration task with proper workspace.
     
     Args:
         description: Description of the task
         priority: Task priority
+        client_cwd: Optional client working directory (defaults to server's location if not provided)
     
     Returns:
         Task creation result
     """
     ensure_workspace()
     
+    # Use client's working directory if provided, otherwise use server's WORKSPACE_BASE
+    if client_cwd:
+        workspace_base = os.path.join(client_cwd, '.agent-workspace')
+        logger.info(f"Using client workspace: {workspace_base}")
+    else:
+        workspace_base = WORKSPACE_BASE
+        logger.info(f"Using server workspace: {workspace_base}")
+    
+    # Ensure client workspace directory exists
+    os.makedirs(workspace_base, exist_ok=True)
+    
     # Generate task ID
     task_id = f"TASK-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
+    workspace = f"{workspace_base}/{task_id}"
     
     # Create task workspace
     os.makedirs(f"{workspace}/progress", exist_ok=True)
@@ -457,14 +505,15 @@ def deploy_headless_agent(
             "error": "tmux is not available - required for background execution"
         }
     
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    if not os.path.exists(registry_path):
+    # Find the task workspace (may be in client or server location)
+    workspace = find_task_workspace(task_id)
+    if not workspace:
         return {
             "success": False,
-            "error": f"Task {task_id} not found"
+            "error": f"Task {task_id} not found in any workspace location"
         }
+    
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
     
     # Load registry
     with open(registry_path, 'r') as f:
@@ -594,8 +643,11 @@ BEGIN YOUR WORK NOW!
         # Run Claude in the calling project's directory, not the orchestrator workspace
         calling_project_dir = os.getcwd()
         claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'claude')
-        claude_flags = os.getenv('CLAUDE_FLAGS', '--print --output-format stream-json --verbose --dangerously-skip-permissions --model glm-4.5')
-        claude_command = f'cd "{calling_project_dir}" && {claude_executable} {claude_flags} < "{prompt_file}"'
+        claude_flags = os.getenv('CLAUDE_FLAGS', '--print --output-format stream-json --verbose --dangerously-skip-permissions --model sonnet')
+        
+        # Escape the prompt for shell and pass as argument (not stdin redirection)
+        escaped_prompt = agent_prompt.replace("'", "'\"'\"'")
+        claude_command = f"cd '{calling_project_dir}' && {claude_executable} {claude_flags} '{escaped_prompt}'"
         
         # Create the session in the calling project directory 
         session_result = create_tmux_session(
@@ -708,14 +760,15 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
     Returns:
         Complete task status
     """
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    if not os.path.exists(registry_path):
+    # Find the task workspace (may be in client or server location)
+    workspace = find_task_workspace(task_id)
+    if not workspace:
         return {
             "success": False,
-            "error": f"Task {task_id} not found"
+            "error": f"Task {task_id} not found in any workspace location"
         }
+    
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
     
     with open(registry_path, 'r') as f:
         registry = json.load(f)
@@ -817,14 +870,15 @@ def get_agent_output(task_id: str, agent_id: str) -> Dict[str, Any]:
     Returns:
         Agent output
     """
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    if not os.path.exists(registry_path):
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
         return {
             "success": False,
-            "error": f"Task {task_id} not found"
+            "error": f"Task {task_id} not found in any workspace location"
         }
+    
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
     
     with open(registry_path, 'r') as f:
         registry = json.load(f)
@@ -881,14 +935,15 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
     Returns:
         Termination status
     """
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    if not os.path.exists(registry_path):
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
         return {
             "success": False,
-            "error": f"Task {task_id} not found"
+            "error": f"Task {task_id} not found in any workspace location"
         }
+    
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
     
     with open(registry_path, 'r') as f:
         registry = json.load(f)
@@ -942,11 +997,12 @@ def get_comprehensive_task_status(task_id: str) -> Dict[str, Any]:
     Get comprehensive status including all agents' progress and findings.
     Internal helper function for coordination.
     """
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return {"success": False, "error": f"Task {task_id} not found in any workspace location"}
     
-    if not os.path.exists(registry_path):
-        return {"success": False, "error": f"Task {task_id} not found"}
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
     
     with open(registry_path, 'r') as f:
         registry = json.load(f)
@@ -1038,14 +1094,15 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
     Returns:
         Update result with comprehensive task status for coordination
     """
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    if not os.path.exists(registry_path):
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
         return {
             "success": False,
-            "error": f"Task {task_id} not found"
+            "error": f"Task {task_id} not found in any workspace location"
         }
+    
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
     
     # Log progress update
     progress_file = f"{workspace}/progress/{agent_id}_progress.jsonl"
@@ -1112,8 +1169,15 @@ def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severit
     """
     if data is None:
         data = {}
+    
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return {
+            "success": False,
+            "error": f"Task {task_id} not found in any workspace location"
+        }
         
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
     findings_file = f"{workspace}/findings/{agent_id}_findings.jsonl"
     os.makedirs(f"{workspace}/findings", exist_ok=True)
     
@@ -1186,7 +1250,10 @@ def get_task_resource(task_id: str) -> str:
 @mcp.resource("task://{task_id}/progress-timeline")  
 def get_task_progress_timeline(task_id: str) -> str:
     """Get comprehensive progress timeline for a task."""
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"error": f"Task {task_id} not found in any workspace location"}, indent=2)
     
     all_progress = []
     all_findings = []
