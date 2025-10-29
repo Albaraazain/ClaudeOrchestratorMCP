@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-20251029-225319-45548b6a",
+  "task_description": "Investigate and implement proper resource cleanup for finished agents",
+  "created_at": "2025-10-29T22:53:19.352656",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-225319-45548b6a",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P1",
+  "agents": [],
+  "agent_hierarchy": {
+    "orchestrator": []
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 0,
+  "active_count": 0,
+  "completed_count": 0,
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2025-10-29T22:53:19.352890",
+    "violations": 0
+  },
+  "task_context": {
+    "background_context": "The Claude Orchestrator MCP system deploys headless Claude agents in tmux sessions. We need to investigate whether we're properly freeing computing resources when agents finish their tasks, and implement proper cleanup mechanisms if needed.",
+    "expected_deliverables": [
+      "Resource cleanup analysis report",
+      "Best practices from web research",
+      "Implementation plan for proper cleanup",
+      "Code changes for resource management"
+    ],
+    "success_criteria": [
+      "All computing resources properly freed when agents finish",
+      "No zombie processes or orphaned tmux sessions",
+      "Documented cleanup procedures",
+      "Automated cleanup mechanisms in place"
+    ]
+  }
+}

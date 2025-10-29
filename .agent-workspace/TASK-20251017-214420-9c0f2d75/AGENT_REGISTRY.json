@@ -1,0 +1,217 @@
+{
+  "task_id": "TASK-20251017-214420-9c0f2d75",
+  "task_description": "Regression test",
+  "created_at": "2025-10-17T21:44:20.792445",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251017-214420-9c0f2d75",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP",
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "agents": [
+    {
+      "id": "regress_test-214420-f29691",
+      "type": "regress_test",
+      "tmux_session": "agent_regress_test-214420-f29691",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "completed",
+      "started_at": "2025-10-17T21:44:22.822327",
+      "progress": 100,
+      "last_update": "2025-10-17T21:52:00.574972",
+      "prompt": "Test agent",
+      "completion_validation": {
+        "confidence": 0.9,
+        "warnings": [
+          "Message contains suspicious phrases: mock - indicates incomplete work"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 15,
+            "progress_entries_count": 9,
+            "findings_count": 5
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 529,
+            "suspicious_phrases_found": [
+              "mock"
+            ],
+            "evidence_keywords_found": [
+              "created",
+              "tested"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 457.752151,
+            "speed": "reasonable",
+            "working_updates_count": 8
+          }
+        },
+        "validated_at": "2025-10-17T21:52:00.577514"
+      },
+      "completed_at": "2025-10-17T21:52:00.577545"
+    },
+    {
+      "id": "test_suite_builder_core_functions-214600-9710a8",
+      "type": "test_suite_builder_core_functions",
+      "tmux_session": "agent_test_suite_builder_core_functions-214600-9710a8",
+      "parent": "regress_test-214420-f29691",
+      "depth": 2,
+      "status": "completed",
+      "started_at": "2025-10-17T21:46:02.118412",
+      "progress": 100,
+      "last_update": "2025-10-17T21:50:41.360999",
+      "prompt": "BUILD COMPREHENSIVE UNIT TESTS FOR CORE FUNCTIONS\n\nTARGET: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/real_mcp_server.py\n\nYOUR MISSION:\nCreate tests/test_core_functions.py with pytest tes...",
+      "completion_validation": {
+        "confidence": 0.9,
+        "warnings": [
+          "Message contains suspicious phrases: mock - indicates incomplete work"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 13,
+            "progress_entries_count": 4,
+            "findings_count": 2
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 664,
+            "suspicious_phrases_found": [
+              "mock"
+            ],
+            "evidence_keywords_found": [
+              "created",
+              "verified",
+              "fixed"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 279.24227,
+            "speed": "reasonable",
+            "working_updates_count": 3
+          }
+        },
+        "validated_at": "2025-10-17T21:50:41.363687"
+      },
+      "completed_at": "2025-10-17T21:50:41.363719"
+    },
+    {
+      "id": "test_suite_builder_mcp_tools-214602-d147a9",
+      "type": "test_suite_builder_mcp_tools",
+      "tmux_session": "agent_test_suite_builder_mcp_tools-214602-d147a9",
+      "parent": "regress_test-214420-f29691",
+      "depth": 2,
+      "status": "completed",
+      "started_at": "2025-10-17T21:46:04.318236",
+      "progress": 100,
+      "last_update": "2025-10-17T21:56:51.428727",
+      "prompt": "BUILD COMPREHENSIVE INTEGRATION TESTS FOR MCP TOOLS\n\nTARGET: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/real_mcp_server.py\n\nYOUR MISSION:\nCreate tests/test_mcp_tools.py with pytest tests ...",
+      "completion_validation": {
+        "confidence": 0.9,
+        "warnings": [
+          "Message contains suspicious phrases: mock - indicates incomplete work"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 12,
+            "progress_entries_count": 5,
+            "findings_count": 1
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 593,
+            "suspicious_phrases_found": [
+              "mock"
+            ],
+            "evidence_keywords_found": [
+              "created",
+              "verified"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 647.110078,
+            "speed": "reasonable",
+            "working_updates_count": 4
+          }
+        },
+        "validated_at": "2025-10-17T21:56:51.430162"
+      },
+      "completed_at": "2025-10-17T21:56:51.430179"
+    },
+    {
+      "id": "test_suite_builder_project_context-214604-c6c413",
+      "type": "test_suite_builder_project_context",
+      "tmux_session": "agent_test_suite_builder_project_context-214604-c6c413",
+      "parent": "regress_test-214420-f29691",
+      "depth": 2,
+      "status": "completed",
+      "started_at": "2025-10-17T21:46:06.501917",
+      "progress": 100,
+      "last_update": "2025-10-17T21:50:22.743194",
+      "prompt": "BUILD COMPREHENSIVE TESTS FOR PROJECT CONTEXT DETECTION\n\nTARGET: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/real_mcp_server.py\n\nYOUR MISSION:\nCreate tests/test_project_context.py with pyt...",
+      "completion_validation": {
+        "confidence": 1.0,
+        "warnings": [],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 9,
+            "progress_entries_count": 5,
+            "findings_count": 2
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 504,
+            "suspicious_phrases_found": [],
+            "evidence_keywords_found": [
+              "created",
+              "tested",
+              "verified"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 256.24108,
+            "speed": "reasonable",
+            "working_updates_count": 4
+          }
+        },
+        "validated_at": "2025-10-17T21:50:22.745379"
+      },
+      "completed_at": "2025-10-17T21:50:22.745443"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "regress_test-214420-f29691"
+    ],
+    "regress_test-214420-f29691": [
+      "test_suite_builder_core_functions-214600-9710a8",
+      "test_suite_builder_mcp_tools-214602-d147a9",
+      "test_suite_builder_project_context-214604-c6c413"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 4,
+  "active_count": 0,
+  "completed_count": 4,
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2025-10-17T21:44:20.792454",
+    "violations": 0
+  }
+}

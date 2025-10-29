@@ -1,0 +1,261 @@
+═══════════════════════════════════════════════════════════════════════════════
+                     FastMCP TOOL DEPENDENCY DIAGRAM
+                        real_mcp_server.py
+═══════════════════════════════════════════════════════════════════════════════
+
+LEGEND:
+  [T] = @mcp.tool decorated function
+  [R] = @mcp.resource decorated function
+  [H] = Helper function (no decorator)
+  ───> = Function call
+  ═══> = Function call requiring .fn pattern (tool-to-tool)
+  ✓ = Correct implementation
+  ❌ = Bug (missing .fn)
+  ⚠️ = Needs investigation
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              LAYER 0: HELPERS                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    [H] get_comprehensive_task_status (line 1796)
+        │   Purpose: Aggregate all agents' progress/findings
+        │   Reads: JSONL files from workspace
+        │   Returns: Coordination data for all agents
+        │
+        └── Called by: update_agent_progress ✓
+                      report_agent_finding ✓
+                      (both use direct call - CORRECT)
+
+    [H] validate_agent_completion (line 1882)
+        │   Purpose: 4-layer validation of completion claims
+        │   Called by: update_agent_progress (internal)
+        └── No cross-tool dependencies
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        LAYER 1: ENTRY POINT TOOLS                            │
+│                        (No dependencies on other tools)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    [T] create_real_task (line 1100)
+        ├── Creates: Task workspace structure
+        ├── Initializes: AGENT_REGISTRY.json
+        └── Dependencies: None ✓
+
+    [T] deploy_headless_agent (line 1200)
+        ├── Creates: Tmux session for agent
+        ├── Generates: Agent prompt with MCP reporting
+        └── Dependencies: None ✓
+
+    [T] get_real_task_status (line 1500)
+        ├── Reads: AGENT_REGISTRY.json
+        ├── Checks: Tmux session status
+        └── Dependencies: None ✓
+
+    [T] get_agent_output (line 1635)
+        ├── Reads: Tmux session output
+        └── Dependencies: None ✓
+
+    [T] kill_real_agent (line 1699)
+        ├── Kills: Tmux session
+        └── Dependencies: None ✓
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      LAYER 2: COORDINATION TOOLS                             │
+│                  (Call helper functions for aggregation)                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    [T] update_agent_progress (line 2120)
+        │   Purpose: Agents self-report progress
+        │   Writes: {agent_id}_progress.jsonl
+        │   Updates: AGENT_REGISTRY.json
+        │
+        ├── Line 2246: comprehensive_status = get_comprehensive_task_status(task_id)
+        │              └─> [H] get_comprehensive_task_status ✓ CORRECT
+        │                   (Helper function - direct call is correct)
+        │
+        └── Returns: Own update + coordination data
+
+    [T] report_agent_finding (line 2261)
+        │   Purpose: Agents share discoveries
+        │   Writes: {agent_id}_findings.jsonl
+        │
+        ├── Line 2305: comprehensive_status = get_comprehensive_task_status(task_id)
+        │              └─> [H] get_comprehensive_task_status ✓ CORRECT
+        │                   (Helper function - direct call is correct)
+        │
+        └── Returns: Own finding + coordination data
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       LAYER 3: PROXY/DELEGATION TOOLS                        │
+│                      (Call other @mcp.tool functions)                        │
+│                        ⚠️ HIGH RISK - MUST USE .fn                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    [T] spawn_child_agent (line 2321) ❌ CRITICAL BUG
+        │   Purpose: Agents spawn sub-agents
+        │   Type: Proxy/delegation to deploy_headless_agent
+        │
+        └── Line 2336: return deploy_headless_agent(task_id, ...)
+                       │
+                       ══════════════════════════════════════════════════════
+                       ❌ BUG: Missing .fn attribute
+                       ══════════════════════════════════════════════════════
+                       │
+                       └─X─> [T] deploy_headless_agent
+                             └── Error: 'FunctionTool' object is not callable
+
+        MUST FIX TO:
+        └── Line 2336: return deploy_headless_agent.fn(task_id, ...)
+                       │
+                       └═✓═> [T] deploy_headless_agent
+                             └── Works correctly with .fn
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         RESOURCE LAYER: @mcp.resource                        │
+│                  (May call tools - wrapping behavior unknown)                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    [R] list_real_tasks (line 2338)
+        ├── URI: tasks://list
+        └── Dependencies: None ✓
+
+    [R] get_task_resource (line 2352) ⚠️ NEEDS INVESTIGATION
+        │   URI: task://{task_id}/status
+        │
+        └── Line 2355: result = get_real_task_status(task_id)
+                       │
+                       ══════════════════════════════════════════════════════
+                       ⚠️ UNKNOWN: May need .fn attribute
+                       ══════════════════════════════════════════════════════
+                       │
+                       └─?─> [T] get_real_task_status
+                             └── Question: Does @mcp.resource wrap functions
+                                 the same way @mcp.tool does?
+
+        INVESTIGATION NEEDED:
+        - Test if @mcp.resource wraps like @mcp.tool
+        - If yes: Change to get_real_task_status.fn(task_id)
+        - If no: Current implementation is correct
+
+    [R] get_task_progress_timeline (line 2358)
+        ├── URI: task://{task_id}/progress-timeline
+        └── Dependencies: None ✓
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CROSS-TOOL CALL SUMMARY                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Tool-to-Helper Calls (Direct call - NO .fn needed):
+  ✓ update_agent_progress:2246      ───> get_comprehensive_task_status
+  ✓ report_agent_finding:2305       ───> get_comprehensive_task_status
+
+Tool-to-Tool Calls (MUST use .fn):
+  ❌ spawn_child_agent:2336          ═══> deploy_headless_agent (MISSING .fn)
+
+Resource-to-Tool Calls (Unknown - needs investigation):
+  ⚠️ get_task_resource:2355          ───?─> get_real_task_status
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          HIERARCHICAL VIEW                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+MCP SERVER
+│
+├─── HELPERS (Layer 0)
+│    ├── get_comprehensive_task_status (1796)
+│    └── validate_agent_completion (1882)
+│
+├─── TOOLS (Layer 1-3)
+│    │
+│    ├─── Entry Points (Layer 1 - No dependencies)
+│    │    ├── create_real_task (1100)
+│    │    ├── deploy_headless_agent (1200) ← Called by spawn_child_agent ❌
+│    │    ├── get_real_task_status (1500) ← Called by get_task_resource ⚠️
+│    │    ├── get_agent_output (1635)
+│    │    └── kill_real_agent (1699)
+│    │
+│    ├─── Coordination (Layer 2 - Call helpers)
+│    │    ├── update_agent_progress (2120) ───> get_comprehensive_task_status ✓
+│    │    └── report_agent_finding (2261) ───> get_comprehensive_task_status ✓
+│    │
+│    └─── Proxy (Layer 3 - Call other tools)
+│         └── spawn_child_agent (2321) ═══X═> deploy_headless_agent ❌
+│
+└─── RESOURCES
+     ├── list_real_tasks (2338)
+     ├── get_task_resource (2352) ───?─> get_real_task_status ⚠️
+     └── get_task_progress_timeline (2358)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       CIRCULAR DEPENDENCY CHECK                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+✓ NO CIRCULAR DEPENDENCIES DETECTED
+
+The dependency graph forms a clean DAG (Directed Acyclic Graph):
+  - Layer 0 (Helpers) has no dependencies
+  - Layer 1 (Entry Tools) has no cross-tool dependencies
+  - Layer 2 (Coordination) only calls Layer 0
+  - Layer 3 (Proxy) only calls Layer 1
+  - Resources may call Layer 1
+
+This is good architecture - no risk of infinite loops or deadlocks.
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              IMPACT ANALYSIS                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Critical Bug Impact (spawn_child_agent:2336):
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ When agents call: mcp__claude-orchestrator__spawn_child_agent     │
+  │                                                                    │
+  │ Call chain:                                                        │
+  │ 1. Agent → spawn_child_agent MCP tool                             │
+  │ 2. spawn_child_agent → deploy_headless_agent ❌ (missing .fn)     │
+  │ 3. ERROR: 'FunctionTool' object is not callable                   │
+  │                                                                    │
+  │ RESULT: All agent spawning beyond depth=1 is broken               │
+  └────────────────────────────────────────────────────────────────────┘
+
+Medium Risk Impact (get_task_resource:2355):
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ When clients access: task://{task_id}/status resource             │
+  │                                                                    │
+  │ Call chain:                                                        │
+  │ 1. Client → get_task_resource MCP resource                        │
+  │ 2. get_task_resource → get_real_task_status ⚠️ (may need .fn)    │
+  │ 3. UNKNOWN: May fail or work depending on @mcp.resource wrapping  │
+  │                                                                    │
+  │ RESULT: Resource endpoints may be broken - needs testing          │
+  └────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                            END OF DEPENDENCY DIAGRAM
+═══════════════════════════════════════════════════════════════════════════════
