@@ -1,0 +1,5 @@
+{"timestamp": "2025-10-18T21:24:28.024066", "agent_id": "jsonl_test_agent-212417-4b12e2", "status": "working", "message": "Starting JSONL logging verification test", "progress": 0}
+{"timestamp": "2025-10-18T21:24:32.421303", "agent_id": "jsonl_test_agent-212417-4b12e2", "status": "working", "message": "Reached 25% checkpoint - first progress report completed", "progress": 25}
+{"timestamp": "2025-10-18T21:24:36.617351", "agent_id": "jsonl_test_agent-212417-4b12e2", "status": "working", "message": "Reached 50% checkpoint - mid-execution phase completed", "progress": 50}
+{"timestamp": "2025-10-18T21:24:47.100621", "agent_id": "jsonl_test_agent-212417-4b12e2", "status": "working", "message": "Reached 75% checkpoint - finding report completed, preparing final steps", "progress": 75}
+{"timestamp": "2025-10-18T21:24:52.559126", "agent_id": "jsonl_test_agent-212417-4b12e2", "status": "completed", "message": "JSONL logging verification test completed successfully - all checkpoints passed (0%, 25%, 50%, 75%, 100%), finding report verified", "progress": 100}
