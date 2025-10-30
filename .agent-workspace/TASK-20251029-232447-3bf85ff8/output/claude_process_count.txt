@@ -1,0 +1,24 @@
+=== ACTUAL CLAUDE BINARY PROCESSES ===
+      20
+
+=== BREAKDOWN ===
+claude (PID:49294)
+claude (PID:91437)
+claude (PID:51486)
+claude (PID:45831)
+claude (PID:90839)
+claude (PID:91717)
+claude (PID:46560)
+claude (PID:91138)
+claude (PID:49214)
+tmux (PID:46558)
+zsh (PID:91436)
+zsh (PID:91137)
+zsh (PID:49206)
+zsh (PID:46559)
+npm (PID:45806)
+npm (PID:51348)
+npm (PID:34269)
+/bin/zsh (PID:24075)
+/bin/zsh (PID:23540)
+zsh (PID:91716)
