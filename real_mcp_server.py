@@ -49,6 +49,320 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# FILE LOCKING FOR REGISTRY OPERATIONS
+# ============================================================================
+
+class LockedRegistryFile:
+    """
+    Context manager for atomic registry file operations with exclusive locking.
+
+    Prevents race conditions in concurrent registry access by using fcntl-based
+    file locking. Ensures read-modify-write operations are atomic.
+
+    Usage:
+        with LockedRegistryFile(registry_path) as (registry, f):
+            registry['agents'].append(agent_data)
+            registry['total_spawned'] += 1
+            f.seek(0)
+            f.write(json.dumps(registry, indent=2))
+            f.truncate()
+
+    Features:
+    - Exclusive lock (LOCK_EX) blocks other processes until released
+    - Automatic unlock on context exit (even if exception occurs)
+    - Handles lock acquisition failures with retries
+    - Thread-safe and process-safe
+    """
+
+    def __init__(self, path: str, timeout: int = 10, retry_delay: float = 0.1):
+        """
+        Initialize registry file lock manager.
+
+        Args:
+            path: Path to registry JSON file
+            timeout: Maximum seconds to wait for lock acquisition
+            retry_delay: Seconds to wait between lock attempts
+        """
+        self.path = path
+        self.timeout = timeout
+        self.retry_delay = retry_delay
+        self.file = None
+        self.registry = None
+
+    def __enter__(self):
+        """
+        Acquire exclusive lock and load registry.
+
+        Returns:
+            Tuple of (registry_dict, file_handle) for modification
+
+        Raises:
+            TimeoutError: If lock cannot be acquired within timeout
+            FileNotFoundError: If registry file doesn't exist
+            json.JSONDecodeError: If registry is corrupted
+        """
+        start_time = time.time()
+
+        # Open file in read-write mode (must exist)
+        try:
+            self.file = open(self.path, 'r+')
+        except FileNotFoundError:
+            logger.error(f"Registry file not found: {self.path}")
+            raise
+
+        # Try to acquire exclusive lock with timeout
+        while True:
+            try:
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Lock acquired successfully
+                break
+            except (IOError, OSError) as e:
+                if e.errno not in (errno.EACCES, errno.EAGAIN):
+                    # Unexpected error, not a lock conflict
+                    self.file.close()
+                    raise
+
+                # Lock is held by another process
+                elapsed = time.time() - start_time
+                if elapsed >= self.timeout:
+                    self.file.close()
+                    raise TimeoutError(
+                        f"Could not acquire lock on {self.path} after {self.timeout}s. "
+                        f"Another process may be holding it."
+                    )
+
+                # Wait and retry
+                time.sleep(self.retry_delay)
+
+        # Lock acquired - now read and parse registry
+        try:
+            self.file.seek(0)
+            self.registry = json.load(self.file)
+            logger.debug(f"Registry locked and loaded: {self.path}")
+            return self.registry, self.file
+        except json.JSONDecodeError as e:
+            # Registry is corrupted
+            logger.error(f"Corrupted registry JSON in {self.path}: {e}")
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+            self.file.close()
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Release lock and close file.
+
+        Called automatically when exiting 'with' block, even if exception occurred.
+        """
+        if self.file:
+            try:
+                # Always unlock, even if there was an exception
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+                logger.debug(f"Registry unlocked: {self.path}")
+            except Exception as e:
+                logger.error(f"Error unlocking registry {self.path}: {e}")
+            finally:
+                self.file.close()
+
+        # Don't suppress exceptions
+        return False
+
+
+# ============================================================================
+# ATOMIC REGISTRY OPERATIONS
+# ============================================================================
+
+def atomic_add_agent(
+    registry_path: str,
+    agent_data: Dict[str, Any],
+    parent: str
+) -> None:
+    """
+    Atomically add agent to registry with proper count updates.
+
+    Args:
+        registry_path: Path to task registry JSON
+        agent_data: Agent metadata dict to append
+        parent: Parent agent ID for hierarchy tracking
+
+    Raises:
+        TimeoutError: If lock cannot be acquired
+        FileNotFoundError: If registry doesn't exist
+    """
+    with LockedRegistryFile(registry_path) as (registry, f):
+        # Add agent to list
+        registry['agents'].append(agent_data)
+
+        # Increment counters
+        registry['total_spawned'] += 1
+        registry['active_count'] += 1
+
+        # Update hierarchy
+        if parent not in registry['agent_hierarchy']:
+            registry['agent_hierarchy'][parent] = []
+        registry['agent_hierarchy'][parent].append(agent_data['id'])
+
+        # Write back to file
+        f.seek(0)
+        f.write(json.dumps(registry, indent=2))
+        f.truncate()
+
+        logger.info(
+            f"Atomically added agent {agent_data['id']} to registry. "
+            f"Total: {registry['total_spawned']}, Active: {registry['active_count']}"
+        )
+
+
+def atomic_update_agent_status(
+    registry_path: str,
+    agent_id: str,
+    status: str,
+    **extra_fields
+) -> Dict[str, Any]:
+    """
+    Atomically update agent status in registry.
+
+    Args:
+        registry_path: Path to task registry JSON
+        agent_id: Agent ID to update
+        status: New status value
+        **extra_fields: Additional fields to update (e.g., completed_at, progress)
+
+    Returns:
+        Dict with update result and previous status
+
+    Raises:
+        ValueError: If agent not found in registry
+    """
+    active_statuses = ['running', 'working', 'blocked']
+    terminal_statuses = ['completed', 'error', 'terminated']
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        # Find agent
+        agent = None
+        for a in registry['agents']:
+            if a['id'] == agent_id:
+                agent = a
+                break
+
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found in registry")
+
+        previous_status = agent.get('status')
+
+        # Update status and extra fields
+        agent['status'] = status
+        agent['last_update'] = datetime.now().isoformat()
+        for key, value in extra_fields.items():
+            agent[key] = value
+
+        # Update counts if transitioning to terminal state
+        if previous_status in active_statuses and status in terminal_statuses:
+            registry['active_count'] = max(0, registry['active_count'] - 1)
+            if status == 'completed':
+                registry['completed_count'] = registry.get('completed_count', 0) + 1
+
+        # Write back
+        f.seek(0)
+        f.write(json.dumps(registry, indent=2))
+        f.truncate()
+
+        logger.info(
+            f"Atomically updated agent {agent_id}: {previous_status} -> {status}. "
+            f"Active: {registry['active_count']}"
+        )
+
+        return {
+            'success': True,
+            'agent_id': agent_id,
+            'previous_status': previous_status,
+            'new_status': status,
+            'active_count': registry['active_count']
+        }
+
+
+def atomic_increment_counts(registry_path: str, active: int = 0, total: int = 0) -> None:
+    """
+    Atomically increment registry counters.
+
+    Args:
+        registry_path: Path to registry JSON
+        active: Amount to increment active_count by
+        total: Amount to increment total_spawned by
+    """
+    with LockedRegistryFile(registry_path) as (registry, f):
+        registry['active_count'] = registry.get('active_count', 0) + active
+        registry['total_spawned'] = registry.get('total_spawned', 0) + total
+
+        f.seek(0)
+        f.write(json.dumps(registry, indent=2))
+        f.truncate()
+
+        logger.debug(f"Atomically incremented counts: +{active} active, +{total} total")
+
+
+def atomic_decrement_active_count(registry_path: str, amount: int = 1) -> None:
+    """
+    Atomically decrement active agent count.
+
+    Args:
+        registry_path: Path to registry JSON
+        amount: Amount to decrement by (default 1)
+    """
+    with LockedRegistryFile(registry_path) as (registry, f):
+        registry['active_count'] = max(0, registry.get('active_count', 0) - amount)
+
+        f.seek(0)
+        f.write(json.dumps(registry, indent=2))
+        f.truncate()
+
+        logger.debug(f"Atomically decremented active_count by {amount}")
+
+
+def atomic_mark_agents_completed(
+    registry_path: str,
+    agent_ids: List[str]
+) -> int:
+    """
+    Atomically mark multiple agents as completed (for auto-cleanup).
+
+    Args:
+        registry_path: Path to task registry JSON
+        agent_ids: List of agent IDs to mark as completed
+
+    Returns:
+        Number of agents actually marked as completed
+    """
+    if not agent_ids:
+        return 0
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        marked_count = 0
+        completed_at = datetime.now().isoformat()
+
+        for agent in registry['agents']:
+            if agent['id'] in agent_ids and agent['status'] == 'running':
+                agent['status'] = 'completed'
+                agent['completed_at'] = completed_at
+                marked_count += 1
+
+        # Update counts
+        registry['active_count'] = max(0, registry['active_count'] - marked_count)
+        registry['completed_count'] = registry.get('completed_count', 0) + marked_count
+
+        # Write back
+        f.seek(0)
+        f.write(json.dumps(registry, indent=2))
+        f.truncate()
+
+        logger.info(
+            f"Atomically marked {marked_count} agents as completed. "
+            f"Active: {registry['active_count']}"
+        )
+
+        return marked_count
+
+
+# ============================================================================
 # TASK PARAMETER VALIDATION CLASSES
 # ============================================================================
 
@@ -138,6 +452,133 @@ def get_global_registry_path(workspace_base: str = None) -> str:
     if workspace_base is None:
         workspace_base = WORKSPACE_BASE
     return f"{workspace_base}/registry/GLOBAL_REGISTRY.json"
+
+def read_registry_with_lock(registry_path: str, timeout: float = 5.0) -> dict:
+    """
+    Read a registry file with exclusive file locking to prevent race conditions.
+
+    This function uses fcntl.flock to acquire an exclusive lock on the registry file
+    before reading it, preventing concurrent modifications from corrupting the data.
+
+    Args:
+        registry_path: Path to the registry JSON file
+        timeout: Maximum time in seconds to wait for lock acquisition (default: 5.0)
+
+    Returns:
+        Dictionary containing the registry data
+
+    Raises:
+        FileNotFoundError: If the registry file doesn't exist
+        TimeoutError: If unable to acquire lock within timeout period
+        json.JSONDecodeError: If the registry file contains invalid JSON
+    """
+    import time
+    start_time = time.time()
+
+    while True:
+        try:
+            f = open(registry_path, 'r')
+            try:
+                # Try to acquire lock with non-blocking mode in loop for timeout
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    # Lock not available, check timeout
+                    if time.time() - start_time >= timeout:
+                        raise TimeoutError(f"Could not acquire lock on {registry_path} within {timeout}s")
+                    # Release file handle and retry after short delay
+                    f.close()
+                    time.sleep(0.05)  # 50ms delay before retry
+                    continue
+
+                # Lock acquired, read the file
+                registry = json.load(f)
+                return registry
+            finally:
+                # Unlock and close
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except:
+                    pass
+                f.close()
+        except FileNotFoundError:
+            raise
+        except json.JSONDecodeError:
+            raise
+        except Exception as e:
+            logger.error(f"Error reading registry {registry_path}: {e}")
+            raise
+
+def write_registry_with_lock(registry_path: str, registry: dict, timeout: float = 5.0) -> None:
+    """
+    Write a registry file with exclusive file locking to prevent race conditions.
+
+    This function uses fcntl.flock to acquire an exclusive lock on the registry file
+    before writing it, preventing concurrent modifications from corrupting the data.
+
+    Args:
+        registry_path: Path to the registry JSON file
+        registry: Dictionary containing the registry data to write
+        timeout: Maximum time in seconds to wait for lock acquisition (default: 5.0)
+
+    Raises:
+        TimeoutError: If unable to acquire lock within timeout period
+        OSError: If unable to write to the file
+    """
+    import time
+    start_time = time.time()
+
+    while True:
+        try:
+            # Open in r+ mode to allow locking before truncating
+            # This prevents creating a zero-length file if lock fails
+            f = open(registry_path, 'r+')
+            try:
+                # Try to acquire lock with non-blocking mode in loop for timeout
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    # Lock not available, check timeout
+                    if time.time() - start_time >= timeout:
+                        raise TimeoutError(f"Could not acquire lock on {registry_path} within {timeout}s")
+                    # Release file handle and retry after short delay
+                    f.close()
+                    time.sleep(0.05)  # 50ms delay before retry
+                    continue
+
+                # Lock acquired, truncate and write
+                f.seek(0)
+                f.truncate()
+                json.dump(registry, f, indent=2)
+                f.flush()  # Ensure data is written to disk
+                os.fsync(f.fileno())  # Force write to physical storage
+                return
+            finally:
+                # Unlock and close
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except:
+                    pass
+                f.close()
+        except FileNotFoundError:
+            # File doesn't exist yet, create it
+            # Use a+x mode would fail if exists, so use 'w' with O_CREAT
+            f = open(registry_path, 'w')
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                json.dump(registry, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+                return
+            finally:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except:
+                    pass
+                f.close()
+        except Exception as e:
+            logger.error(f"Error writing registry {registry_path}: {e}")
+            raise
 
 def ensure_global_registry(workspace_base: str = None):
     """
@@ -257,6 +698,321 @@ def kill_tmux_session(session_name: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+def list_all_tmux_sessions() -> Dict[str, Any]:
+    """
+    List all active tmux sessions and extract agent session info.
+
+    Returns:
+        Dict with session names, agent IDs, and metadata
+    """
+    try:
+        result = subprocess.run(
+            ['tmux', 'ls', '-F', '#{session_name}'],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            return {'success': False, 'error': 'No tmux sessions found or tmux error', 'sessions': []}
+
+        # Parse tmux output - each line is a session name
+        session_names = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+
+        # Extract agent sessions (start with 'agent_')
+        agent_sessions = {}
+        for session_name in session_names:
+            if session_name.startswith('agent_'):
+                # Extract agent ID from session name: agent_TYPE-TIMESTAMP-HASH
+                agent_id = session_name.replace('agent_', '')
+                agent_sessions[session_name] = {
+                    'agent_id': agent_id,
+                    'session_name': session_name,
+                    'is_agent': True
+                }
+
+        return {
+            'success': True,
+            'total_sessions': len(session_names),
+            'agent_sessions': len(agent_sessions),
+            'sessions': agent_sessions
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Exception listing tmux sessions: {str(e)}',
+            'sessions': {}
+        }
+
+def registry_health_check(registry_path: str) -> Dict[str, Any]:
+    """
+    Compare registry state against actual tmux sessions to detect discrepancies.
+
+    Args:
+        registry_path: Path to AGENT_REGISTRY.json
+
+    Returns:
+        Health report with discrepancies and recommendations
+    """
+    try:
+        # Get actual tmux sessions
+        tmux_result = list_all_tmux_sessions()
+        if not tmux_result['success']:
+            return {
+                'success': False,
+                'error': f"Failed to list tmux sessions: {tmux_result.get('error')}",
+                'healthy': False
+            }
+
+        actual_sessions = set(tmux_result['sessions'].keys())
+
+        # Load registry with file locking
+        with open(registry_path, 'r') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+            registry = json.load(f)
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+        # Analyze agents in registry
+        active_statuses = {'running', 'working', 'blocked'}
+        registry_active_agents = []
+        registry_sessions = set()
+
+        for agent in registry.get('agents', []):
+            if agent.get('status') in active_statuses:
+                registry_active_agents.append(agent)
+                if 'tmux_session' in agent:
+                    registry_sessions.add(agent['tmux_session'])
+
+        # Find discrepancies
+        zombie_agents = []  # In registry as active, but no tmux session
+        orphan_sessions = []  # Tmux session exists, but not in registry
+
+        for agent in registry_active_agents:
+            session = agent.get('tmux_session')
+            if session and session not in actual_sessions:
+                zombie_agents.append({
+                    'agent_id': agent['id'],
+                    'agent_type': agent.get('type'),
+                    'status': agent.get('status'),
+                    'tmux_session': session,
+                    'started_at': agent.get('started_at'),
+                    'last_update': agent.get('last_update')
+                })
+
+        for session in actual_sessions:
+            if session not in registry_sessions:
+                orphan_sessions.append(session)
+
+        # Calculate counts
+        registry_active_count = registry.get('active_count', 0)
+        actual_active_count = len(actual_sessions)
+        count_mismatch = registry_active_count != actual_active_count
+
+        healthy = (
+            len(zombie_agents) == 0 and
+            len(orphan_sessions) == 0 and
+            not count_mismatch
+        )
+
+        return {
+            'success': True,
+            'healthy': healthy,
+            'registry_path': registry_path,
+            'actual_tmux_sessions': actual_active_count,
+            'registry_active_count': registry_active_count,
+            'count_mismatch': count_mismatch,
+            'zombie_agents': zombie_agents,
+            'zombie_count': len(zombie_agents),
+            'orphan_sessions': orphan_sessions,
+            'orphan_count': len(orphan_sessions),
+            'recommendations': generate_health_recommendations(
+                zombie_agents, orphan_sessions, count_mismatch
+            )
+        }
+    except FileNotFoundError:
+        return {
+            'success': False,
+            'error': f'Registry not found: {registry_path}',
+            'healthy': False
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Health check exception: {str(e)}',
+            'healthy': False
+        }
+
+def generate_health_recommendations(zombie_agents, orphan_sessions, count_mismatch):
+    """Generate actionable recommendations based on health check results"""
+    recommendations = []
+
+    if zombie_agents:
+        recommendations.append({
+            'severity': 'high',
+            'issue': f'{len(zombie_agents)} zombie agents detected',
+            'action': 'Run validate_and_repair_registry() to mark zombies as terminated',
+            'details': 'Agents marked as active/working but tmux sessions do not exist'
+        })
+
+    if orphan_sessions:
+        recommendations.append({
+            'severity': 'medium',
+            'issue': f'{len(orphan_sessions)} orphan tmux sessions detected',
+            'action': 'Investigate orphan sessions - may be leaked agents or manual sessions',
+            'details': 'Tmux sessions exist but not tracked in registry'
+        })
+
+    if count_mismatch:
+        recommendations.append({
+            'severity': 'high',
+            'issue': 'Active count mismatch between registry and reality',
+            'action': 'Run validate_and_repair_registry() to fix counts',
+            'details': 'Registry active_count does not match actual tmux session count'
+        })
+
+    if not recommendations:
+        recommendations.append({
+            'severity': 'info',
+            'issue': 'No issues detected',
+            'action': 'Registry is healthy',
+            'details': 'All agents in registry match tmux sessions'
+        })
+
+    return recommendations
+
+def validate_and_repair_registry(registry_path: str, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Scan tmux sessions and repair registry discrepancies.
+
+    This function:
+    1. Lists all active tmux sessions
+    2. Compares with agents marked as active in registry
+    3. Marks zombie agents (no tmux session) as 'terminated'
+    4. Fixes active_count to match reality
+    5. Updates total_spawned if needed
+
+    Args:
+        registry_path: Path to AGENT_REGISTRY.json
+        dry_run: If True, report what would be changed without actually changing
+
+    Returns:
+        Repair report with changes made
+    """
+    try:
+        # Get actual tmux sessions
+        tmux_result = list_all_tmux_sessions()
+        if not tmux_result['success']:
+            return {
+                'success': False,
+                'error': f"Failed to list tmux sessions: {tmux_result.get('error')}",
+                'changes_made': 0
+            }
+
+        actual_sessions = set(tmux_result['sessions'].keys())
+
+        # Acquire exclusive lock for modification
+        with open(registry_path, 'r+') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+
+            # Load current registry
+            registry = json.load(f)
+
+            # Track changes
+            changes = {
+                'zombies_terminated': [],
+                'orphans_found': [],
+                'count_corrected': False,
+                'old_active_count': registry.get('active_count', 0),
+                'new_active_count': 0
+            }
+
+            # Process all agents
+            active_statuses = {'running', 'working', 'blocked'}
+            actual_active_count = 0
+
+            for agent in registry.get('agents', []):
+                agent_status = agent.get('status')
+                tmux_session = agent.get('tmux_session')
+
+                # Check if agent claims to be active
+                if agent_status in active_statuses:
+                    # Verify tmux session exists
+                    if tmux_session and tmux_session in actual_sessions:
+                        # Agent is truly active
+                        actual_active_count += 1
+                    else:
+                        # Zombie agent - mark as terminated
+                        if not dry_run:
+                            agent['status'] = 'terminated'
+                            agent['termination_reason'] = 'session_not_found'
+                            agent['terminated_at'] = datetime.now().isoformat()
+                            agent['last_update'] = datetime.now().isoformat()
+
+                        changes['zombies_terminated'].append({
+                            'agent_id': agent['id'],
+                            'agent_type': agent.get('type'),
+                            'old_status': agent_status,
+                            'tmux_session': tmux_session,
+                            'started_at': agent.get('started_at')
+                        })
+
+            # Find orphan sessions
+            registry_sessions = {
+                agent.get('tmux_session')
+                for agent in registry.get('agents', [])
+                if agent.get('tmux_session')
+            }
+
+            for session in actual_sessions:
+                if session not in registry_sessions:
+                    changes['orphans_found'].append(session)
+
+            # Fix active_count
+            if registry.get('active_count', 0) != actual_active_count:
+                changes['count_corrected'] = True
+                changes['new_active_count'] = actual_active_count
+                if not dry_run:
+                    registry['active_count'] = actual_active_count
+            else:
+                changes['new_active_count'] = actual_active_count
+
+            # Write changes if not dry run
+            if not dry_run:
+                f.seek(0)
+                f.write(json.dumps(registry, indent=2))
+                f.truncate()
+                logger.info(f"Registry repaired: {len(changes['zombies_terminated'])} zombies terminated, "
+                           f"active_count corrected to {actual_active_count}")
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+            return {
+                'success': True,
+                'dry_run': dry_run,
+                'registry_path': registry_path,
+                'changes': changes,
+                'zombies_terminated': len(changes['zombies_terminated']),
+                'orphans_found': len(changes['orphans_found']),
+                'count_corrected': changes['count_corrected'],
+                'summary': (
+                    f"{'[DRY RUN] ' if dry_run else ''}Terminated {len(changes['zombies_terminated'])} zombies, "
+                    f"found {len(changes['orphans_found'])} orphans, "
+                    f"{'corrected' if changes['count_corrected'] else 'verified'} active_count "
+                    f"({changes['old_active_count']} -> {changes['new_active_count']})"
+                )
+            }
+    except FileNotFoundError:
+        return {
+            'success': False,
+            'error': f'Registry not found: {registry_path}',
+            'changes_made': 0
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Repair exception: {str(e)}',
+            'changes_made': 0
+        }
 
 def calculate_task_complexity(description: str) -> int:
     """Calculate task complexity to guide orchestration depth"""
@@ -2131,7 +2887,88 @@ def create_real_task(
 
     return result
 
-@mcp.tool  
+def find_existing_agent(task_id: str, agent_type: str, registry: dict, status_filter: list = None) -> dict:
+    """
+    Check if an agent of the same type already exists for this task.
+
+    Args:
+        task_id: Task ID to check
+        agent_type: Type of agent to look for
+        registry: Task registry dictionary
+        status_filter: List of statuses to consider (default: ['running', 'working'])
+
+    Returns:
+        Existing agent dict if found, None otherwise
+    """
+    if status_filter is None:
+        status_filter = ['running', 'working']
+
+    # Search task registry for existing agent of same type
+    for agent in registry.get('agents', []):
+        if agent.get('type') == agent_type and agent.get('status') in status_filter:
+            return agent
+
+    return None
+
+def verify_agent_id_unique(agent_id: str, registry: dict, global_registry: dict) -> bool:
+    """
+    Verify that an agent_id doesn't already exist in task or global registry.
+
+    Args:
+        agent_id: Generated agent ID to verify
+        registry: Task registry dictionary
+        global_registry: Global registry dictionary
+
+    Returns:
+        True if unique, False if already exists
+    """
+    # Check task registry
+    for agent in registry.get('agents', []):
+        if agent.get('id') == agent_id:
+            return False
+
+    # Check global registry
+    if agent_id in global_registry.get('agents', {}):
+        return False
+
+    return True
+
+def generate_unique_agent_id(agent_type: str, registry: dict, global_registry: dict, max_attempts: int = 10) -> str:
+    """
+    Generate a unique agent ID with collision detection.
+
+    Args:
+        agent_type: Type of agent
+        registry: Task registry dictionary
+        global_registry: Global registry dictionary
+        max_attempts: Maximum number of attempts to generate unique ID
+
+    Returns:
+        Unique agent ID
+
+    Raises:
+        RuntimeError: If unable to generate unique ID after max_attempts
+    """
+    for attempt in range(max_attempts):
+        # Generate ID with timestamp and random component
+        timestamp = datetime.now().strftime('%H%M%S')
+        random_suffix = uuid.uuid4().hex[:6]
+        agent_id = f"{agent_type}-{timestamp}-{random_suffix}"
+
+        # Verify uniqueness
+        if verify_agent_id_unique(agent_id, registry, global_registry):
+            return agent_id
+
+        # If collision detected, add microseconds for next attempt
+        if attempt > 0:
+            microseconds = datetime.now().strftime('%f')[:3]
+            agent_id = f"{agent_type}-{timestamp}{microseconds}-{random_suffix}"
+            if verify_agent_id_unique(agent_id, registry, global_registry):
+                return agent_id
+
+    raise RuntimeError(f"Failed to generate unique agent_id after {max_attempts} attempts")
+
+@mcp.tool
 def deploy_headless_agent(
     task_id: str,
     agent_type: str, 
@@ -2183,9 +3020,35 @@ def deploy_headless_agent(
             "success": False,
             "error": f"Max agents reached ({registry['total_spawned']}/{registry['max_agents']})"
         }
-    
-    # Generate agent ID and session name
-    agent_id = f"{agent_type}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+    # Check for duplicate agents (deduplication)
+    existing_agent = find_existing_agent(task_id, agent_type, registry)
+    if existing_agent:
+        logger.warning(f"Agent type '{agent_type}' already exists for task {task_id}: {existing_agent['id']}")
+        return {
+            "success": False,
+            "error": f"Agent of type '{agent_type}' already running for this task",
+            "existing_agent_id": existing_agent['id'],
+            "existing_agent_status": existing_agent['status'],
+            "note": "Use the existing agent or wait for it to complete before spawning a new one"
+        }
+
+    # Load global registry for unique ID verification
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+    global_reg_path = get_global_registry_path(workspace_base)
+    with open(global_reg_path, 'r') as f:
+        global_registry = json.load(f)
+
+    # Generate unique agent ID with collision detection
+    try:
+        agent_id = generate_unique_agent_id(agent_type, registry, global_registry)
+    except RuntimeError as e:
+        logger.error(f"Failed to generate unique agent ID: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
     session_name = f"agent_{agent_id}"
     
     # Calculate agent depth based on parent
@@ -2327,7 +3190,13 @@ You are working independently but can coordinate through the MCP orchestrator sy
 
 BEGIN YOUR WORK NOW!
 """
-    
+
+    # Resource tracking variables for cleanup on failure
+    prompt_file_created = None
+    tmux_session_created = None
+    registry_updated = False
+    global_registry_updated = False
+
     try:
         # Pre-flight checks before deployment
         import shutil
@@ -2365,6 +3234,7 @@ BEGIN YOUR WORK NOW!
         prompt_file = os.path.abspath(f"{workspace}/agent_prompt_{agent_id}.txt")
         with open(prompt_file, 'w') as f:
             f.write(agent_prompt)
+        prompt_file_created = prompt_file  # Track for cleanup on failure
 
         # Run Claude in the calling project's directory, not the orchestrator workspace
         calling_project_dir = os.getcwd()
@@ -2379,24 +3249,34 @@ BEGIN YOUR WORK NOW!
         # Add tee pipe to capture Claude stream-json output to persistent log
         claude_command = f"cd '{calling_project_dir}' && {claude_executable} {claude_flags} '{escaped_prompt}' | tee '{log_file}'"
         
-        # Create the session in the calling project directory 
+        # Create the session in the calling project directory
         session_result = create_tmux_session(
             session_name=session_name,
             command=claude_command,
             working_dir=calling_project_dir
         )
-        
+
         if not session_result["success"]:
             return {
                 "success": False,
                 "error": f"Failed to create agent session: {session_result['error']}"
             }
-        
+
+        tmux_session_created = session_name  # Track for cleanup on failure
+
         # Give Claude a moment to start
         time.sleep(2)
-        
+
         # Check if session is still running
         if not check_tmux_session_exists(session_name):
+            # Clean up orphaned prompt file since tmux session failed
+            if prompt_file_created and os.path.exists(prompt_file_created):
+                try:
+                    os.remove(prompt_file_created)
+                    logger.info(f"Cleaned up orphaned prompt file: {prompt_file_created}")
+                except Exception as cleanup_err:
+                    logger.error(f"Failed to remove orphaned prompt file: {cleanup_err}")
+
             return {
                 "success": False,
                 "error": "Agent session terminated immediately after creation"
@@ -2413,7 +3293,14 @@ BEGIN YOUR WORK NOW!
             "started_at": datetime.now().isoformat(),
             "progress": 0,
             "last_update": datetime.now().isoformat(),
-            "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt
+            "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+            "tracked_files": {
+                "prompt_file": prompt_file,
+                "log_file": log_file,
+                "progress_file": f"{workspace}/progress/{agent_id}_progress.jsonl",
+                "findings_file": f"{workspace}/findings/{agent_id}_findings.jsonl",
+                "deploy_log": f"{workspace}/logs/deploy_{agent_id}.json"
+            }
         }
         
         registry['agents'].append(agent_data)
@@ -2428,7 +3315,8 @@ BEGIN YOUR WORK NOW!
         # Save updated registry
         with open(registry_path, 'w') as f:
             json.dump(registry, f, indent=2)
-        
+        registry_updated = True  # Track for cleanup awareness
+
         # Update global registry (in the same workspace_base as the task)
         workspace_base = get_workspace_base_from_task_workspace(workspace)
         global_reg_path = get_global_registry_path(workspace_base)
@@ -2447,7 +3335,8 @@ BEGIN YOUR WORK NOW!
         
         with open(global_reg_path, 'w') as f:
             json.dump(global_reg, f, indent=2)
-        
+        global_registry_updated = True  # Track for cleanup awareness
+
         # Log successful deployment
         log_entry = {
             "timestamp": datetime.now().isoformat(),
@@ -2475,9 +3364,39 @@ BEGIN YOUR WORK NOW!
         }
         
     except Exception as e:
+        logger.error(f"Agent deployment failed: {e}")
+        logger.error(f"Cleaning up orphaned resources...")
+
+        # Clean up tmux session if it was created
+        if tmux_session_created:
+            try:
+                subprocess.run(['tmux', 'kill-session', '-t', tmux_session_created],
+                             capture_output=True, timeout=5)
+                logger.info(f"Killed orphaned tmux session: {tmux_session_created}")
+            except Exception as cleanup_err:
+                logger.error(f"Failed to kill tmux session: {cleanup_err}")
+
+        # Remove orphaned prompt file
+        if prompt_file_created and os.path.exists(prompt_file_created):
+            try:
+                os.remove(prompt_file_created)
+                logger.info(f"Removed orphaned prompt file: {prompt_file_created}")
+            except Exception as cleanup_err:
+                logger.error(f"Failed to remove prompt file: {cleanup_err}")
+
+        # Rollback registry changes (THIS WILL BE IMPROVED BY file_locking_implementer)
+        # For now, log that registry may be corrupted
+        if registry_updated or global_registry_updated:
+            logger.error(f"Registry was partially updated before failure - may need manual cleanup")
+
         return {
             "success": False,
-            "error": f"Failed to deploy agent: {str(e)}"
+            "error": f"Failed to deploy agent: {str(e)}",
+            "cleanup_performed": True,
+            "resources_cleaned": {
+                "tmux_session": tmux_session_created,
+                "prompt_file": prompt_file_created
+            }
         }
 
 @mcp.tool
@@ -3845,12 +4764,12 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
             "success": False,
             "error": f"Task {task_id} not found in any workspace location"
         }
-    
+
     registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
-    
+
+    # Read registry with file locking to prevent race conditions
+    registry = read_registry_with_lock(registry_path)
+
     # Find agent
     agent = None
     for a in registry['agents']:
@@ -3866,11 +4785,18 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
     
     try:
         session_name = agent.get('tmux_session')
-        killed = False
-        
-        if session_name and check_tmux_session_exists(session_name):
-            killed = kill_tmux_session(session_name)
-        
+
+        # Perform comprehensive resource cleanup using cleanup_agent_resources
+        cleanup_result = cleanup_agent_resources(
+            workspace=workspace,
+            agent_id=agent_id,
+            agent_data=agent,
+            keep_logs=True  # Archive logs instead of deleting
+        )
+
+        # Track cleanup status
+        killed = cleanup_result.get('tmux_session_killed', False)
+
         # Update registry
         previous_status = agent.get('status')
         agent['status'] = 'terminated'
@@ -3881,29 +4807,29 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
         active_statuses = ['running', 'working', 'blocked']
         if previous_status in active_statuses:
             registry['active_count'] = max(0, registry['active_count'] - 1)
-        
-        with open(registry_path, 'w') as f:
-            json.dump(registry, f, indent=2)
-        
+
+        # Write registry with file locking to prevent race conditions
+        write_registry_with_lock(registry_path, registry)
+
         # Update global registry
         try:
             workspace_base = get_workspace_base_from_task_workspace(workspace)
             global_reg_path = get_global_registry_path(workspace_base)
             if os.path.exists(global_reg_path):
-                with open(global_reg_path, 'r') as f:
-                    global_reg = json.load(f)
-                
+                # Read global registry with file locking
+                global_reg = read_registry_with_lock(global_reg_path)
+
                 if agent_id in global_reg.get('agents', {}):
                     global_reg['agents'][agent_id]['status'] = 'terminated'
                     global_reg['agents'][agent_id]['terminated_at'] = datetime.now().isoformat()
                     global_reg['agents'][agent_id]['termination_reason'] = reason
-                    
+
                     # Only decrement if agent was in active status
                     if previous_status in active_statuses:
                         global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
-                    
-                    with open(global_reg_path, 'w') as f:
-                        json.dump(global_reg, f, indent=2)
+
+                    # Write global registry with file locking
+                    write_registry_with_lock(global_reg_path, global_reg)
         except Exception as e:
             logger.error(f"Failed to update global registry on termination: {e}")
         
@@ -3913,7 +4839,8 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
             "tmux_session": session_name,
             "session_killed": killed,
             "reason": reason,
-            "status": "terminated"
+            "status": "terminated",
+            "cleanup": cleanup_result
         }
         
     except Exception as e:
@@ -3921,6 +4848,279 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
             "success": False,
             "error": f"Failed to terminate agent: {str(e)}"
         }
+
+def cleanup_agent_resources(
+    workspace: str,
+    agent_id: str,
+    agent_data: Dict[str, Any],
+    keep_logs: bool = True
+) -> Dict[str, Any]:
+    """
+    Clean up all resources associated with a completed/terminated agent.
+
+    This function performs comprehensive cleanup of:
+    - Tmux session (if still running)
+    - JSONL log file handles (flush and close)
+    - Temporary prompt files
+    - Progress/findings JSONL files (archive or delete)
+    - Verification of zombie processes
+
+    Args:
+        workspace: Task workspace path (e.g., .agent-workspace/TASK-xxx)
+        agent_id: Agent ID to clean up
+        agent_data: Agent registry data dictionary
+        keep_logs: If True, archive logs to workspace/archive/. If False, delete them.
+
+    Returns:
+        Dict with cleanup results for each resource type:
+        {
+            "success": True/False,
+            "tmux_session_killed": True/False,
+            "prompt_file_deleted": True/False,
+            "log_files_archived": True/False,
+            "verified_no_zombies": True/False,
+            "errors": [...],  # List of any errors encountered
+            "archived_files": [...]  # List of archived file paths
+        }
+    """
+    cleanup_results = {
+        "success": True,
+        "tmux_session_killed": False,
+        "prompt_file_deleted": False,
+        "log_files_archived": False,
+        "verified_no_zombies": False,
+        "errors": [],
+        "archived_files": []
+    }
+
+    try:
+        # 1. Kill tmux session if still running with retry mechanism
+        session_name = agent_data.get('tmux_session')
+        if session_name:
+            if check_tmux_session_exists(session_name):
+                logger.info(f"Cleanup: Killing tmux session {session_name} for agent {agent_id}")
+                killed = kill_tmux_session(session_name)
+
+                if killed:
+                    # Retry mechanism with escalating delays to ensure processes terminate
+                    max_retries = 3
+                    retry_delays = [0.5, 1.0, 2.0]  # Escalating delays in seconds
+                    processes_terminated = False
+
+                    for attempt in range(max_retries):
+                        time.sleep(retry_delays[attempt])
+
+                        # Check if processes still exist
+                        try:
+                            ps_result = subprocess.run(
+                                ['ps', 'aux'],
+                                capture_output=True,
+                                text=True,
+                                timeout=5
+                            )
+
+                            if ps_result.returncode == 0:
+                                agent_processes = [
+                                    line for line in ps_result.stdout.split('\n')
+                                    if agent_id in line and 'claude' in line.lower()
+                                ]
+
+                                if len(agent_processes) == 0:
+                                    processes_terminated = True
+                                    cleanup_results["tmux_session_killed"] = True
+                                    logger.info(f"Cleanup: Verified processes terminated for {agent_id} after {attempt + 1} attempt(s)")
+                                    break
+                                elif attempt < max_retries - 1:
+                                    logger.warning(f"Cleanup: Found {len(agent_processes)} processes for {agent_id}, waiting (attempt {attempt + 1}/{max_retries})")
+                                else:
+                                    # Final attempt: escalate to SIGKILL for stubborn processes
+                                    logger.error(f"Cleanup: Processes won't die gracefully, escalating to SIGKILL for {agent_id}")
+                                    killed_count = 0
+                                    for proc_line in agent_processes:
+                                        try:
+                                            # Extract PID (second column in ps aux output)
+                                            pid = int(proc_line.split()[1])
+                                            os.kill(pid, 9)  # SIGKILL
+                                            killed_count += 1
+                                            logger.info(f"Cleanup: Sent SIGKILL to process {pid}")
+                                        except (ValueError, IndexError, ProcessLookupError, PermissionError) as e:
+                                            logger.warning(f"Cleanup: Failed to kill process: {e}")
+
+                                    if killed_count > 0:
+                                        # Wait briefly after SIGKILL
+                                        time.sleep(0.5)
+                                        cleanup_results["tmux_session_killed"] = True
+                                        cleanup_results["escalated_to_sigkill"] = True
+                                        logger.warning(f"Cleanup: Escalated to SIGKILL for {killed_count} processes")
+                            else:
+                                logger.warning(f"Cleanup: ps command failed with return code {ps_result.returncode}")
+                        except subprocess.TimeoutExpired:
+                            logger.warning(f"Cleanup: ps command timed out during retry {attempt + 1}")
+                        except Exception as e:
+                            logger.warning(f"Cleanup: Error checking processes during retry {attempt + 1}: {e}")
+
+                    if not processes_terminated and not cleanup_results.get("escalated_to_sigkill"):
+                        cleanup_results["tmux_session_killed"] = False
+                        cleanup_results["errors"].append(f"Failed to verify process termination for {agent_id} after {max_retries} retries")
+                else:
+                    cleanup_results["tmux_session_killed"] = False
+                    cleanup_results["errors"].append(f"Failed to kill tmux session {session_name}")
+            else:
+                # Session already gone
+                cleanup_results["tmux_session_killed"] = True
+                logger.info(f"Cleanup: Tmux session {session_name} already terminated")
+
+        # 2. Delete temporary prompt file (no longer needed after agent starts)
+        prompt_file = os.path.abspath(f"{workspace}/agent_prompt_{agent_id}.txt")
+        if os.path.exists(prompt_file):
+            try:
+                os.remove(prompt_file)
+                cleanup_results["prompt_file_deleted"] = True
+                logger.info(f"Cleanup: Deleted prompt file {prompt_file}")
+            except Exception as e:
+                error_msg = f"Failed to delete prompt file {prompt_file}: {e}"
+                cleanup_results["errors"].append(error_msg)
+                logger.warning(error_msg)
+        else:
+            # Prompt file already deleted or never existed
+            cleanup_results["prompt_file_deleted"] = True
+
+        # 3. Archive or delete JSONL log files
+        logs_dir = f"{workspace}/logs"
+        progress_dir = f"{workspace}/progress"
+        findings_dir = f"{workspace}/findings"
+
+        files_to_process = [
+            (f"{logs_dir}/{agent_id}_stream.jsonl", "stream log"),
+            (f"{progress_dir}/{agent_id}_progress.jsonl", "progress log"),
+            (f"{findings_dir}/{agent_id}_findings.jsonl", "findings log")
+        ]
+
+        if keep_logs:
+            # Archive logs to workspace/archive/ directory
+            archive_dir = f"{workspace}/archive"
+            try:
+                os.makedirs(archive_dir, exist_ok=True)
+                logger.info(f"Cleanup: Created archive directory {archive_dir}")
+            except Exception as e:
+                error_msg = f"Failed to create archive directory {archive_dir}: {e}"
+                cleanup_results["errors"].append(error_msg)
+                logger.error(error_msg)
+                keep_logs = False  # Fall back to deletion if archiving fails
+
+            if keep_logs:
+                # CRITICAL FIX: Give time for any writing processes to finish and flush buffers
+                # JSONL writers may have buffered data not yet written to disk
+                # Without this sleep, shutil.move can cause data corruption or incomplete logs
+                time.sleep(0.2)
+                logger.info("Cleanup: Waited 200ms for file handles to flush before archiving")
+
+                for src_path, file_type in files_to_process:
+                    if os.path.exists(src_path):
+                        dst_path = f"{archive_dir}/{os.path.basename(src_path)}"
+                        try:
+                            # Verify file is not currently being written to by checking size stability
+                            initial_size = os.path.getsize(src_path)
+                            time.sleep(0.05)  # Brief check
+                            final_size = os.path.getsize(src_path)
+
+                            if initial_size != final_size:
+                                # File still being written, wait a bit more
+                                logger.warning(f"Cleanup: {file_type} still being written, waiting...")
+                                time.sleep(0.2)
+
+                            import shutil
+                            shutil.move(src_path, dst_path)
+                            cleanup_results["archived_files"].append(dst_path)
+                            logger.info(f"Cleanup: Archived {file_type} to {dst_path}")
+                        except OSError as e:
+                            # File locked, permission denied, or other OS-level issues
+                            error_msg = f"OS error archiving {file_type} {src_path}: {e}"
+                            cleanup_results["errors"].append(error_msg)
+                            logger.warning(error_msg)
+                        except Exception as e:
+                            error_msg = f"Failed to archive {file_type} {src_path}: {e}"
+                            cleanup_results["errors"].append(error_msg)
+                            logger.warning(error_msg)
+
+                # Mark successful if at least one file was archived
+                cleanup_results["log_files_archived"] = len(cleanup_results["archived_files"]) > 0
+        else:
+            # Delete log files instead of archiving
+            for src_path, file_type in files_to_process:
+                if os.path.exists(src_path):
+                    try:
+                        os.remove(src_path)
+                        logger.info(f"Cleanup: Deleted {file_type} {src_path}")
+                    except Exception as e:
+                        error_msg = f"Failed to delete {file_type} {src_path}: {e}"
+                        cleanup_results["errors"].append(error_msg)
+                        logger.warning(error_msg)
+
+            cleanup_results["log_files_archived"] = True  # Deletion counts as "processed"
+
+        # 4. Verify no zombie processes remain
+        # Check for lingering Claude processes tied to this agent
+        try:
+            ps_result = subprocess.run(
+                ['ps', 'aux'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if ps_result.returncode == 0:
+                # Look for processes containing both agent_id and 'claude'
+                agent_processes = [
+                    line for line in ps_result.stdout.split('\n')
+                    if agent_id in line and 'claude' in line.lower()
+                ]
+
+                if len(agent_processes) == 0:
+                    cleanup_results["verified_no_zombies"] = True
+                    logger.info(f"Cleanup: Verified no zombie processes for agent {agent_id}")
+                else:
+                    warning_msg = f"Found {len(agent_processes)} lingering processes for agent {agent_id}"
+                    cleanup_results["errors"].append(warning_msg)
+                    cleanup_results["zombie_processes"] = len(agent_processes)
+                    cleanup_results["zombie_process_details"] = agent_processes[:3]  # First 3 for debugging
+                    logger.warning(f"Cleanup: {warning_msg}")
+            else:
+                error_msg = f"ps command failed with return code {ps_result.returncode}"
+                cleanup_results["errors"].append(error_msg)
+                logger.warning(f"Cleanup: {error_msg}")
+        except subprocess.TimeoutExpired:
+            error_msg = "ps command timed out after 5 seconds"
+            cleanup_results["errors"].append(error_msg)
+            logger.warning(f"Cleanup: {error_msg}")
+        except Exception as e:
+            error_msg = f"Failed to verify zombie processes: {e}"
+            cleanup_results["errors"].append(error_msg)
+            logger.warning(f"Cleanup: {error_msg}")
+
+        # 5. Determine overall success
+        # Success if critical operations completed (tmux killed, files processed)
+        critical_operations = [
+            cleanup_results["tmux_session_killed"],
+            cleanup_results["prompt_file_deleted"],
+            cleanup_results["log_files_archived"]
+        ]
+        cleanup_results["success"] = all(critical_operations)
+
+        if cleanup_results["success"]:
+            logger.info(f"Cleanup: Successfully cleaned up all resources for agent {agent_id}")
+        else:
+            logger.warning(f"Cleanup: Partial cleanup for agent {agent_id}, errors: {cleanup_results['errors']}")
+
+        return cleanup_results
+
+    except Exception as e:
+        # Catch-all for unexpected errors
+        error_msg = f"Unexpected error during cleanup: {str(e)}"
+        logger.error(f"Cleanup: {error_msg}")
+        cleanup_results["success"] = False
+        cleanup_results["errors"].append(error_msg)
+        return cleanup_results
 
 def get_minimal_coordination_info(task_id: str) -> Dict[str, Any]:
     """
@@ -4325,6 +5525,30 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
         registry['completed_count'] = registry.get('completed_count', 0) + 1
         logger.info(f"Agent {agent_id} transitioned from {previous_status} to {status}. Active count: {registry['active_count']}")
 
+        # AUTOMATIC RESOURCE CLEANUP: Free computing resources on terminal status
+        # This ensures tmux sessions are killed, file handles closed, and prompt files cleaned up
+        try:
+            cleanup_result = cleanup_agent_resources(
+                workspace=workspace,
+                agent_id=agent_id,
+                agent_data=agent_found,
+                keep_logs=True  # Archive logs instead of deleting for post-mortem analysis
+            )
+            logger.info(f"Auto-cleanup for {agent_id}: tmux_killed={cleanup_result.get('tmux_session_killed')}, "
+                       f"prompt_deleted={cleanup_result.get('prompt_file_deleted')}, "
+                       f"logs_archived={cleanup_result.get('log_files_archived')}, "
+                       f"no_zombies={cleanup_result.get('verified_no_zombies')}")
+
+            # Store cleanup result in agent record for observability
+            if agent_found:
+                agent_found['auto_cleanup_result'] = cleanup_result
+                agent_found['auto_cleanup_timestamp'] = datetime.now().isoformat()
+        except Exception as e:
+            logger.error(f"Auto-cleanup failed for {agent_id}: {e}")
+            if agent_found:
+                agent_found['auto_cleanup_error'] = str(e)
+                agent_found['auto_cleanup_timestamp'] = datetime.now().isoformat()
+
     with open(registry_path, 'w') as f:
         json.dump(registry, f, indent=2)
     
@@ -4540,5 +5764,63 @@ def get_task_progress_timeline(task_id: str) -> str:
         }
     }, indent=2)
 
+def startup_registry_validation():
+    """
+    Run registry validation on MCP server startup.
+
+    This automatically repairs any zombie agents or count mismatches
+    that may have accumulated from previous crashes or race conditions.
+    """
+    logger.info("Running startup registry validation...")
+
+    try:
+        # Find all task registries
+        workspace_base = WORKSPACE_BASE
+        registries_to_check = []
+
+        workspace_path = Path(workspace_base)
+        for task_dir in workspace_path.glob('TASK-*'):
+            registry_file = task_dir / 'AGENT_REGISTRY.json'
+            if registry_file.exists():
+                registries_to_check.append(str(registry_file))
+
+        if not registries_to_check:
+            logger.info("No task registries found - skipping validation")
+            return
+
+        logger.info(f"Found {len(registries_to_check)} registries to validate")
+
+        # Validate and repair each registry
+        total_zombies = 0
+        total_corrections = 0
+
+        for registry_path in registries_to_check:
+            try:
+                result = validate_and_repair_registry(registry_path, dry_run=False)
+                if result['success']:
+                    if result['zombies_terminated'] > 0 or result['count_corrected']:
+                        total_zombies += result['zombies_terminated']
+                        if result['count_corrected']:
+                            total_corrections += 1
+                        logger.info(f"Repaired {registry_path}: {result['summary']}")
+                else:
+                    logger.warning(f"Failed to repair {registry_path}: {result.get('error')}")
+            except Exception as e:
+                logger.error(f"Error validating {registry_path}: {e}")
+                continue
+
+        if total_zombies > 0 or total_corrections > 0:
+            logger.info(f"Startup validation complete: terminated {total_zombies} zombies, "
+                       f"corrected {total_corrections} registries")
+        else:
+            logger.info("Startup validation complete: all registries healthy")
+
+    except Exception as e:
+        logger.error(f"Startup validation failed: {e}")
+        # Don't crash the server if validation fails
+        pass
+
 if __name__ == "__main__":
+    # Run startup validation before serving
+    startup_registry_validation()
     mcp.run()
