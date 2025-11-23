@@ -1,0 +1,1 @@
+{"timestamp": "2025-10-31T20:14:00.277370", "agent_id": "test-agent-verify", "finding_type": "insight", "severity": "low", "message": "MCP server is functioning correctly", "data": {"test": "success", "timestamp": "2025-10-31T20:14:00.277360"}}

@@ -1,7 +1,7 @@
 {
   "created_at": "2025-10-15T18:39:58.107729",
-  "total_tasks": 18,
-  "active_tasks": 18,
+  "total_tasks": 25,
+  "active_tasks": 25,
   "total_agents_spawned": 117,
   "active_agents": 10,
   "max_concurrent_agents": 20,
@@ -107,6 +107,52 @@
       "has_enhanced_context": true,
       "deliverables_count": 6,
       "success_criteria_count": 5
+    },
+    "TASK-20251031-195907-aeccebe0": {
+      "description": "Test cursor-agent deployment - verify it's using cursor CLI",
+      "created_at": "2025-10-31T19:59:07.670328",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false
+    },
+    "TASK-20251031-200201-4386f841": {
+      "description": "VERIFICATION TEST - Check cursor-agent deployment with actual logs",
+      "created_at": "2025-10-31T20:02:01.900837",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false
+    },
+    "TASK-20251031-200650-64347902": {
+      "description": "MCP Connection Test - Automated Testing",
+      "created_at": "2025-10-31T20:06:50.976508",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false
+    },
+    "TASK-20251031-201400-080c2fff": {
+      "description": "MCP Connection Test - Automated Testing",
+      "created_at": "2025-10-31T20:14:00.275879",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false
+    },
+    "TASK-20251031-201542-fd685600": {
+      "description": "Diagnostic test task",
+      "created_at": "2025-10-31T20:15:42.856159",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false
+    },
+    "TASK-20251031-201746-f80f6c99": {
+      "description": "Demo: Test orchestrator end-to-end functionality",
+      "created_at": "2025-10-31T20:17:46.030568",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 3,
+      "success_criteria_count": 0
+    },
+    "TASK-20251031-201832-e3ed04c7": {
+      "description": "Test task to verify Claude Orchestrator MCP is working correctly",
+      "created_at": "2025-10-31T20:18:32.161000",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 2,
+      "success_criteria_count": 2
     }
   },
   "agents": {

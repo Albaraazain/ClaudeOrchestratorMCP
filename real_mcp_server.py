@@ -40,6 +40,16 @@ DEFAULT_MAX_AGENTS = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_AGENTS', '45'))
 DEFAULT_MAX_CONCURRENT = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_CONCURRENT', '20'))
 DEFAULT_MAX_DEPTH = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_DEPTH', '5'))
 
+# Agent Backend Configuration
+# AGENT_BACKEND: Choose between 'claude' (tmux+claude CLI) or 'cursor' (cursor-agent)
+# Example: export CLAUDE_ORCHESTRATOR_BACKEND=claude  # to switch back to claude
+# Default: 'cursor' - uses cursor-agent by default
+AGENT_BACKEND = os.getenv('CLAUDE_ORCHESTRATOR_BACKEND', 'cursor')
+CURSOR_AGENT_PATH = os.getenv('CURSOR_AGENT_PATH', shutil.which('cursor-agent') or '~/.local/bin/cursor-agent')
+CURSOR_AGENT_MODEL = os.getenv('CURSOR_AGENT_MODEL', 'auto')
+CURSOR_AGENT_FLAGS = os.getenv('CURSOR_AGENT_FLAGS', '--approve-mcps --force')
+CURSOR_ENABLE_THINKING_LOGS = os.getenv('CURSOR_ENABLE_THINKING_LOGS', 'false').lower() == 'true'
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -625,6 +635,52 @@ def check_tmux_available():
     except (FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning("tmux not available or not responding")
         return False
+
+def check_cursor_agent_available() -> bool:
+    """
+    Check if cursor-agent is available and functional.
+    
+    Returns:
+        True if cursor-agent is installed and accessible, False otherwise
+    """
+    try:
+        # Expand ~ in path if present
+        cursor_path = os.path.expanduser(CURSOR_AGENT_PATH)
+        
+        # Check if file exists and is executable
+        if not os.path.exists(cursor_path):
+            logger.warning(f"cursor-agent not found at {cursor_path}")
+            return False
+        
+        if not os.access(cursor_path, os.X_OK):
+            logger.warning(f"cursor-agent at {cursor_path} is not executable")
+            return False
+        
+        # Verify it responds to --version
+        result = subprocess.run(
+            [cursor_path, '--version'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            logger.info(f"cursor-agent available: {result.stdout.strip()}")
+            return True
+        else:
+            logger.warning(f"cursor-agent returned non-zero exit code: {result.returncode}")
+            return False
+            
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"cursor-agent not available or not responding: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error checking cursor-agent: {e}")
+        return False
+
+def get_cursor_agent_path() -> str:
+    """Get the full path to cursor-agent executable"""
+    return os.path.expanduser(CURSOR_AGENT_PATH)
 
 def create_tmux_session(session_name: str, command: str, working_dir: str = None) -> Dict[str, Any]:
     """Create a tmux session to run Claude in background."""
@@ -2185,6 +2241,272 @@ def tail_jsonl_efficient(file_path: str, n_lines: int = 100) -> List[Dict[str, A
         return all_lines[-n_lines:] if len(all_lines) > n_lines else all_lines
 
 
+# ============================================================================
+# Cursor CLI Stream-JSON Parser Functions
+# ============================================================================
+
+def parse_cursor_stream_jsonl(log_file: str, include_thinking: bool = None) -> Dict[str, Any]:
+    """
+    Parse cursor-agent stream-json output and extract structured information.
+    
+    Cursor stream-json format emits NDJSON events with types:
+    - system: Initialization metadata
+    - user: User messages
+    - thinking: Internal reasoning (if thinking model used)
+    - assistant: Assistant responses
+    - tool_call: Tool invocations with results
+    - result: Final completion status
+    
+    Args:
+        log_file: Path to cursor-agent stream-json log file
+        include_thinking: Whether to include thinking deltas (defaults to CURSOR_ENABLE_THINKING_LOGS)
+    
+    Returns:
+        Dictionary with parsed information:
+        {
+            "session_id": str,
+            "events": List[Dict],
+            "tool_calls": List[Dict],
+            "assistant_messages": List[str],
+            "thinking_text": str (if include_thinking=True),
+            "final_result": Dict or None,
+            "duration_ms": int,
+            "success": bool,
+            "error": str or None
+        }
+    """
+    if include_thinking is None:
+        include_thinking = CURSOR_ENABLE_THINKING_LOGS
+    
+    if not os.path.exists(log_file):
+        return {
+            "success": False,
+            "error": f"Log file not found: {log_file}"
+        }
+    
+    result = {
+        "session_id": None,
+        "events": [],
+        "tool_calls": [],
+        "assistant_messages": [],
+        "thinking_text": "",
+        "final_result": None,
+        "duration_ms": 0,
+        "success": False,
+        "error": None,
+        "model": None,
+        "cwd": None
+    }
+    
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    event = json.loads(line)
+                    event_type = event.get("type")
+                    
+                    # Extract session_id from any event that has it
+                    if "session_id" in event and not result["session_id"]:
+                        result["session_id"] = event["session_id"]
+                    
+                    # System initialization
+                    if event_type == "system" and event.get("subtype") == "init":
+                        result["model"] = event.get("model")
+                        result["cwd"] = event.get("cwd")
+                        result["events"].append({
+                            "type": "system_init",
+                            "model": event.get("model"),
+                            "cwd": event.get("cwd"),
+                            "permission_mode": event.get("permissionMode")
+                        })
+                    
+                    # Thinking deltas (optional)
+                    elif event_type == "thinking" and include_thinking:
+                        if event.get("subtype") == "delta":
+                            text = event.get("text", "")
+                            if text:
+                                result["thinking_text"] += text
+                        elif event.get("subtype") == "completed":
+                            result["events"].append({
+                                "type": "thinking_completed",
+                                "timestamp_ms": event.get("timestamp_ms")
+                            })
+                    
+                    # Assistant messages
+                    elif event_type == "assistant":
+                        message = event.get("message", {})
+                        content = message.get("content", [])
+                        for item in content:
+                            if item.get("type") == "text":
+                                text = item.get("text", "")
+                                result["assistant_messages"].append(text)
+                                result["events"].append({
+                                    "type": "assistant_message",
+                                    "text": text,
+                                    "timestamp_ms": event.get("timestamp_ms"),
+                                    "model_call_id": event.get("model_call_id")
+                                })
+                    
+                    # Tool calls
+                    elif event_type == "tool_call":
+                        tool_call_info = parse_cursor_tool_call(event)
+                        if tool_call_info:
+                            result["tool_calls"].append(tool_call_info)
+                            result["events"].append({
+                                "type": "tool_call",
+                                "subtype": event.get("subtype"),
+                                "tool_info": tool_call_info,
+                                "timestamp_ms": event.get("timestamp_ms")
+                            })
+                    
+                    # Final result
+                    elif event_type == "result":
+                        result["final_result"] = {
+                            "subtype": event.get("subtype"),
+                            "is_error": event.get("is_error", False),
+                            "duration_ms": event.get("duration_ms", 0),
+                            "result_text": event.get("result", ""),
+                            "request_id": event.get("request_id")
+                        }
+                        result["duration_ms"] = event.get("duration_ms", 0)
+                        result["success"] = event.get("subtype") == "success" and not event.get("is_error", False)
+                        if event.get("is_error"):
+                            result["error"] = event.get("result", "Unknown error")
+                
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Malformed JSON at line {line_num} in {log_file}: {e}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error parsing line {line_num} in {log_file}: {e}")
+                    continue
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error reading cursor log file {log_file}: {e}")
+        return {
+            "success": False,
+            "error": f"Failed to read log file: {e}"
+        }
+
+
+def parse_cursor_tool_call(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Parse a cursor tool_call event and extract relevant information.
+    
+    Args:
+        event: Tool call event from cursor stream-json
+    
+    Returns:
+        Dictionary with tool call info, or None if not parseable
+    """
+    tool_call = event.get("tool_call", {})
+    call_id = event.get("call_id")
+    subtype = event.get("subtype")  # "started" or "completed"
+    
+    # Shell tool calls
+    if "shellToolCall" in tool_call:
+        shell_info = tool_call["shellToolCall"]
+        args = shell_info.get("args", {})
+        result_data = shell_info.get("result", {})
+        
+        info = {
+            "tool_type": "shell",
+            "call_id": call_id,
+            "status": subtype,
+            "command": args.get("command"),
+            "working_directory": args.get("workingDirectory"),
+            "timeout": args.get("timeout"),
+        }
+        
+        # Add result info if completed
+        if subtype == "completed":
+            if "success" in result_data:
+                success = result_data["success"]
+                info.update({
+                    "success": True,
+                    "exit_code": success.get("exitCode"),
+                    "stdout": success.get("stdout", ""),
+                    "stderr": success.get("stderr", ""),
+                    "execution_time_ms": success.get("executionTime")
+                })
+            elif "failure" in result_data:
+                failure = result_data["failure"]
+                info.update({
+                    "success": False,
+                    "exit_code": failure.get("exitCode"),
+                    "stdout": failure.get("stdout", ""),
+                    "stderr": failure.get("stderr", ""),
+                    "execution_time_ms": failure.get("executionTime")
+                })
+        
+        return info
+    
+    # Edit tool calls (file operations)
+    elif "editToolCall" in tool_call:
+        edit_info = tool_call["editToolCall"]
+        args = edit_info.get("args", {})
+        result_data = edit_info.get("result", {})
+        
+        info = {
+            "tool_type": "edit",
+            "call_id": call_id,
+            "status": subtype,
+            "path": args.get("path"),
+        }
+        
+        # Add result info if completed
+        if subtype == "completed" and "success" in result_data:
+            success = result_data["success"]
+            info.update({
+                "success": True,
+                "lines_added": success.get("linesAdded"),
+                "lines_removed": success.get("linesRemoved"),
+                "diff_string": success.get("diffString"),
+                "file_size": len(success.get("afterFullFileContent", ""))
+            })
+        
+        return info
+    
+    # Read tool calls
+    elif "readToolCall" in tool_call:
+        read_info = tool_call["readToolCall"]
+        args = read_info.get("args", {})
+        result_data = read_info.get("result", {})
+        
+        info = {
+            "tool_type": "read",
+            "call_id": call_id,
+            "status": subtype,
+            "path": args.get("path"),
+        }
+        
+        # Add result info if completed
+        if subtype == "completed" and "success" in result_data:
+            success = result_data["success"]
+            info.update({
+                "success": True,
+                "file_size": success.get("fileSize"),
+                "total_lines": success.get("totalLines"),
+                "is_empty": success.get("isEmpty", False)
+            })
+        
+        return info
+    
+    # Unknown tool type
+    else:
+        return {
+            "tool_type": "unknown",
+            "call_id": call_id,
+            "status": subtype,
+            "raw_data": tool_call
+        }
+
+
 def check_disk_space(workspace: str, min_mb: int = 100) -> tuple[bool, float, str]:
     """
     Pre-flight check for disk space before agent deployment.
@@ -2976,7 +3298,40 @@ def deploy_headless_agent(
     parent: str = "orchestrator"
 ) -> Dict[str, Any]:
     """
+    Deploy a headless agent using configured backend (tmux+claude or cursor-agent).
+    
+    Automatically routes to appropriate deployment method based on AGENT_BACKEND config:
+    - 'claude': Uses tmux + claude CLI (original method)
+    - 'cursor': Uses cursor-agent with native process management
+    
+    Args:
+        task_id: Task ID to deploy agent for
+        agent_type: Type of agent (investigator, fixer, etc.)
+        prompt: Instructions for the agent
+        parent: Parent agent ID
+    
+    Returns:
+        Agent deployment result
+    """
+    # Route to appropriate backend
+    if AGENT_BACKEND == 'cursor':
+        logger.info(f"Using cursor-agent backend for deployment")
+        return deploy_cursor_agent(task_id, agent_type, prompt, parent)
+    else:
+        logger.info(f"Using claude+tmux backend for deployment")
+        return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent)
+
+
+def deploy_claude_tmux_agent(
+    task_id: str,
+    agent_type: str, 
+    prompt: str,
+    parent: str = "orchestrator"
+) -> Dict[str, Any]:
+    """
     Deploy a headless Claude agent using tmux for background execution.
+    
+    Original deployment method using tmux sessions and claude CLI.
     
     Args:
         task_id: Task ID to deploy agent for
@@ -3238,7 +3593,7 @@ BEGIN YOUR WORK NOW!
 
         # Run Claude in the calling project's directory, not the orchestrator workspace
         calling_project_dir = os.getcwd()
-        claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'claude')
+        claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'npx -y @anthropic-ai/claude-code')
         claude_flags = os.getenv('CLAUDE_FLAGS', '--print --output-format stream-json --verbose --dangerously-skip-permissions --model sonnet')
 
         # JSONL log file path - unique per agent_id
@@ -3398,6 +3753,434 @@ BEGIN YOUR WORK NOW!
                 "prompt_file": prompt_file_created
             }
         }
+
+
+def deploy_cursor_agent(
+    task_id: str,
+    agent_type: str,
+    prompt: str,
+    parent: str = "orchestrator"
+) -> Dict[str, Any]:
+    """
+    Deploy a headless agent using cursor-agent for background execution.
+    
+    Alternative to tmux+claude deployment, using cursor-agent with:
+    - Native process management (PID tracking instead of tmux)
+    - Stream-JSON output format (structured NDJSON logs)
+    - Built-in session management
+    - Better tool call tracking
+    
+    Args:
+        task_id: Task ID to deploy agent for
+        agent_type: Type of agent (investigator, fixer, etc.)
+        prompt: Instructions for the agent
+        parent: Parent agent ID
+    
+    Returns:
+        Agent deployment result with cursor-specific metadata
+    """
+    if not check_cursor_agent_available():
+        logger.error("cursor-agent not available for agent deployment")
+        return {
+            "success": False,
+            "error": "cursor-agent is not available - required for cursor backend. Install: curl https://cursor.com/install -fsSL | bash"
+        }
+    
+    # Find the task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return {
+            "success": False,
+            "error": f"Task {task_id} not found in any workspace location"
+        }
+    
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
+    
+    # Load registry
+    with open(registry_path, 'r') as f:
+        registry = json.load(f)
+    
+    # Anti-spiral checks
+    if registry['active_count'] >= registry['max_concurrent']:
+        return {
+            "success": False,
+            "error": f"Too many active agents ({registry['active_count']}/{registry['max_concurrent']})"
+        }
+    
+    if registry['total_spawned'] >= registry['max_agents']:
+        return {
+            "success": False,
+            "error": f"Max agents reached ({registry['total_spawned']}/{registry['max_agents']})"
+        }
+    
+    # Check for duplicate agents
+    existing_agent = find_existing_agent(task_id, agent_type, registry)
+    if existing_agent:
+        logger.warning(f"Agent type '{agent_type}' already exists for task {task_id}: {existing_agent['id']}")
+        return {
+            "success": False,
+            "error": f"Agent of type '{agent_type}' already running for this task",
+            "existing_agent_id": existing_agent['id'],
+            "existing_agent_status": existing_agent['status']
+        }
+    
+    # Load global registry for unique ID verification
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+    global_reg_path = get_global_registry_path(workspace_base)
+    with open(global_reg_path, 'r') as f:
+        global_registry = json.load(f)
+    
+    # Generate unique agent ID
+    try:
+        agent_id = generate_unique_agent_id(agent_type, registry, global_registry)
+    except RuntimeError as e:
+        logger.error(f"Failed to generate unique agent ID: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    
+    # Calculate agent depth
+    depth = 1 if parent == "orchestrator" else 2
+    if parent != "orchestrator":
+        with open(registry_path, 'r') as f:
+            registry = json.load(f)
+        for agent in registry['agents']:
+            if agent['id'] == parent:
+                depth = agent.get('depth', 1) + 1
+                break
+    
+    # Load registry for task context
+    with open(registry_path, 'r') as f:
+        task_registry = json.load(f)
+    
+    task_description = task_registry.get('task_description', '')
+    max_depth = task_registry.get('max_depth', 5)
+    orchestration_prompt = create_orchestration_guidance_prompt(agent_type, task_description, depth, max_depth)
+    
+    # Build enrichment context
+    try:
+        enrichment_prompt = format_task_enrichment_prompt(task_registry)
+    except Exception as e:
+        logger.error(f"Error in format_task_enrichment_prompt: {e}")
+        raise
+    
+    # Detect project context
+    client_project_dir = task_registry.get('client_cwd')
+    if not client_project_dir:
+        workspace_parent = os.path.dirname(workspace)
+        if workspace_parent.endswith('.agent-workspace'):
+            client_project_dir = os.path.dirname(workspace_parent)
+        else:
+            client_project_dir = os.getcwd()
+    
+    project_context = detect_project_context(client_project_dir)
+    context_prompt = format_project_context_prompt(project_context)
+    
+    # Get type-specific requirements
+    type_requirements = get_type_specific_requirements(agent_type)
+    
+    # Create agent prompt (same as tmux version)
+    agent_prompt = f"""You are a headless Claude agent in an orchestrator system.
+
+🤖 AGENT IDENTITY:
+- Agent ID: {agent_id}
+- Agent Type: {agent_type}
+- Task ID: {task_id}
+- Parent Agent: {parent}
+- Depth Level: {depth}
+- Workspace: {workspace}
+
+📝 YOUR MISSION:
+{prompt}
+{enrichment_prompt}
+{context_prompt}
+
+{type_requirements}
+
+{orchestration_prompt}
+
+🔗 MCP SELF-REPORTING WITH COORDINATION - You MUST use these MCP functions to report progress:
+
+1. PROGRESS UPDATES (every few minutes):
+```
+mcp__claude-orchestrator__update_agent_progress
+Parameters: 
+- task_id: "{task_id}"
+- agent_id: "{agent_id}"  
+- status: "working" | "blocked" | "completed" | "error"
+- message: "Description of current work"
+- progress: 0-100 (percentage)
+
+RETURNS: Your update confirmation + comprehensive status of ALL agents for coordination!
+```
+
+2. REPORT FINDINGS (whenever you discover something important):
+```
+mcp__claude-orchestrator__report_agent_finding
+Parameters:
+- task_id: "{task_id}"
+- agent_id: "{agent_id}"
+- finding_type: "issue" | "solution" | "insight" | "recommendation"
+- severity: "low" | "medium" | "high" | "critical"  
+- message: "What you discovered"
+- data: {{"any": "additional info"}}
+
+RETURNS: Your finding confirmation + comprehensive status of ALL agents for coordination!
+```
+
+3. SPAWN CHILD AGENTS (if you need specialized help):
+```
+mcp__claude-orchestrator__spawn_child_agent
+Parameters:
+- task_id: "{task_id}"
+- parent_agent_id: "{agent_id}"
+- child_agent_type: "investigator" | "builder" | "fixer" | etc
+- child_prompt: "Specific task for the child agent"
+```
+
+🚨 CRITICAL PROTOCOL:
+1. START by calling update_agent_progress with status="working", progress=0
+2. REGULARLY update progress every few minutes
+3. REPORT key findings as you discover them
+4. SPAWN child agents if you need specialized help
+5. END by calling update_agent_progress with status="completed", progress=100
+
+You are working independently but can coordinate through the MCP orchestrator system.
+
+BEGIN YOUR WORK NOW!
+"""
+    
+    # Resource tracking for cleanup on failure
+    prompt_file_created = None
+    process_started = None
+    log_file_created = None
+    registry_updated = False
+    global_registry_updated = False
+    
+    try:
+        # Pre-flight checks
+        has_space, free_mb, space_error = check_disk_space(workspace, min_mb=100)
+        if not has_space:
+            return {
+                "success": False,
+                "error": space_error
+            }
+        
+        # Create logs directory
+        logs_dir = f"{workspace}/logs"
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
+            # Test write access
+            test_file = f"{logs_dir}/.write_test_{uuid.uuid4().hex[:8]}"
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+        except Exception as e:
+            logger.error(f"Workspace logs directory not writable: {e}")
+            return {
+                "success": False,
+                "error": f"Workspace logs directory not writable: {e}"
+            }
+        
+        # Store agent prompt in file
+        prompt_file = os.path.abspath(f"{workspace}/agent_prompt_{agent_id}.txt")
+        with open(prompt_file, 'w') as f:
+            f.write(agent_prompt)
+        prompt_file_created = prompt_file
+        
+        # Get cursor-agent path and prepare command
+        cursor_path = get_cursor_agent_path()
+        log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
+        log_file_created = log_file
+        
+        # Prepare cursor-agent flags
+        cursor_flags = CURSOR_AGENT_FLAGS.split()
+        model = CURSOR_AGENT_MODEL
+        
+        # Build cursor-agent command
+        cmd = [
+            cursor_path,
+            "-p", agent_prompt,
+            "--output-format", "stream-json",
+            "--model", model
+        ] + cursor_flags
+        
+        logger.info(f"Deploying cursor-agent: {agent_id}")
+        logger.info(f"Command: {' '.join(cmd[:5])}... (prompt truncated)")
+        logger.info(f"Working directory: {client_project_dir}")
+        logger.info(f"Log file: {log_file}")
+        
+        # Start cursor-agent as background process
+        with open(log_file, 'w') as log_f:
+            process = subprocess.Popen(
+                cmd,
+                cwd=client_project_dir,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # Detach from parent
+                preexec_fn=os.setpgrp if hasattr(os, 'setpgrp') else None
+            )
+        
+        process_started = process.pid
+        logger.info(f"cursor-agent started with PID: {process.pid}")
+        
+        # Give process a moment to start
+        time.sleep(2)
+        
+        # Check if process is still running
+        try:
+            process.poll()
+            if process.returncode is not None:
+                # Process died immediately
+                logger.error(f"cursor-agent terminated immediately with exit code: {process.returncode}")
+                
+                # Read log file for error details
+                error_details = ""
+                if os.path.exists(log_file):
+                    with open(log_file, 'r') as f:
+                        error_details = f.read()[:500]
+                
+                # Cleanup
+                if prompt_file_created and os.path.exists(prompt_file_created):
+                    os.remove(prompt_file_created)
+                
+                return {
+                    "success": False,
+                    "error": f"cursor-agent terminated immediately (exit code: {process.returncode})",
+                    "error_details": error_details
+                }
+        except Exception as e:
+            logger.warning(f"Could not check process status: {e}")
+        
+        # Update registry with new agent
+        agent_data = {
+            "id": agent_id,
+            "type": agent_type,
+            "backend": "cursor",  # Mark as cursor-agent deployment
+            "cursor_pid": process.pid,
+            "cursor_session_id": None,  # Will be extracted from logs later
+            "parent": parent,
+            "depth": depth,
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "progress": 0,
+            "last_update": datetime.now().isoformat(),
+            "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+            "tracked_files": {
+                "prompt_file": prompt_file,
+                "log_file": log_file,
+                "progress_file": f"{workspace}/progress/{agent_id}_progress.jsonl",
+                "findings_file": f"{workspace}/findings/{agent_id}_findings.jsonl",
+                "deploy_log": f"{workspace}/logs/deploy_{agent_id}.json"
+            }
+        }
+        
+        registry['agents'].append(agent_data)
+        registry['total_spawned'] += 1
+        registry['active_count'] += 1
+        
+        # Update hierarchy
+        if parent not in registry['agent_hierarchy']:
+            registry['agent_hierarchy'][parent] = []
+        registry['agent_hierarchy'][parent].append(agent_id)
+        
+        # Save updated registry
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=2)
+        registry_updated = True
+        
+        # Update global registry
+        with open(global_reg_path, 'r') as f:
+            global_reg = json.load(f)
+        
+        global_reg['total_agents_spawned'] += 1
+        global_reg['active_agents'] += 1
+        global_reg['agents'][agent_id] = {
+            'task_id': task_id,
+            'type': agent_type,
+            'backend': 'cursor',
+            'parent': parent,
+            'started_at': datetime.now().isoformat(),
+            'cursor_pid': process.pid
+        }
+        
+        with open(global_reg_path, 'w') as f:
+            json.dump(global_reg, f, indent=2)
+        global_registry_updated = True
+        
+        # Log successful deployment
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": "agent_deployed",
+            "agent_id": agent_id,
+            "backend": "cursor",
+            "cursor_pid": process.pid,
+            "cursor_agent_path": cursor_path,
+            "model": model,
+            "command": f"{cursor_path} -p [PROMPT] --output-format stream-json --model {model} {' '.join(cursor_flags)}",
+            "success": True
+        }
+        
+        with open(f"{workspace}/logs/deploy_{agent_id}.json", 'w') as f:
+            json.dump(log_entry, f, indent=2)
+        
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "cursor_pid": process.pid,
+            "type": agent_type,
+            "parent": parent,
+            "task_id": task_id,
+            "status": "deployed",
+            "workspace": workspace,
+            "deployment_method": "cursor-agent",
+            "model": model,
+            "log_file": log_file
+        }
+        
+    except Exception as e:
+        logger.error(f"cursor-agent deployment failed: {e}")
+        logger.error(f"Cleaning up orphaned resources...")
+        
+        # Kill process if it was started
+        if process_started:
+            try:
+                os.kill(process_started, 9)  # SIGKILL
+                logger.info(f"Killed orphaned cursor-agent process: {process_started}")
+            except Exception as cleanup_err:
+                logger.error(f"Failed to kill process: {cleanup_err}")
+        
+        # Remove orphaned files
+        if prompt_file_created and os.path.exists(prompt_file_created):
+            try:
+                os.remove(prompt_file_created)
+                logger.info(f"Removed orphaned prompt file: {prompt_file_created}")
+            except Exception as cleanup_err:
+                logger.error(f"Failed to remove prompt file: {cleanup_err}")
+        
+        if log_file_created and os.path.exists(log_file_created):
+            try:
+                os.remove(log_file_created)
+                logger.info(f"Removed orphaned log file: {log_file_created}")
+            except Exception as cleanup_err:
+                logger.error(f"Failed to remove log file: {cleanup_err}")
+        
+        # Note registry corruption
+        if registry_updated or global_registry_updated:
+            logger.error(f"Registry was partially updated before failure - may need manual cleanup")
+        
+        return {
+            "success": False,
+            "error": f"Failed to deploy cursor-agent: {str(e)}",
+            "cleanup_performed": True,
+            "resources_cleaned": {
+                "cursor_pid": process_started,
+                "prompt_file": prompt_file_created,
+                "log_file": log_file_created
+            }
+        }
+
 
 @mcp.tool
 def get_real_task_status(task_id: str) -> Dict[str, Any]:
@@ -4499,9 +5282,119 @@ def get_agent_output(
     log_path = f"{workspace}/logs/{agent_id}_stream.jsonl"
     source = "jsonl_log"
     session_status = "unknown"
+    
+    # Detect backend type for proper parsing
+    backend = agent.get('backend', 'claude')  # Default to claude for backward compatibility
 
     if os.path.exists(log_path):
         try:
+            # Special handling for cursor-agent logs
+            if backend == 'cursor':
+                logger.info(f"Detected cursor-agent log for {agent_id}")
+                
+                # Parse cursor stream-json format
+                parsed_result = parse_cursor_stream_jsonl(log_path, include_thinking=CURSOR_ENABLE_THINKING_LOGS)
+                
+                if not parsed_result.get('success', True):  # parse function returns success=False on error
+                    return {
+                        "success": False,
+                        "error": parsed_result.get('error', 'Failed to parse cursor log'),
+                        "agent_id": agent_id
+                    }
+                
+                # Extract cursor session_id and update agent if not already set
+                cursor_session_id = parsed_result.get('session_id')
+                if cursor_session_id and not agent.get('cursor_session_id'):
+                    agent['cursor_session_id'] = cursor_session_id
+                    # Update registry with session_id
+                    try:
+                        registry = read_registry_with_lock(registry_path)
+                        for a in registry['agents']:
+                            if a['id'] == agent_id:
+                                a['cursor_session_id'] = cursor_session_id
+                                break
+                        write_registry_with_lock(registry_path, registry)
+                    except Exception as e:
+                        logger.warning(f"Failed to update registry with cursor session_id: {e}")
+                
+                # Format output based on requested format
+                if format == "parsed" or format == "jsonl":
+                    # Return rich parsed structure
+                    output = {
+                        "session_id": parsed_result.get('session_id'),
+                        "model": parsed_result.get('model'),
+                        "cwd": parsed_result.get('cwd'),
+                        "events": parsed_result.get('events', []),
+                        "tool_calls": parsed_result.get('tool_calls', []),
+                        "assistant_messages": parsed_result.get('assistant_messages', []),
+                        "thinking_text": parsed_result.get('thinking_text', ''),
+                        "final_result": parsed_result.get('final_result'),
+                        "duration_ms": parsed_result.get('duration_ms', 0),
+                        "success": parsed_result.get('success', False)
+                    }
+                else:  # text format
+                    # Format as human-readable text
+                    text_parts = []
+                    text_parts.append(f"=== Cursor Agent Output ===")
+                    text_parts.append(f"Session ID: {parsed_result.get('session_id')}")
+                    text_parts.append(f"Model: {parsed_result.get('model')}")
+                    text_parts.append(f"Duration: {parsed_result.get('duration_ms')}ms")
+                    text_parts.append("")
+                    
+                    # Assistant messages
+                    for msg in parsed_result.get('assistant_messages', []):
+                        text_parts.append(f"Assistant: {msg}")
+                        text_parts.append("")
+                    
+                    # Tool calls summary
+                    tool_calls = parsed_result.get('tool_calls', [])
+                    if tool_calls:
+                        text_parts.append(f"=== Tool Calls ({len(tool_calls)}) ===")
+                        for tool in tool_calls:
+                            tool_type = tool.get('tool_type')
+                            status = tool.get('status')
+                            if tool_type == 'shell':
+                                text_parts.append(f"Shell [{status}]: {tool.get('command')}")
+                                if status == 'completed':
+                                    text_parts.append(f"  Exit: {tool.get('exit_code')}, Time: {tool.get('execution_time_ms')}ms")
+                                    if tool.get('stdout'):
+                                        text_parts.append(f"  Stdout: {tool.get('stdout')[:200]}")
+                            elif tool_type == 'edit':
+                                text_parts.append(f"Edit [{status}]: {tool.get('path')}")
+                                if status == 'completed':
+                                    text_parts.append(f"  +{tool.get('lines_added')} -{tool.get('lines_removed')} lines")
+                            elif tool_type == 'read':
+                                text_parts.append(f"Read [{status}]: {tool.get('path')}")
+                        text_parts.append("")
+                    
+                    # Final result
+                    final = parsed_result.get('final_result')
+                    if final:
+                        text_parts.append(f"=== Result ===")
+                        text_parts.append(f"Status: {final.get('subtype')}")
+                        text_parts.append(f"Result: {final.get('result_text', '')[:500]}")
+                    
+                    output = '\n'.join(text_parts)
+                
+                return {
+                    "success": True,
+                    "agent_id": agent_id,
+                    "backend": "cursor",
+                    "session_id": parsed_result.get('session_id'),
+                    "session_status": "completed" if parsed_result.get('success') else "error",
+                    "output": output,
+                    "source": "cursor_stream_json",
+                    "format": format,
+                    "metadata": {
+                        "duration_ms": parsed_result.get('duration_ms'),
+                        "event_count": len(parsed_result.get('events', [])),
+                        "tool_call_count": len(parsed_result.get('tool_calls', [])),
+                        "model": parsed_result.get('model'),
+                        "has_thinking": bool(parsed_result.get('thinking_text'))
+                    } if include_metadata else None
+                }
+            
+            # Standard claude/tmux log handling
             # Read lines (with tail if specified)
             if tail and tail > 0:
                 lines = tail_jsonl_efficient(log_path, tail)
@@ -4747,7 +5640,11 @@ def get_agent_output(
 @mcp.tool
 def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual termination") -> Dict[str, Any]:
     """
-    Terminate a real running agent by killing its tmux session.
+    Terminate a real running agent (tmux session or cursor-agent process).
+    
+    Automatically detects backend type and terminates appropriately:
+    - tmux backend: Kills tmux session
+    - cursor backend: Kills process by PID
     
     Args:
         task_id: Task containing the agent
@@ -4784,18 +5681,58 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
         }
     
     try:
-        session_name = agent.get('tmux_session')
+        # Detect backend type
+        backend = agent.get('backend', 'claude')  # Default to claude for backward compatibility
+        
+        if backend == 'cursor':
+            # Cursor-agent: Kill by PID
+            cursor_pid = agent.get('cursor_pid')
+            if not cursor_pid:
+                return {
+                    "success": False,
+                    "error": f"Agent {agent_id} is cursor backend but has no PID"
+                }
+            
+            killed = False
+            try:
+                os.kill(cursor_pid, 9)  # SIGKILL
+                killed = True
+                logger.info(f"Killed cursor-agent process {cursor_pid} for agent {agent_id}")
+            except ProcessLookupError:
+                logger.warning(f"cursor-agent process {cursor_pid} not found (already dead)")
+                killed = True  # Consider it killed if not found
+            except PermissionError:
+                logger.error(f"Permission denied to kill cursor-agent process {cursor_pid}")
+                return {
+                    "success": False,
+                    "error": f"Permission denied to kill process {cursor_pid}"
+                }
+            except Exception as e:
+                logger.error(f"Failed to kill cursor-agent process {cursor_pid}: {e}")
+                return {
+                    "success": False,
+                    "error": f"Failed to kill process: {e}"
+                }
+            
+            cleanup_result = {
+                "cursor_process_killed": killed,
+                "cursor_pid": cursor_pid
+            }
+            
+        else:
+            # Claude/tmux backend: Kill tmux session
+            session_name = agent.get('tmux_session')
 
-        # Perform comprehensive resource cleanup using cleanup_agent_resources
-        cleanup_result = cleanup_agent_resources(
-            workspace=workspace,
-            agent_id=agent_id,
-            agent_data=agent,
-            keep_logs=True  # Archive logs instead of deleting
-        )
+            # Perform comprehensive resource cleanup using cleanup_agent_resources
+            cleanup_result = cleanup_agent_resources(
+                workspace=workspace,
+                agent_id=agent_id,
+                agent_data=agent,
+                keep_logs=True  # Archive logs instead of deleting
+            )
 
-        # Track cleanup status
-        killed = cleanup_result.get('tmux_session_killed', False)
+            # Track cleanup status
+            killed = cleanup_result.get('tmux_session_killed', False)
 
         # Update registry
         previous_status = agent.get('status')

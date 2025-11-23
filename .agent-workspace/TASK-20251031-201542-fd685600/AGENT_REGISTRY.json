@@ -1,0 +1,31 @@
+{
+  "task_id": "TASK-20251031-201542-fd685600",
+  "task_description": "Diagnostic test task",
+  "created_at": "2025-10-31T20:15:42.855869",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251031-201542-fd685600",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "agents": [],
+  "agent_hierarchy": {
+    "orchestrator": []
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 0,
+  "active_count": 0,
+  "completed_count": 0,
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2025-10-31T20:15:42.855877",
+    "violations": 0
+  }
+}
