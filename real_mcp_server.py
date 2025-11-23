@@ -406,17 +406,75 @@ def find_task_workspace(task_id: str) -> str:
     """
     Find the workspace directory for a given task ID.
     Searches in multiple locations:
-    1. Server's WORKSPACE_BASE
-    2. Common project locations (if task was created with client_cwd)
+    1. Server's default WORKSPACE_BASE
+    2. Global registries to find the stored workspace location
+    3. Common project locations (fallback for tasks created with client_cwd)
     
     Returns the workspace path or None if not found.
     """
-    # Check server's default workspace
+    # Check server's default workspace first (fastest path)
     workspace = f"{WORKSPACE_BASE}/{task_id}"
     if os.path.exists(f"{workspace}/AGENT_REGISTRY.json"):
         return workspace
     
-    # Search in common project locations (for tasks created with client_cwd)
+    # Check global registries to find where the task was created
+    # This handles tasks created with client_cwd from different projects
+    potential_registry_locations = [
+        WORKSPACE_BASE,  # Default server location
+    ]
+    
+    # Also check current directory tree for .agent-workspace
+    current_dir = os.getcwd()
+    for _ in range(5):  # Search up to 5 levels up
+        potential_location = os.path.join(current_dir, '.agent-workspace')
+        if os.path.isdir(potential_location) and potential_location not in potential_registry_locations:
+            potential_registry_locations.append(potential_location)
+        parent = os.path.dirname(current_dir)
+        if parent == current_dir:  # Reached root
+            break
+        current_dir = parent
+    
+    # Search through global registries to find the task
+    for registry_base in potential_registry_locations:
+        global_reg_path = f"{registry_base}/registry/GLOBAL_REGISTRY.json"
+        if os.path.exists(global_reg_path):
+            try:
+                with open(global_reg_path, 'r') as f:
+                    global_reg = json.load(f)
+                    
+                # Check if this registry knows about our task
+                if task_id in global_reg.get('tasks', {}):
+                    task_info = global_reg['tasks'][task_id]
+                    
+                    # First, check if the global registry has the workspace location stored
+                    stored_workspace = task_info.get('workspace')
+                    if stored_workspace and os.path.exists(f"{stored_workspace}/AGENT_REGISTRY.json"):
+                        logger.info(f"Found task {task_id} at stored workspace from global registry: {stored_workspace}")
+                        return stored_workspace
+                    
+                    # Otherwise, try the expected location based on this registry's location
+                    candidate = f"{registry_base}/{task_id}"
+                    if os.path.exists(f"{candidate}/AGENT_REGISTRY.json"):
+                        logger.info(f"Found task {task_id} via global registry at {candidate}")
+                        return candidate
+                        
+                    # Also try reading the task registry directly to get stored workspace path
+                    task_reg_path = f"{candidate}/AGENT_REGISTRY.json"
+                    if os.path.exists(task_reg_path):
+                        try:
+                            with open(task_reg_path, 'r') as tf:
+                                task_reg = json.load(tf)
+                                stored_workspace = task_reg.get('workspace')
+                                if stored_workspace and os.path.exists(f"{stored_workspace}/AGENT_REGISTRY.json"):
+                                    logger.info(f"Found task {task_id} at stored workspace from task registry: {stored_workspace}")
+                                    return stored_workspace
+                        except Exception as e:
+                            logger.debug(f"Could not read task registry at {task_reg_path}: {e}")
+            except Exception as e:
+                logger.debug(f"Could not read global registry at {global_reg_path}: {e}")
+                continue
+    
+    # Fallback: Search in common project locations
     # Look for .agent-workspace directories in parent directories
     current_dir = os.getcwd()
     for _ in range(5):  # Search up to 5 levels up
@@ -428,10 +486,6 @@ def find_task_workspace(task_id: str) -> str:
         if parent == current_dir:  # Reached root
             break
         current_dir = parent
-    
-    # Also check if WORKSPACE_BASE contains the task directly
-    if os.path.exists(f"{WORKSPACE_BASE}/{task_id}/AGENT_REGISTRY.json"):
-        return f"{WORKSPACE_BASE}/{task_id}"
     
     return None
 
@@ -2385,7 +2439,372 @@ def parse_cursor_stream_jsonl(log_file: str, include_thinking: bool = None) -> D
                     continue
         
         return result
-        
+
+    except Exception as e:
+        logger.error(f"Error reading cursor log file {log_file}: {e}")
+        return {
+            "success": False,
+            "error": f"Failed to read log file: {e}"
+        }
+
+
+def truncate_content_smart(content: str, max_len: int = 500, keep_tail: int = 100) -> str:
+    """
+    Smart truncation that keeps beginning and end of content.
+
+    Args:
+        content: String to truncate
+        max_len: Maximum total length
+        keep_tail: Chars to preserve at end
+
+    Returns:
+        Truncated string with middle removed if needed
+    """
+    if not content or len(content) <= max_len:
+        return content
+
+    head_len = max_len - keep_tail - 30  # 30 chars for ellipsis marker
+    if head_len < 50:
+        head_len = 50
+        keep_tail = max_len - head_len - 30
+
+    return f"{content[:head_len]}\n... [{len(content) - head_len - keep_tail} chars truncated] ...\n{content[-keep_tail:]}"
+
+
+def truncate_tool_result_smart(tool_info: Dict[str, Any], aggressive: bool = False) -> Dict[str, Any]:
+    """
+    Apply smart truncation to tool call results.
+
+    Args:
+        tool_info: Parsed tool call dictionary
+        aggressive: Use aggressive limits (True for recent logs)
+
+    Returns:
+        Tool info with truncated content
+    """
+    # Truncation limits
+    stdout_limit = 300 if aggressive else 1000
+    stderr_limit = 500  # Keep more stderr (errors are important)
+    file_content_limit = 200 if aggressive else 500
+    diff_limit = 300 if aggressive else 800
+
+    result = tool_info.copy()
+
+    # Truncate stdout
+    if 'stdout' in result and result['stdout']:
+        result['stdout'] = truncate_content_smart(result['stdout'], stdout_limit, 50)
+
+    # Truncate stderr (keep more - errors matter)
+    if 'stderr' in result and result['stderr']:
+        result['stderr'] = truncate_content_smart(result['stderr'], stderr_limit, 100)
+
+    # Truncate file content
+    if 'file_content' in result and result['file_content']:
+        result['file_content'] = truncate_content_smart(result['file_content'], file_content_limit, 50)
+
+    # Truncate diff strings
+    if 'diff_string' in result and result['diff_string']:
+        result['diff_string'] = truncate_content_smart(result['diff_string'], diff_limit, 100)
+
+    return result
+
+
+def truncate_tool_result_content(content: str, is_error: bool, aggressive: bool) -> str:
+    """
+    Intelligently truncate tool result content based on content type.
+
+    Truncation rules:
+    - Errors: Keep more (500 chars) - debugging matters
+    - Read results (file content): HARD truncate (100 chars) - just show it worked
+    - MCP coordination results: Strip task_status, keep success/error only
+    - Grep/Glob results: Keep more (300 chars) - search results useful
+    - Other: Default truncate (150 chars)
+
+    Args:
+        content: Raw tool result content string
+        is_error: Whether this result is an error
+        aggressive: Whether to use aggressive truncation
+
+    Returns:
+        Truncated content string
+    """
+    if not content:
+        return ""
+
+    content_len = len(content)
+
+    # Errors - keep more for debugging
+    if is_error:
+        limit = 500 if aggressive else 1000
+        if content_len <= limit:
+            return content
+        return content[:limit] + f"... [{content_len - limit} more chars]"
+
+    # Try to parse as JSON for smarter handling
+    try:
+        data = json.loads(content)
+
+        # MCP coordination results (update_agent_progress, report_agent_finding)
+        if isinstance(data, dict):
+            # Strip task_status entirely - it's huge and redundant
+            if "task_status" in data:
+                summary = {
+                    "success": data.get("success"),
+                    "agent_id": data.get("agent_id", data.get("own_update", {}).get("agent_id")),
+                }
+                if data.get("own_update"):
+                    summary["status"] = data["own_update"].get("status")
+                    summary["progress"] = data["own_update"].get("progress")
+                if data.get("own_finding"):
+                    summary["finding_type"] = data["own_finding"].get("finding_type")
+                    summary["severity"] = data["own_finding"].get("severity")
+                return f"MCP: {json.dumps(summary)}"
+
+            # get_agent_output results - just show success + agent
+            if "output" in data and "agent_id" in data:
+                output_size = len(str(data.get("output", "")))
+                return f"agent_output: {data.get('agent_id', 'unknown')} ({output_size} chars)"
+
+            # Other success responses
+            if "success" in data:
+                return f"success={data['success']}" + (f" error={data.get('error', '')[:100]}" if not data['success'] else "")
+
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Read tool results (file content with line numbers)
+    if "→" in content[:200] and any(c.isdigit() for c in content[:20]):
+        # This is file content with line numbers like "  123→ code here"
+        lines = content.split('\n')
+        if aggressive:
+            # Just show first 2 lines
+            preview = '\n'.join(lines[:2])[:100]
+            return f"[{len(lines)} lines] {preview}..."
+        else:
+            preview = '\n'.join(lines[:5])[:300]
+            return f"[{len(lines)} lines]\n{preview}..."
+
+    # Grep/Glob results - slightly more generous
+    if "matches found" in content.lower() or "No matches" in content:
+        limit = 200 if aggressive else 400
+        if content_len <= limit:
+            return content
+        return content[:limit] + f"... [{content_len - limit} more]"
+
+    # Default truncation
+    limit = 100 if aggressive else 200
+    if content_len <= limit:
+        return content
+    return content[:limit] + f"... [{content_len - limit} more]"
+
+
+def parse_cursor_stream_jsonl_recent(
+    log_file: str,
+    recent_lines: int = 100,
+    include_thinking: bool = False,
+    aggressive_truncate: bool = True
+) -> Dict[str, Any]:
+    """
+    Parse RECENT cursor-agent stream-json output efficiently.
+
+    This function:
+    1. Reads FIRST line for system init (session_id, model, cwd)
+    2. Tails LAST N lines for recent activity
+    3. Applies smart truncation to tool results
+    4. Skips thinking blocks by default (huge token cost)
+
+    Args:
+        log_file: Path to cursor-agent stream-json log file
+        recent_lines: Number of recent lines to parse (default 100)
+        include_thinking: Include thinking deltas (default False - saves tokens)
+        aggressive_truncate: Apply aggressive content truncation (default True)
+
+    Returns:
+        Dictionary with parsed recent activity:
+        {
+            "session_id": str,
+            "model": str,
+            "cwd": str,
+            "recent_events": List[Dict],  # Recent events only
+            "recent_tool_calls": List[Dict],
+            "recent_messages": List[str],
+            "final_result": Dict or None,
+            "stats": {
+                "total_lines": int,
+                "lines_parsed": int,
+                "truncation_applied": bool
+            },
+            "success": bool
+        }
+    """
+    if not os.path.exists(log_file):
+        return {
+            "success": False,
+            "error": f"Log file not found: {log_file}"
+        }
+
+    result = {
+        "session_id": None,
+        "model": None,
+        "cwd": None,
+        "recent_events": [],
+        "recent_tool_calls": [],
+        "recent_messages": [],
+        "final_result": None,
+        "stats": {
+            "total_lines": 0,
+            "lines_parsed": 0,
+            "truncation_applied": aggressive_truncate
+        },
+        "success": True
+    }
+
+    try:
+        # Step 1: Count total lines and read first line (system init)
+        with open(log_file, 'r', encoding='utf-8') as f:
+            first_line = f.readline().strip()
+            total_lines = 1
+            for _ in f:
+                total_lines += 1
+
+        result["stats"]["total_lines"] = total_lines
+
+        # Parse first line for system init info
+        if first_line:
+            try:
+                first_event = json.loads(first_line)
+                if first_event.get("type") == "system" and first_event.get("subtype") == "init":
+                    result["session_id"] = first_event.get("session_id")
+                    result["model"] = first_event.get("model")
+                    result["cwd"] = first_event.get("cwd")
+            except json.JSONDecodeError:
+                pass
+
+        # Step 2: Tail last N lines efficiently
+        lines_to_read = min(recent_lines, total_lines)
+        recent_raw_lines = []
+
+        with open(log_file, 'rb') as f:
+            # Seek to end and work backwards
+            f.seek(0, 2)  # End of file
+            file_size = f.tell()
+
+            if file_size == 0:
+                return result
+
+            # Read chunks from end until we have enough lines
+            buffer = b''
+            chunk_size = 8192
+            position = file_size
+
+            while len(recent_raw_lines) < lines_to_read and position > 0:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                f.seek(position)
+                chunk = f.read(read_size)
+                buffer = chunk + buffer
+
+                # Split into lines
+                lines = buffer.split(b'\n')
+
+                # Keep incomplete first line in buffer for next iteration
+                if position > 0:
+                    buffer = lines[0]
+                    recent_raw_lines = lines[1:] + recent_raw_lines
+                else:
+                    recent_raw_lines = lines + recent_raw_lines
+
+            # Trim to requested count and remove empty lines
+            recent_raw_lines = [l for l in recent_raw_lines if l.strip()][-lines_to_read:]
+
+        result["stats"]["lines_parsed"] = len(recent_raw_lines)
+
+        # Step 3: Parse recent lines
+        for raw_line in recent_raw_lines:
+            try:
+                line = raw_line.decode('utf-8') if isinstance(raw_line, bytes) else raw_line
+                event = json.loads(line.strip())
+                event_type = event.get("type")
+
+                # Extract session_id if not yet found
+                if "session_id" in event and not result["session_id"]:
+                    result["session_id"] = event["session_id"]
+
+                # Skip thinking by default (huge token cost)
+                if event_type == "thinking" and not include_thinking:
+                    continue
+
+                # Assistant messages - keep full text
+                if event_type == "assistant":
+                    message = event.get("message", {})
+                    content = message.get("content", [])
+                    for item in content:
+                        if item.get("type") == "text":
+                            text = item.get("text", "")
+                            if text:
+                                result["recent_messages"].append(text)
+                                result["recent_events"].append({
+                                    "type": "assistant_message",
+                                    "text": text[:500] if aggressive_truncate else text,
+                                    "timestamp_ms": event.get("timestamp_ms")
+                                })
+
+                # Tool calls - with smart truncation
+                elif event_type == "tool_call":
+                    tool_info = parse_cursor_tool_call(event)
+                    if tool_info:
+                        # Apply smart truncation
+                        truncated_tool = truncate_tool_result_smart(tool_info, aggressive_truncate)
+                        result["recent_tool_calls"].append(truncated_tool)
+                        result["recent_events"].append({
+                            "type": "tool_call",
+                            "subtype": event.get("subtype"),
+                            "tool_info": truncated_tool
+                        })
+
+                # Final result - always include
+                elif event_type == "result":
+                    result["final_result"] = {
+                        "subtype": event.get("subtype"),
+                        "is_error": event.get("is_error", False),
+                        "duration_ms": event.get("duration_ms", 0),
+                        "result_text": truncate_content_smart(event.get("result", ""), 500, 100) if aggressive_truncate else event.get("result", "")
+                    }
+                    result["recent_events"].append({
+                        "type": "result",
+                        "subtype": event.get("subtype"),
+                        "is_error": event.get("is_error", False),
+                        "duration_ms": event.get("duration_ms", 0)
+                    })
+
+                # User messages (tool results) - AGGRESSIVE summarization
+                elif event_type == "user":
+                    msg = event.get("message", {})
+                    content = msg.get("content", [])
+                    for item in content:
+                        if item.get("type") == "tool_result":
+                            tool_use_id = item.get("tool_use_id", "")
+                            is_error = item.get("is_error", False)
+                            raw_content = str(item.get("content", ""))
+
+                            # Smart truncation based on content type
+                            truncated = truncate_tool_result_content(raw_content, is_error, aggressive_truncate)
+
+                            result["recent_events"].append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id[-8:] if tool_use_id else "",
+                                "is_error": is_error,
+                                "preview": truncated
+                            })
+
+            except json.JSONDecodeError:
+                continue
+            except Exception as e:
+                logger.warning(f"Error parsing recent log line: {e}")
+                continue
+
+        return result
+
     except Exception as e:
         logger.error(f"Error reading cursor log file {log_file}: {e}")
         return {
@@ -3184,8 +3603,48 @@ def create_real_task(
         global_reg['tasks'][task_id]['deliverables_count'] = len(task_context.get('expected_deliverables', []))
         global_reg['tasks'][task_id]['success_criteria_count'] = len(task_context.get('success_criteria', []))
     
+    # Store workspace location for cross-project discovery
+    global_reg['tasks'][task_id]['workspace'] = workspace
+    global_reg['tasks'][task_id]['workspace_base'] = workspace_base
+    
     with open(global_reg_path, 'w') as f:
         json.dump(global_reg, f, indent=2)
+    
+    # If task was created in a non-default workspace (client_cwd), 
+    # ALSO register it in the default WORKSPACE_BASE global registry for cross-project discovery
+    if client_cwd and workspace_base != resolve_workspace_variables(WORKSPACE_BASE):
+        try:
+            default_workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
+            ensure_global_registry(default_workspace_base)
+            default_global_reg_path = get_global_registry_path(default_workspace_base)
+            
+            with open(default_global_reg_path, 'r') as f:
+                default_global_reg = json.load(f)
+            
+            # Add task reference with workspace location
+            if task_id not in default_global_reg.get('tasks', {}):
+                default_global_reg.setdefault('tasks', {})[task_id] = {
+                    'description': description,
+                    'created_at': datetime.now().isoformat(),
+                    'status': 'INITIALIZED',
+                    'has_enhanced_context': has_enhanced_context,
+                    'workspace': workspace,  # Store actual workspace location
+                    'workspace_base': workspace_base,
+                    'client_cwd': client_cwd,  # Store client_cwd for reference
+                    'cross_project_reference': True  # Flag this as a reference from another workspace
+                }
+                
+                if has_enhanced_context:
+                    default_global_reg['tasks'][task_id]['deliverables_count'] = len(task_context.get('expected_deliverables', []))
+                    default_global_reg['tasks'][task_id]['success_criteria_count'] = len(task_context.get('success_criteria', []))
+                
+                with open(default_global_reg_path, 'w') as f:
+                    json.dump(default_global_reg, f, indent=2)
+                
+                logger.info(f"Registered task {task_id} in default global registry for cross-project discovery")
+        except Exception as e:
+            logger.warning(f"Failed to register task in default global registry: {e}")
+            # Non-fatal - task is still properly registered in its own workspace
     
     # Build return value with enhanced context info
     result = {
@@ -5190,7 +5649,8 @@ def get_agent_output(
     include_metadata: bool = False,
     max_bytes: Optional[int] = None,
     aggressive_truncate: bool = False,
-    response_format: str = "full"
+    response_format: str = "full",
+    recent_lines: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Get agent output from persistent JSONL log file with filtering and tail support.
@@ -5213,7 +5673,14 @@ def get_agent_output(
                          - "full": Full output with standard/aggressive truncation
                          - "summary": Only errors, status changes, key findings
                          - "compact": Enable aggressive_truncate automatically
+                         - "recent": Use efficient tail-based parsing with smart truncation
                          Default: "full"
+        recent_lines: Number of recent log lines to parse (for cursor backend).
+                      When specified, uses efficient tail-based parsing that:
+                      - Reads only last N lines instead of entire file
+                      - Applies smart truncation to tool results
+                      - Skips thinking blocks (saves tokens)
+                      Default: None (read all). Recommended: 50-200 for monitoring.
 
     Returns:
         Dict with output and metadata
@@ -5227,15 +5694,20 @@ def get_agent_output(
         }
 
     # Validate response_format parameter
-    if response_format not in ["full", "summary", "compact"]:
+    if response_format not in ["full", "summary", "compact", "recent"]:
         return {
             "success": False,
-            "error": f"Invalid response_format '{response_format}'. Must be 'full', 'summary', or 'compact'",
+            "error": f"Invalid response_format '{response_format}'. Must be 'full', 'summary', 'compact', or 'recent'",
             "agent_id": agent_id
         }
 
     # Apply response_format overrides
     if response_format == "compact":
+        aggressive_truncate = True
+    elif response_format == "recent":
+        # Use recent_lines mode with smart defaults
+        if recent_lines is None:
+            recent_lines = 100  # Default for recent mode
         aggressive_truncate = True
     elif response_format == "summary":
         # Summary format will be handled later after reading lines
@@ -5284,24 +5756,115 @@ def get_agent_output(
     session_status = "unknown"
     
     # Detect backend type for proper parsing
-    backend = agent.get('backend', 'claude')  # Default to claude for backward compatibility
+    backend = agent.get('backend', AGENT_BACKEND)  # Default to configured backend (cursor-agent)
 
     if os.path.exists(log_path):
         try:
             # Special handling for cursor-agent logs
             if backend == 'cursor':
                 logger.info(f"Detected cursor-agent log for {agent_id}")
-                
-                # Parse cursor stream-json format
+
+                # Use efficient recent parsing when recent_lines is specified
+                if recent_lines is not None and recent_lines > 0:
+                    logger.info(f"Using recent parsing mode: last {recent_lines} lines")
+                    parsed_result = parse_cursor_stream_jsonl_recent(
+                        log_path,
+                        recent_lines=recent_lines,
+                        include_thinking=False,  # Skip thinking for efficiency
+                        aggressive_truncate=aggressive_truncate
+                    )
+
+                    if not parsed_result.get('success', True):
+                        return {
+                            "success": False,
+                            "error": parsed_result.get('error', 'Failed to parse cursor log'),
+                            "agent_id": agent_id
+                        }
+
+                    # Format recent output
+                    if format == "parsed" or format == "jsonl":
+                        output = {
+                            "session_id": parsed_result.get('session_id'),
+                            "model": parsed_result.get('model'),
+                            "cwd": parsed_result.get('cwd'),
+                            "recent_events": parsed_result.get('recent_events', []),
+                            "recent_tool_calls": parsed_result.get('recent_tool_calls', []),
+                            "recent_messages": parsed_result.get('recent_messages', []),
+                            "final_result": parsed_result.get('final_result'),
+                            "stats": parsed_result.get('stats', {})
+                        }
+                    else:  # text format
+                        text_parts = []
+                        stats = parsed_result.get('stats', {})
+                        text_parts.append(f"=== Recent Agent Activity ({stats.get('lines_parsed', 0)}/{stats.get('total_lines', 0)} lines) ===")
+                        text_parts.append(f"Session: {parsed_result.get('session_id', 'unknown')}")
+                        text_parts.append(f"Model: {parsed_result.get('model', 'unknown')}")
+                        text_parts.append("")
+
+                        # Recent messages
+                        recent_msgs = parsed_result.get('recent_messages', [])
+                        if recent_msgs:
+                            text_parts.append(f"=== Recent Messages ({len(recent_msgs)}) ===")
+                            for msg in recent_msgs[-3:]:  # Last 3 messages
+                                text_parts.append(f"▶ {msg[:300]}{'...' if len(msg) > 300 else ''}")
+                            text_parts.append("")
+
+                        # Recent tool calls
+                        recent_tools = parsed_result.get('recent_tool_calls', [])
+                        if recent_tools:
+                            text_parts.append(f"=== Recent Tool Calls ({len(recent_tools)}) ===")
+                            for tool in recent_tools[-5:]:  # Last 5 tool calls
+                                tool_type = tool.get('tool_type', 'unknown')
+                                status = tool.get('status', 'unknown')
+                                if tool_type == 'shell':
+                                    cmd = tool.get('command', '')[:60]
+                                    text_parts.append(f"Shell [{status}]: {cmd}{'...' if len(tool.get('command', '')) > 60 else ''}")
+                                elif tool_type == 'edit':
+                                    text_parts.append(f"Edit [{status}]: {tool.get('path', 'unknown')}")
+                                elif tool_type == 'read':
+                                    text_parts.append(f"Read [{status}]: {tool.get('path', 'unknown')}")
+                                else:
+                                    text_parts.append(f"{tool_type} [{status}]")
+                            text_parts.append("")
+
+                        # Final result if exists
+                        final = parsed_result.get('final_result')
+                        if final:
+                            text_parts.append(f"=== Result: {final.get('subtype', 'unknown')} ===")
+                            if final.get('is_error'):
+                                text_parts.append(f"ERROR: {final.get('result_text', '')[:200]}")
+                            text_parts.append(f"Duration: {final.get('duration_ms', 0)}ms")
+
+                        output = '\n'.join(text_parts)
+
+                    return {
+                        "success": True,
+                        "agent_id": agent_id,
+                        "backend": "cursor",
+                        "session_id": parsed_result.get('session_id'),
+                        "session_status": "completed" if parsed_result.get('final_result') else "running",
+                        "output": output,
+                        "source": "cursor_stream_json_recent",
+                        "format": format,
+                        "metadata": {
+                            "recent_lines_requested": recent_lines,
+                            "total_lines": parsed_result.get('stats', {}).get('total_lines', 0),
+                            "lines_parsed": parsed_result.get('stats', {}).get('lines_parsed', 0),
+                            "truncation_applied": parsed_result.get('stats', {}).get('truncation_applied', False),
+                            "model": parsed_result.get('model')
+                        } if include_metadata else None
+                    }
+
+                # Full parsing (original behavior)
                 parsed_result = parse_cursor_stream_jsonl(log_path, include_thinking=CURSOR_ENABLE_THINKING_LOGS)
-                
+
                 if not parsed_result.get('success', True):  # parse function returns success=False on error
                     return {
                         "success": False,
                         "error": parsed_result.get('error', 'Failed to parse cursor log'),
                         "agent_id": agent_id
                     }
-                
+
                 # Extract cursor session_id and update agent if not already set
                 cursor_session_id = parsed_result.get('session_id')
                 if cursor_session_id and not agent.get('cursor_session_id'):
@@ -5682,7 +6245,7 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
     
     try:
         # Detect backend type
-        backend = agent.get('backend', 'claude')  # Default to claude for backward compatibility
+        backend = agent.get('backend', AGENT_BACKEND)  # Default to configured backend (cursor-agent)
         
         if backend == 'cursor':
             # Cursor-agent: Kill by PID
