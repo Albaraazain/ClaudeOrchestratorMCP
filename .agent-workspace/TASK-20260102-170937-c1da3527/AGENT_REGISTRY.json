@@ -1,0 +1,56 @@
+{
+  "task_id": "TASK-20260102-170937-c1da3527",
+  "task_description": "Test Python orchestrator is working",
+  "created_at": "2026-01-02T17:09:37.444403",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "agents": [
+    {
+      "id": "test_agent-171131-917870",
+      "type": "test_agent",
+      "tmux_session": "agent_test_agent-171131-917870",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T17:11:33.522945",
+      "progress": 50,
+      "last_update": "2026-01-02T17:13:25.154746",
+      "prompt": "Report progress at 50%, then 100% complete. Report one finding.",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527/agent_prompt_test_agent-171131-917870.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527/logs/test_agent-171131-917870_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527/progress/test_agent-171131-917870_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527/findings/test_agent-171131-917870_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527/logs/deploy_test_agent-171131-917870.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:13:25.154740"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "test_agent-171131-917870"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 1,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-02T17:09:37.444419",
+    "violations": 0
+  }
+}

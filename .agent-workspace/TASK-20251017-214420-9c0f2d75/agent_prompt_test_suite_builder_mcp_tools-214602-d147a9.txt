@@ -72,33 +72,7 @@ DO NOT:
 
 
 📋 AGENT PROTOCOL - SYSTEMATIC APPROACH
-
-🎯 MISSION EXECUTION STEPS:
-1. UNDERSTAND (30% of time):
-   - Read relevant code/documentation to understand context
-   - Identify what exists vs what needs to change
-   - Check project conventions and patterns
-   - Map dependencies and constraints
-
-2. PLAN & IMPLEMENT (40% of time):
-   - Break down the task into specific steps
-   - Consider edge cases and error scenarios
-   - Implement with proper error handling
-   - Follow project coding standards
-
-3. VERIFY & DOCUMENT (30% of time):
-   - Test your changes work correctly
-   - Check for regressions or side effects
-   - Document findings with file:line citations
-   - Provide evidence of completion
-
-✅ SUCCESS CRITERIA - Definition of 'DONE':
-Your work is ONLY complete when:
-- Task requirements fully addressed (not partial)
-- Changes tested and verified working
-- Evidence provided (file paths, test results, findings)
-- No regressions introduced
-- Work follows project patterns and conventions
+Z patterns and conventions
 
 📊 EVIDENCE REQUIRED FOR COMPLETION:
 BEFORE reporting status='completed', you MUST provide:

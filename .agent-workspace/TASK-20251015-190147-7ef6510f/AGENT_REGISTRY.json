@@ -61,7 +61,7 @@
   "max_depth": 5,
   "max_concurrent": 8,
   "total_spawned": 1,
-  "active_count": 1,
+  "active_count": 0,
   "completed_count": 0,
   "orchestration_guidance": {
     "min_specialization_depth": 2,

@@ -55,11 +55,13 @@
       "tmux_session": "agent_jsonl_architecture_planner-215640-c3f469",
       "parent": "orchestrator",
       "depth": 1,
-      "status": "working",
+      "status": "terminated",
       "started_at": "2025-10-17T21:56:42.111923",
       "progress": 20,
-      "last_update": "2025-10-17T21:57:50.252741",
-      "prompt": "You are designing the JSONL logging architecture for agent stream capture.\n\nYOUR MISSION:\n1. Design the JSONL log file structure:\n   - File location: .agent-workspace/TASK-XXX/logs/{agent_id}_stream.j..."
+      "last_update": "2026-01-02T17:11:36.666747",
+      "prompt": "You are designing the JSONL logging architecture for agent stream capture.\n\nYOUR MISSION:\n1. Design the JSONL log file structure:\n   - File location: .agent-workspace/TASK-XXX/logs/{agent_id}_stream.j...",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.666742"
     },
     {
       "id": "api_designer-215642-8a3aa4",
@@ -547,7 +549,7 @@
   "max_depth": 5,
   "max_concurrent": 20,
   "total_spawned": 13,
-  "active_count": 1,
+  "active_count": 0,
   "completed_count": 12,
   "orchestration_guidance": {
     "min_specialization_depth": 2,

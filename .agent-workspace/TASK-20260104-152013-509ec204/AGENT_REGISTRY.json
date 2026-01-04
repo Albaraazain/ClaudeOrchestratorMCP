@@ -1,0 +1,67 @@
+{
+  "task_id": "TASK-20260104-152013-509ec204",
+  "task_description": "Test guidance fields in MCP responses",
+  "created_at": "2026-01-04T15:20:13.889327",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP",
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "phases": [
+    {
+      "id": "phase-7310c932",
+      "order": 1,
+      "name": "Test Phase",
+      "description": "Verify guidance works",
+      "status": "ACTIVE",
+      "created_at": "2026-01-04T15:20:13.889312",
+      "started_at": "2026-01-04T15:20:13.889318"
+    }
+  ],
+  "current_phase_index": 0,
+  "agents": [
+    {
+      "id": "test_agent-152026-17b454",
+      "type": "test_agent",
+      "tmux_session": "agent_test_agent-152026-17b454",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "working",
+      "started_at": "2026-01-04T15:20:28.555761",
+      "progress": 0,
+      "last_update": "2026-01-04T15:20:38.414836",
+      "prompt": "You are a test agent. Simply report that you started, wait 5 seconds, then update progress to completed with status=\"completed\", progress=100, message=\"Test complete\".",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204/agent_prompt_test_agent-152026-17b454.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204/logs/test_agent-152026-17b454_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204/progress/test_agent-152026-17b454_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204/findings/test_agent-152026-17b454_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204/logs/deploy_test_agent-152026-17b454.json"
+      }
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "test_agent-152026-17b454"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 1,
+  "active_count": 1,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-04T15:20:13.889352",
+    "violations": 0
+  }
+}

@@ -116,11 +116,13 @@
       "tmux_session": "agent_builder-185250-e002c2",
       "parent": "orchestrator",
       "depth": 1,
-      "status": "working",
+      "status": "terminated",
       "started_at": "2025-10-15T18:52:52.513109",
       "progress": 70,
-      "last_update": "2025-10-15T18:58:51.580029",
-      "prompt": "You are implementing type-specific prompt functions.\n\n**Your mission:**\nImplement 3 functions + dispatcher based on architect-184624-ab4352's designs.\n\n**MANDATORY STEPS:**\n1. Read real_mcp_server.py ..."
+      "last_update": "2026-01-02T17:11:36.750156",
+      "prompt": "You are implementing type-specific prompt functions.\n\n**Your mission:**\nImplement 3 functions + dispatcher based on architect-184624-ab4352's designs.\n\n**MANDATORY STEPS:**\n1. Read real_mcp_server.py ...",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.750149"
     },
     {
       "id": "builder-185252-556bcb",
@@ -128,11 +130,13 @@
       "tmux_session": "agent_builder-185252-556bcb",
       "parent": "orchestrator",
       "depth": 1,
-      "status": "working",
+      "status": "terminated",
       "started_at": "2025-10-15T18:52:54.703735",
       "progress": 95,
-      "last_update": "2025-10-15T18:58:14.054458",
-      "prompt": "You are implementing validation system.\n\n**Your mission:**\nImplement validate_agent_completion() based on architect-184627-99b952's 4-layer design.\n\n**MANDATORY STEPS:**\n1. Read real_mcp_server.py lin..."
+      "last_update": "2026-01-02T17:11:36.750158",
+      "prompt": "You are implementing validation system.\n\n**Your mission:**\nImplement validate_agent_completion() based on architect-184627-99b952's 4-layer design.\n\n**MANDATORY STEPS:**\n1. Read real_mcp_server.py lin...",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.750157"
     },
     {
       "id": "builder-185254-9d0e32",
@@ -179,7 +183,7 @@
   "max_depth": 5,
   "max_concurrent": 8,
   "total_spawned": 12,
-  "active_count": 8,
+  "active_count": 0,
   "completed_count": 0,
   "orchestration_guidance": {
     "min_specialization_depth": 2,

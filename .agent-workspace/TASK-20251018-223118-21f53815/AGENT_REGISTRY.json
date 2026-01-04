@@ -251,7 +251,8 @@
         },
         "validated_at": "2025-10-18T22:47:49.059669"
       },
-      "completed_at": "2025-10-18T22:47:49.059806"
+      "completed_at": "2025-10-18T22:47:49.059806",
+      "cursor_session_id": "53559b79-33d5-488d-9e87-91d783b093e5"
     }
   ],
   "agent_hierarchy": {

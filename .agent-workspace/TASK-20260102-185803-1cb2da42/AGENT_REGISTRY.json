@@ -1,0 +1,70 @@
+{
+  "task_id": "TASK-20260102-185803-1cb2da42",
+  "task_description": "Phase 1: Analyze use_case_factory.dart and identify all unused imports and warnings",
+  "created_at": "2026-01-02T18:58:03.359033",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P1",
+  "agents": [
+    {
+      "id": "import_analyzer-185812-8680cc",
+      "type": "import_analyzer",
+      "tmux_session": "agent_import_analyzer-185812-8680cc",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:58:14.994153",
+      "progress": 70,
+      "last_update": "2026-01-02T19:01:13.077253",
+      "prompt": "Analyze the use_case_factory.dart file for all unused imports and warnings.\n\nTASK:\n1. Run: flutter analyze lib/core/use_case_factory.dart\n2. Extract ALL warnings (unused imports, dead code, etc.)\n3. C...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42/agent_prompt_import_analyzer-185812-8680cc.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42/logs/import_analyzer-185812-8680cc_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42/progress/import_analyzer-185812-8680cc_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42/findings/import_analyzer-185812-8680cc_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42/logs/deploy_import_analyzer-185812-8680cc.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T19:01:13.077245"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "import_analyzer-185812-8680cc"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 1,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-02T18:58:03.359044",
+    "violations": 0
+  },
+  "task_context": {
+    "background_context": "The use_case_factory.dart file compiles but has ~20 unused import warnings. Need systematic cleanup. This is Phase 1 of a 3-phase approach: 1) Analyze issues, 2) Fix issues, 3) Verify.",
+    "expected_deliverables": [
+      "Complete list of unused imports with line numbers",
+      "Analysis of which imports can be safely removed vs need to stay"
+    ],
+    "success_criteria": [
+      "Complete mapping of all warnings from flutter analyze",
+      "Clear categorization of fixes needed"
+    ],
+    "relevant_files": [
+      "lib/core/use_case_factory.dart"
+    ]
+  }
+}

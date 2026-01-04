@@ -25,30 +25,135 @@ import shutil
 import fcntl
 import errno
 
+# =============================================================================
+# ORCHESTRATOR MODULE IMPORTS (consolidated from modular architecture)
+# =============================================================================
+
+# Registry operations
+from orchestrator.registry import (
+    LockedRegistryFile,
+    AGENT_TERMINAL_STATUSES,
+    AGENT_ACTIVE_STATUSES,
+    atomic_add_agent,
+    atomic_update_agent_status,
+    atomic_increment_counts,
+    atomic_decrement_active_count,
+    atomic_mark_agents_completed,
+    get_global_registry_path,
+    read_registry_with_lock,
+    write_registry_with_lock,
+    ensure_global_registry,
+    check_phase_completion,
+    # Registry health functions
+    registry_health_check,
+    generate_health_recommendations,
+    validate_and_repair_registry,
+)
+
+# Workspace management
+from orchestrator.workspace import (
+    WORKSPACE_BASE,
+    DEFAULT_MAX_CONCURRENT,
+    find_task_workspace,
+    get_workspace_base_from_task_workspace,
+    ensure_workspace,
+    check_disk_space,
+    test_write_access,
+    resolve_workspace_variables,
+)
+
+# Project context detection
+from orchestrator.context import (
+    detect_project_context,
+    format_project_context_prompt,
+)
+
+# Prompt generation
+from orchestrator.prompts import (
+    generate_specialization_recommendations,
+    format_task_enrichment_prompt,
+    create_orchestration_guidance_prompt,
+    get_type_specific_requirements,
+)
+
+# Deployment functions
+from orchestrator.deployment import (
+    check_tmux_available,
+    create_tmux_session,
+    get_tmux_session_output,
+    check_tmux_session_exists,
+    kill_tmux_session,
+    list_all_tmux_sessions,
+    find_existing_agent,
+    verify_agent_id_unique,
+    generate_unique_agent_id,
+)
+
+# Task management
+from orchestrator.tasks import (
+    TaskValidationError,
+    TaskValidationWarning,
+    validate_task_parameters,
+    calculate_task_complexity,
+    extract_text_from_message_content,
+    truncate_conversation_history,
+)
+
+# Status and output processing
+from orchestrator.status import (
+    read_jsonl_lines,
+    tail_jsonl_efficient,
+    filter_lines_regex,
+    parse_jsonl_lines,
+    format_output_by_type,
+    collect_log_metadata,
+    detect_repetitive_content,
+    extract_critical_lines,
+    intelligent_sample_lines,
+    summarize_output,
+    smart_preview_truncate,
+    line_based_truncate,
+    simple_truncate,
+    truncate_coordination_info,
+    detect_and_truncate_binary,
+    is_already_truncated,
+    truncate_json_structure,
+    safe_json_truncate,
+    # Compact formatting
+    format_line_compact,
+    format_lines_compact,
+    # Truncation limits
+    MAX_LINE_LENGTH,
+    MAX_TOOL_RESULT_CONTENT,
+    AGGRESSIVE_LINE_LENGTH,
+    AGGRESSIVE_TOOL_RESULT,
+)
+
+# Lifecycle management
+from orchestrator.lifecycle import (
+    cleanup_agent_resources,
+    get_minimal_coordination_info,
+    get_comprehensive_coordination_info,
+    validate_agent_completion,
+)
+
+# Health monitoring daemon
+from orchestrator.health_daemon import (
+    get_health_daemon,
+    register_task_for_monitoring,
+    unregister_task_from_monitoring,
+    stop_health_daemon
+)
+
 # Initialize MCP server
 mcp = FastMCP("Claude Orchestrator")
 
 # Project context detection cache
 _project_context_cache: Dict[str, Dict[str, Any]] = {}
 
-# Configuration
-# WORKSPACE_BASE: Set via CLAUDE_ORCHESTRATOR_WORKSPACE env var to control where task workspaces are created
-# Example: export CLAUDE_ORCHESTRATOR_WORKSPACE=/Users/yourname/Developer/Projects/yourproject/.agent-workspace
-# Default: Creates .agent-workspace in the MCP server's directory
-WORKSPACE_BASE = os.getenv('CLAUDE_ORCHESTRATOR_WORKSPACE', os.path.abspath('.agent-workspace'))
+# Additional configuration (not in orchestrator module)
 DEFAULT_MAX_AGENTS = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_AGENTS', '45'))
-DEFAULT_MAX_CONCURRENT = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_CONCURRENT', '20'))
 DEFAULT_MAX_DEPTH = int(os.getenv('CLAUDE_ORCHESTRATOR_MAX_DEPTH', '5'))
-
-# Agent Backend Configuration
-# AGENT_BACKEND: Choose between 'claude' (tmux+claude CLI) or 'cursor' (cursor-agent)
-# Example: export CLAUDE_ORCHESTRATOR_BACKEND=claude  # to switch back to claude
-# Default: 'cursor' - uses cursor-agent by default
-AGENT_BACKEND = os.getenv('CLAUDE_ORCHESTRATOR_BACKEND', 'cursor')
-CURSOR_AGENT_PATH = os.getenv('CURSOR_AGENT_PATH', shutil.which('cursor-agent') or '~/.local/bin/cursor-agent')
-CURSOR_AGENT_MODEL = os.getenv('CURSOR_AGENT_MODEL', 'auto')
-CURSOR_AGENT_FLAGS = os.getenv('CURSOR_AGENT_FLAGS', '--approve-mcps --force')
-CURSOR_ENABLE_THINKING_LOGS = os.getenv('CURSOR_ENABLE_THINKING_LOGS', 'false').lower() == 'true'
 
 # Setup logging
 logging.basicConfig(
@@ -59,3316 +164,61 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# FILE LOCKING FOR REGISTRY OPERATIONS
+# NOTES ON MODULAR ARCHITECTURE
 # ============================================================================
-
-class LockedRegistryFile:
-    """
-    Context manager for atomic registry file operations with exclusive locking.
-
-    Prevents race conditions in concurrent registry access by using fcntl-based
-    file locking. Ensures read-modify-write operations are atomic.
-
-    Usage:
-        with LockedRegistryFile(registry_path) as (registry, f):
-            registry['agents'].append(agent_data)
-            registry['total_spawned'] += 1
-            f.seek(0)
-            f.write(json.dumps(registry, indent=2))
-            f.truncate()
-
-    Features:
-    - Exclusive lock (LOCK_EX) blocks other processes until released
-    - Automatic unlock on context exit (even if exception occurs)
-    - Handles lock acquisition failures with retries
-    - Thread-safe and process-safe
-    """
-
-    def __init__(self, path: str, timeout: int = 10, retry_delay: float = 0.1):
-        """
-        Initialize registry file lock manager.
-
-        Args:
-            path: Path to registry JSON file
-            timeout: Maximum seconds to wait for lock acquisition
-            retry_delay: Seconds to wait between lock attempts
-        """
-        self.path = path
-        self.timeout = timeout
-        self.retry_delay = retry_delay
-        self.file = None
-        self.registry = None
-
-    def __enter__(self):
-        """
-        Acquire exclusive lock and load registry.
-
-        Returns:
-            Tuple of (registry_dict, file_handle) for modification
-
-        Raises:
-            TimeoutError: If lock cannot be acquired within timeout
-            FileNotFoundError: If registry file doesn't exist
-            json.JSONDecodeError: If registry is corrupted
-        """
-        start_time = time.time()
-
-        # Open file in read-write mode (must exist)
-        try:
-            self.file = open(self.path, 'r+')
-        except FileNotFoundError:
-            logger.error(f"Registry file not found: {self.path}")
-            raise
-
-        # Try to acquire exclusive lock with timeout
-        while True:
-            try:
-                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                # Lock acquired successfully
-                break
-            except (IOError, OSError) as e:
-                if e.errno not in (errno.EACCES, errno.EAGAIN):
-                    # Unexpected error, not a lock conflict
-                    self.file.close()
-                    raise
-
-                # Lock is held by another process
-                elapsed = time.time() - start_time
-                if elapsed >= self.timeout:
-                    self.file.close()
-                    raise TimeoutError(
-                        f"Could not acquire lock on {self.path} after {self.timeout}s. "
-                        f"Another process may be holding it."
-                    )
-
-                # Wait and retry
-                time.sleep(self.retry_delay)
-
-        # Lock acquired - now read and parse registry
-        try:
-            self.file.seek(0)
-            self.registry = json.load(self.file)
-            logger.debug(f"Registry locked and loaded: {self.path}")
-            return self.registry, self.file
-        except json.JSONDecodeError as e:
-            # Registry is corrupted
-            logger.error(f"Corrupted registry JSON in {self.path}: {e}")
-            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
-            self.file.close()
-            raise
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        Release lock and close file.
-
-        Called automatically when exiting 'with' block, even if exception occurred.
-        """
-        if self.file:
-            try:
-                # Always unlock, even if there was an exception
-                fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
-                logger.debug(f"Registry unlocked: {self.path}")
-            except Exception as e:
-                logger.error(f"Error unlocking registry {self.path}: {e}")
-            finally:
-                self.file.close()
-
-        # Don't suppress exceptions
-        return False
+# All core functionality has been extracted to orchestrator/ modules:
+# - orchestrator.registry: LockedRegistryFile, atomic_*, read/write_registry_with_lock
+# - orchestrator.workspace: find_task_workspace, ensure_workspace, resolve_workspace_variables
+# - orchestrator.deployment: tmux functions, agent ID generation
+# - orchestrator.tasks: TaskValidationError, TaskValidationWarning, validate_task_parameters
+# - orchestrator.status: JSONL parsing, truncation utilities
+# - orchestrator.lifecycle: cleanup_agent_resources, validate_agent_completion
+# - orchestrator.context: detect_project_context, format_project_context_prompt
+# - orchestrator.prompts: get_type_specific_requirements, format_task_enrichment_prompt
+#
+# This file (real_mcp_server.py) now serves as a thin MCP interface layer that:
+# 1. Imports functions from orchestrator modules
+# 2. Defines @mcp.tool() decorated endpoints
+# 3. Wires up the MCP tools to module implementations
+# ============================================================================
 
 
 # ============================================================================
-# ATOMIC REGISTRY OPERATIONS
+# TMUX SESSION MANAGEMENT
 # ============================================================================
 
-def atomic_add_agent(
-    registry_path: str,
-    agent_data: Dict[str, Any],
-    parent: str
-) -> None:
-    """
-    Atomically add agent to registry with proper count updates.
+# NOTE: check_tmux_available, create_tmux_session, get_tmux_session_output,
+# check_tmux_session_exists, kill_tmux_session, list_all_tmux_sessions
+# are now imported from orchestrator.deployment module
 
-    Args:
-        registry_path: Path to task registry JSON
-        agent_data: Agent metadata dict to append
-        parent: Parent agent ID for hierarchy tracking
-
-    Raises:
-        TimeoutError: If lock cannot be acquired
-        FileNotFoundError: If registry doesn't exist
-    """
-    with LockedRegistryFile(registry_path) as (registry, f):
-        # Add agent to list
-        registry['agents'].append(agent_data)
-
-        # Increment counters
-        registry['total_spawned'] += 1
-        registry['active_count'] += 1
-
-        # Update hierarchy
-        if parent not in registry['agent_hierarchy']:
-            registry['agent_hierarchy'][parent] = []
-        registry['agent_hierarchy'][parent].append(agent_data['id'])
-
-        # Write back to file
-        f.seek(0)
-        f.write(json.dumps(registry, indent=2))
-        f.truncate()
-
-        logger.info(
-            f"Atomically added agent {agent_data['id']} to registry. "
-            f"Total: {registry['total_spawned']}, Active: {registry['active_count']}"
-        )
-
-
-def atomic_update_agent_status(
-    registry_path: str,
-    agent_id: str,
-    status: str,
-    **extra_fields
-) -> Dict[str, Any]:
-    """
-    Atomically update agent status in registry.
-
-    Args:
-        registry_path: Path to task registry JSON
-        agent_id: Agent ID to update
-        status: New status value
-        **extra_fields: Additional fields to update (e.g., completed_at, progress)
-
-    Returns:
-        Dict with update result and previous status
-
-    Raises:
-        ValueError: If agent not found in registry
-    """
-    active_statuses = ['running', 'working', 'blocked']
-    terminal_statuses = ['completed', 'error', 'terminated']
-
-    with LockedRegistryFile(registry_path) as (registry, f):
-        # Find agent
-        agent = None
-        for a in registry['agents']:
-            if a['id'] == agent_id:
-                agent = a
-                break
-
-        if not agent:
-            raise ValueError(f"Agent {agent_id} not found in registry")
-
-        previous_status = agent.get('status')
-
-        # Update status and extra fields
-        agent['status'] = status
-        agent['last_update'] = datetime.now().isoformat()
-        for key, value in extra_fields.items():
-            agent[key] = value
-
-        # Update counts if transitioning to terminal state
-        if previous_status in active_statuses and status in terminal_statuses:
-            registry['active_count'] = max(0, registry['active_count'] - 1)
-            if status == 'completed':
-                registry['completed_count'] = registry.get('completed_count', 0) + 1
-
-        # Write back
-        f.seek(0)
-        f.write(json.dumps(registry, indent=2))
-        f.truncate()
-
-        logger.info(
-            f"Atomically updated agent {agent_id}: {previous_status} -> {status}. "
-            f"Active: {registry['active_count']}"
-        )
-
-        return {
-            'success': True,
-            'agent_id': agent_id,
-            'previous_status': previous_status,
-            'new_status': status,
-            'active_count': registry['active_count']
-        }
-
-
-def atomic_increment_counts(registry_path: str, active: int = 0, total: int = 0) -> None:
-    """
-    Atomically increment registry counters.
-
-    Args:
-        registry_path: Path to registry JSON
-        active: Amount to increment active_count by
-        total: Amount to increment total_spawned by
-    """
-    with LockedRegistryFile(registry_path) as (registry, f):
-        registry['active_count'] = registry.get('active_count', 0) + active
-        registry['total_spawned'] = registry.get('total_spawned', 0) + total
-
-        f.seek(0)
-        f.write(json.dumps(registry, indent=2))
-        f.truncate()
-
-        logger.debug(f"Atomically incremented counts: +{active} active, +{total} total")
-
-
-def atomic_decrement_active_count(registry_path: str, amount: int = 1) -> None:
-    """
-    Atomically decrement active agent count.
-
-    Args:
-        registry_path: Path to registry JSON
-        amount: Amount to decrement by (default 1)
-    """
-    with LockedRegistryFile(registry_path) as (registry, f):
-        registry['active_count'] = max(0, registry.get('active_count', 0) - amount)
-
-        f.seek(0)
-        f.write(json.dumps(registry, indent=2))
-        f.truncate()
-
-        logger.debug(f"Atomically decremented active_count by {amount}")
-
-
-def atomic_mark_agents_completed(
-    registry_path: str,
-    agent_ids: List[str]
-) -> int:
-    """
-    Atomically mark multiple agents as completed (for auto-cleanup).
-
-    Args:
-        registry_path: Path to task registry JSON
-        agent_ids: List of agent IDs to mark as completed
-
-    Returns:
-        Number of agents actually marked as completed
-    """
-    if not agent_ids:
-        return 0
-
-    with LockedRegistryFile(registry_path) as (registry, f):
-        marked_count = 0
-        completed_at = datetime.now().isoformat()
-
-        for agent in registry['agents']:
-            if agent['id'] in agent_ids and agent['status'] == 'running':
-                agent['status'] = 'completed'
-                agent['completed_at'] = completed_at
-                marked_count += 1
-
-        # Update counts
-        registry['active_count'] = max(0, registry['active_count'] - marked_count)
-        registry['completed_count'] = registry.get('completed_count', 0) + marked_count
-
-        # Write back
-        f.seek(0)
-        f.write(json.dumps(registry, indent=2))
-        f.truncate()
-
-        logger.info(
-            f"Atomically marked {marked_count} agents as completed. "
-            f"Active: {registry['active_count']}"
-        )
-
-        return marked_count
 
 
 # ============================================================================
-# TASK PARAMETER VALIDATION CLASSES
+# FUNCTIONS MOVED TO MODULES (2026-01-02 Refactoring)
+# ============================================================================
+# The following functions were extracted to orchestrator/ modules:
+# - generate_specialization_recommendations -> orchestrator/prompts.py
+# - parse_markdown_context -> orchestrator/context.py
+# - detect_project_context -> orchestrator/context.py
+# - format_project_context_prompt -> orchestrator/context.py
+# - format_task_enrichment_prompt -> orchestrator/prompts.py
+# - create_orchestration_guidance_prompt -> orchestrator/prompts.py
+# - get_investigator/builder/fixer_requirements -> orchestrator/prompts.py
+# - get_universal_protocol -> orchestrator/prompts.py
+# - get_type_specific_requirements -> orchestrator/prompts.py
+# - resolve_workspace_variables -> orchestrator/workspace.py
+# All are now imported at the top of this file from orchestrator modules.
 # ============================================================================
 
-class TaskValidationError(ValueError):
-    """Raised when task parameters fail critical validation"""
 
-    def __init__(self, field: str, reason: str, value: Any):
-        self.field = field
-        self.reason = reason
-        self.value = value
-        super().__init__(f"Validation failed for '{field}': {reason}")
-
-
-class TaskValidationWarning:
-    """Non-fatal validation issue"""
-
-    def __init__(self, field: str, message: str):
-        self.field = field
-        self.message = message
-        self.timestamp = datetime.now().isoformat()
-
-    def to_dict(self) -> Dict[str, str]:
-        return {
-            'field': self.field,
-            'message': self.message,
-            'timestamp': self.timestamp
-        }
-
-
-def find_task_workspace(task_id: str) -> str:
-    """
-    Find the workspace directory for a given task ID.
-    Searches in multiple locations:
-    1. Server's default WORKSPACE_BASE
-    2. Global registries to find the stored workspace location
-    3. Common project locations (fallback for tasks created with client_cwd)
-    
-    Returns the workspace path or None if not found.
-    """
-    # Check server's default workspace first (fastest path)
-    workspace = f"{WORKSPACE_BASE}/{task_id}"
-    if os.path.exists(f"{workspace}/AGENT_REGISTRY.json"):
-        return workspace
-    
-    # Check global registries to find where the task was created
-    # This handles tasks created with client_cwd from different projects
-    potential_registry_locations = [
-        WORKSPACE_BASE,  # Default server location
-    ]
-    
-    # Also check current directory tree for .agent-workspace
-    current_dir = os.getcwd()
-    for _ in range(5):  # Search up to 5 levels up
-        potential_location = os.path.join(current_dir, '.agent-workspace')
-        if os.path.isdir(potential_location) and potential_location not in potential_registry_locations:
-            potential_registry_locations.append(potential_location)
-        parent = os.path.dirname(current_dir)
-        if parent == current_dir:  # Reached root
-            break
-        current_dir = parent
-    
-    # Search through global registries to find the task
-    for registry_base in potential_registry_locations:
-        global_reg_path = f"{registry_base}/registry/GLOBAL_REGISTRY.json"
-        if os.path.exists(global_reg_path):
-            try:
-                with open(global_reg_path, 'r') as f:
-                    global_reg = json.load(f)
-                    
-                # Check if this registry knows about our task
-                if task_id in global_reg.get('tasks', {}):
-                    task_info = global_reg['tasks'][task_id]
-                    
-                    # First, check if the global registry has the workspace location stored
-                    stored_workspace = task_info.get('workspace')
-                    if stored_workspace and os.path.exists(f"{stored_workspace}/AGENT_REGISTRY.json"):
-                        logger.info(f"Found task {task_id} at stored workspace from global registry: {stored_workspace}")
-                        return stored_workspace
-                    
-                    # Otherwise, try the expected location based on this registry's location
-                    candidate = f"{registry_base}/{task_id}"
-                    if os.path.exists(f"{candidate}/AGENT_REGISTRY.json"):
-                        logger.info(f"Found task {task_id} via global registry at {candidate}")
-                        return candidate
-                        
-                    # Also try reading the task registry directly to get stored workspace path
-                    task_reg_path = f"{candidate}/AGENT_REGISTRY.json"
-                    if os.path.exists(task_reg_path):
-                        try:
-                            with open(task_reg_path, 'r') as tf:
-                                task_reg = json.load(tf)
-                                stored_workspace = task_reg.get('workspace')
-                                if stored_workspace and os.path.exists(f"{stored_workspace}/AGENT_REGISTRY.json"):
-                                    logger.info(f"Found task {task_id} at stored workspace from task registry: {stored_workspace}")
-                                    return stored_workspace
-                        except Exception as e:
-                            logger.debug(f"Could not read task registry at {task_reg_path}: {e}")
-            except Exception as e:
-                logger.debug(f"Could not read global registry at {global_reg_path}: {e}")
-                continue
-    
-    # Fallback: Search in common project locations
-    # Look for .agent-workspace directories in parent directories
-    current_dir = os.getcwd()
-    for _ in range(5):  # Search up to 5 levels up
-        candidate = os.path.join(current_dir, '.agent-workspace', task_id)
-        if os.path.exists(f"{candidate}/AGENT_REGISTRY.json"):
-            logger.info(f"Found task {task_id} in client workspace: {candidate}")
-            return candidate
-        parent = os.path.dirname(current_dir)
-        if parent == current_dir:  # Reached root
-            break
-        current_dir = parent
-    
-    return None
-
-def get_workspace_base_from_task_workspace(task_workspace: str) -> str:
-    """
-    Extract workspace base from a task workspace path.
-    
-    Args:
-        task_workspace: Path to task workspace (e.g., /path/to/.agent-workspace/TASK-xxx)
-    
-    Returns:
-        Workspace base path (e.g., /path/to/.agent-workspace)
-    """
-    # Task workspace is typically: <workspace_base>/<task_id>
-    # So parent directory is the workspace_base
-    return os.path.dirname(task_workspace)
-
-def get_global_registry_path(workspace_base: str = None) -> str:
-    """
-    Get the path to the global registry based on workspace base.
-    
-    Args:
-        workspace_base: Optional workspace base directory. If not provided, uses WORKSPACE_BASE.
-    
-    Returns:
-        Path to GLOBAL_REGISTRY.json
-    """
-    if workspace_base is None:
-        workspace_base = WORKSPACE_BASE
-    return f"{workspace_base}/registry/GLOBAL_REGISTRY.json"
-
-def read_registry_with_lock(registry_path: str, timeout: float = 5.0) -> dict:
-    """
-    Read a registry file with exclusive file locking to prevent race conditions.
-
-    This function uses fcntl.flock to acquire an exclusive lock on the registry file
-    before reading it, preventing concurrent modifications from corrupting the data.
-
-    Args:
-        registry_path: Path to the registry JSON file
-        timeout: Maximum time in seconds to wait for lock acquisition (default: 5.0)
-
-    Returns:
-        Dictionary containing the registry data
-
-    Raises:
-        FileNotFoundError: If the registry file doesn't exist
-        TimeoutError: If unable to acquire lock within timeout period
-        json.JSONDecodeError: If the registry file contains invalid JSON
-    """
-    import time
-    start_time = time.time()
-
-    while True:
-        try:
-            f = open(registry_path, 'r')
-            try:
-                # Try to acquire lock with non-blocking mode in loop for timeout
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    # Lock not available, check timeout
-                    if time.time() - start_time >= timeout:
-                        raise TimeoutError(f"Could not acquire lock on {registry_path} within {timeout}s")
-                    # Release file handle and retry after short delay
-                    f.close()
-                    time.sleep(0.05)  # 50ms delay before retry
-                    continue
-
-                # Lock acquired, read the file
-                registry = json.load(f)
-                return registry
-            finally:
-                # Unlock and close
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                except:
-                    pass
-                f.close()
-        except FileNotFoundError:
-            raise
-        except json.JSONDecodeError:
-            raise
-        except Exception as e:
-            logger.error(f"Error reading registry {registry_path}: {e}")
-            raise
-
-def write_registry_with_lock(registry_path: str, registry: dict, timeout: float = 5.0) -> None:
-    """
-    Write a registry file with exclusive file locking to prevent race conditions.
-
-    This function uses fcntl.flock to acquire an exclusive lock on the registry file
-    before writing it, preventing concurrent modifications from corrupting the data.
-
-    Args:
-        registry_path: Path to the registry JSON file
-        registry: Dictionary containing the registry data to write
-        timeout: Maximum time in seconds to wait for lock acquisition (default: 5.0)
-
-    Raises:
-        TimeoutError: If unable to acquire lock within timeout period
-        OSError: If unable to write to the file
-    """
-    import time
-    start_time = time.time()
-
-    while True:
-        try:
-            # Open in r+ mode to allow locking before truncating
-            # This prevents creating a zero-length file if lock fails
-            f = open(registry_path, 'r+')
-            try:
-                # Try to acquire lock with non-blocking mode in loop for timeout
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    # Lock not available, check timeout
-                    if time.time() - start_time >= timeout:
-                        raise TimeoutError(f"Could not acquire lock on {registry_path} within {timeout}s")
-                    # Release file handle and retry after short delay
-                    f.close()
-                    time.sleep(0.05)  # 50ms delay before retry
-                    continue
-
-                # Lock acquired, truncate and write
-                f.seek(0)
-                f.truncate()
-                json.dump(registry, f, indent=2)
-                f.flush()  # Ensure data is written to disk
-                os.fsync(f.fileno())  # Force write to physical storage
-                return
-            finally:
-                # Unlock and close
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                except:
-                    pass
-                f.close()
-        except FileNotFoundError:
-            # File doesn't exist yet, create it
-            # Use a+x mode would fail if exists, so use 'w' with O_CREAT
-            f = open(registry_path, 'w')
-            try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                json.dump(registry, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-                return
-            finally:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                except:
-                    pass
-                f.close()
-        except Exception as e:
-            logger.error(f"Error writing registry {registry_path}: {e}")
-            raise
-
-def ensure_global_registry(workspace_base: str = None):
-    """
-    Ensure global registry exists at the specified workspace base.
-    
-    Args:
-        workspace_base: Optional workspace base directory. If not provided, uses WORKSPACE_BASE.
-    """
-    if workspace_base is None:
-        workspace_base = WORKSPACE_BASE
-    
-    os.makedirs(f"{workspace_base}/registry", exist_ok=True)
-    global_reg_path = get_global_registry_path(workspace_base)
-    
-    if not os.path.exists(global_reg_path):
-        initial_registry = {
-            "created_at": datetime.now().isoformat(),
-            "total_tasks": 0,
-            "active_tasks": 0,
-            "total_agents_spawned": 0,
-            "active_agents": 0,
-            "max_concurrent_agents": DEFAULT_MAX_CONCURRENT,
-            "tasks": {},
-            "agents": {}
-        }
-        with open(global_reg_path, 'w') as f:
-            json.dump(initial_registry, f, indent=2)
-        logger.info(f"Global registry created at {global_reg_path}")
-
-def ensure_workspace():
-    """Ensure workspace directory structure exists with proper initialization."""
-    try:
-        ensure_global_registry(WORKSPACE_BASE)
-        logger.info(f"Workspace initialized at {WORKSPACE_BASE}")
-    except Exception as e:
-        logger.error(f"Failed to initialize workspace: {e}")
-        raise
-
-def check_tmux_available():
-    """Check if tmux is available"""
-    try:
-        result = subprocess.run(['tmux', '-V'], capture_output=True, text=True, timeout=5)
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        logger.warning("tmux not available or not responding")
-        return False
-
-def check_cursor_agent_available() -> bool:
-    """
-    Check if cursor-agent is available and functional.
-    
-    Returns:
-        True if cursor-agent is installed and accessible, False otherwise
-    """
-    try:
-        # Expand ~ in path if present
-        cursor_path = os.path.expanduser(CURSOR_AGENT_PATH)
-        
-        # Check if file exists and is executable
-        if not os.path.exists(cursor_path):
-            logger.warning(f"cursor-agent not found at {cursor_path}")
-            return False
-        
-        if not os.access(cursor_path, os.X_OK):
-            logger.warning(f"cursor-agent at {cursor_path} is not executable")
-            return False
-        
-        # Verify it responds to --version
-        result = subprocess.run(
-            [cursor_path, '--version'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode == 0:
-            logger.info(f"cursor-agent available: {result.stdout.strip()}")
-            return True
-        else:
-            logger.warning(f"cursor-agent returned non-zero exit code: {result.returncode}")
-            return False
-            
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"cursor-agent not available or not responding: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error checking cursor-agent: {e}")
-        return False
-
-def get_cursor_agent_path() -> str:
-    """Get the full path to cursor-agent executable"""
-    return os.path.expanduser(CURSOR_AGENT_PATH)
-
-def create_tmux_session(session_name: str, command: str, working_dir: str = None) -> Dict[str, Any]:
-    """Create a tmux session to run Claude in background."""
-    try:
-        cmd = ['tmux', 'new-session', '-d', '-s', session_name]
-        if working_dir:
-            cmd.extend(['-c', working_dir])
-        cmd.append(command)
-        
-        logger.info(f"Creating tmux session '{session_name}' with command: {command[:100]}...")
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=working_dir, timeout=30)
-        
-        if result.returncode == 0:
-            logger.info(f"Successfully created tmux session '{session_name}'")
-            return {
-                "success": True,
-                "session_name": session_name,
-                "command": command,
-                "output": result.stdout,
-                "error": result.stderr
-            }
-        else:
-            logger.error(f"Failed to create tmux session '{session_name}': {result.stderr}")
-            return {
-                "success": False,
-                "error": f"Failed to create tmux session: {result.stderr}",
-                "return_code": result.returncode
-            }
-    except subprocess.TimeoutExpired:
-        logger.error(f"Timeout creating tmux session '{session_name}'")
-        return {
-            "success": False,
-            "error": "Timeout creating tmux session"
-        }
-    except Exception as e:
-        logger.error(f"Exception creating tmux session '{session_name}': {e}")
-        return {
-            "success": False,
-            "error": f"Exception creating tmux session: {str(e)}"
-        }
-
-def get_tmux_session_output(session_name: str) -> str:
-    """Capture output from tmux session"""
-    try:
-        result = subprocess.run([
-            'tmux', 'capture-pane', '-t', session_name, '-p'
-        ], capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            return result.stdout
-        return f"Error capturing output: {result.stderr}"
-    except Exception as e:
-        return f"Exception capturing output: {str(e)}"
-
-def check_tmux_session_exists(session_name: str) -> bool:
-    """Check if tmux session exists"""
-    try:
-        result = subprocess.run([
-            'tmux', 'has-session', '-t', session_name
-        ], capture_output=True, text=True)
-        return result.returncode == 0
-    except Exception:
-        return False
-
-def kill_tmux_session(session_name: str) -> bool:
-    """Kill a tmux session"""
-    try:
-        result = subprocess.run([
-            'tmux', 'kill-session', '-t', session_name
-        ], capture_output=True, text=True)
-        return result.returncode == 0
-    except Exception:
-        return False
-
-def list_all_tmux_sessions() -> Dict[str, Any]:
-    """
-    List all active tmux sessions and extract agent session info.
-
-    Returns:
-        Dict with session names, agent IDs, and metadata
-    """
-    try:
-        result = subprocess.run(
-            ['tmux', 'ls', '-F', '#{session_name}'],
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            return {'success': False, 'error': 'No tmux sessions found or tmux error', 'sessions': []}
-
-        # Parse tmux output - each line is a session name
-        session_names = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-
-        # Extract agent sessions (start with 'agent_')
-        agent_sessions = {}
-        for session_name in session_names:
-            if session_name.startswith('agent_'):
-                # Extract agent ID from session name: agent_TYPE-TIMESTAMP-HASH
-                agent_id = session_name.replace('agent_', '')
-                agent_sessions[session_name] = {
-                    'agent_id': agent_id,
-                    'session_name': session_name,
-                    'is_agent': True
-                }
-
-        return {
-            'success': True,
-            'total_sessions': len(session_names),
-            'agent_sessions': len(agent_sessions),
-            'sessions': agent_sessions
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': f'Exception listing tmux sessions: {str(e)}',
-            'sessions': {}
-        }
-
-def registry_health_check(registry_path: str) -> Dict[str, Any]:
-    """
-    Compare registry state against actual tmux sessions to detect discrepancies.
-
-    Args:
-        registry_path: Path to AGENT_REGISTRY.json
-
-    Returns:
-        Health report with discrepancies and recommendations
-    """
-    try:
-        # Get actual tmux sessions
-        tmux_result = list_all_tmux_sessions()
-        if not tmux_result['success']:
-            return {
-                'success': False,
-                'error': f"Failed to list tmux sessions: {tmux_result.get('error')}",
-                'healthy': False
-            }
-
-        actual_sessions = set(tmux_result['sessions'].keys())
-
-        # Load registry with file locking
-        with open(registry_path, 'r') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
-            registry = json.load(f)
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-        # Analyze agents in registry
-        active_statuses = {'running', 'working', 'blocked'}
-        registry_active_agents = []
-        registry_sessions = set()
-
-        for agent in registry.get('agents', []):
-            if agent.get('status') in active_statuses:
-                registry_active_agents.append(agent)
-                if 'tmux_session' in agent:
-                    registry_sessions.add(agent['tmux_session'])
-
-        # Find discrepancies
-        zombie_agents = []  # In registry as active, but no tmux session
-        orphan_sessions = []  # Tmux session exists, but not in registry
-
-        for agent in registry_active_agents:
-            session = agent.get('tmux_session')
-            if session and session not in actual_sessions:
-                zombie_agents.append({
-                    'agent_id': agent['id'],
-                    'agent_type': agent.get('type'),
-                    'status': agent.get('status'),
-                    'tmux_session': session,
-                    'started_at': agent.get('started_at'),
-                    'last_update': agent.get('last_update')
-                })
-
-        for session in actual_sessions:
-            if session not in registry_sessions:
-                orphan_sessions.append(session)
-
-        # Calculate counts
-        registry_active_count = registry.get('active_count', 0)
-        actual_active_count = len(actual_sessions)
-        count_mismatch = registry_active_count != actual_active_count
-
-        healthy = (
-            len(zombie_agents) == 0 and
-            len(orphan_sessions) == 0 and
-            not count_mismatch
-        )
-
-        return {
-            'success': True,
-            'healthy': healthy,
-            'registry_path': registry_path,
-            'actual_tmux_sessions': actual_active_count,
-            'registry_active_count': registry_active_count,
-            'count_mismatch': count_mismatch,
-            'zombie_agents': zombie_agents,
-            'zombie_count': len(zombie_agents),
-            'orphan_sessions': orphan_sessions,
-            'orphan_count': len(orphan_sessions),
-            'recommendations': generate_health_recommendations(
-                zombie_agents, orphan_sessions, count_mismatch
-            )
-        }
-    except FileNotFoundError:
-        return {
-            'success': False,
-            'error': f'Registry not found: {registry_path}',
-            'healthy': False
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': f'Health check exception: {str(e)}',
-            'healthy': False
-        }
-
-def generate_health_recommendations(zombie_agents, orphan_sessions, count_mismatch):
-    """Generate actionable recommendations based on health check results"""
-    recommendations = []
-
-    if zombie_agents:
-        recommendations.append({
-            'severity': 'high',
-            'issue': f'{len(zombie_agents)} zombie agents detected',
-            'action': 'Run validate_and_repair_registry() to mark zombies as terminated',
-            'details': 'Agents marked as active/working but tmux sessions do not exist'
-        })
-
-    if orphan_sessions:
-        recommendations.append({
-            'severity': 'medium',
-            'issue': f'{len(orphan_sessions)} orphan tmux sessions detected',
-            'action': 'Investigate orphan sessions - may be leaked agents or manual sessions',
-            'details': 'Tmux sessions exist but not tracked in registry'
-        })
-
-    if count_mismatch:
-        recommendations.append({
-            'severity': 'high',
-            'issue': 'Active count mismatch between registry and reality',
-            'action': 'Run validate_and_repair_registry() to fix counts',
-            'details': 'Registry active_count does not match actual tmux session count'
-        })
-
-    if not recommendations:
-        recommendations.append({
-            'severity': 'info',
-            'issue': 'No issues detected',
-            'action': 'Registry is healthy',
-            'details': 'All agents in registry match tmux sessions'
-        })
-
-    return recommendations
-
-def validate_and_repair_registry(registry_path: str, dry_run: bool = False) -> Dict[str, Any]:
-    """
-    Scan tmux sessions and repair registry discrepancies.
-
-    This function:
-    1. Lists all active tmux sessions
-    2. Compares with agents marked as active in registry
-    3. Marks zombie agents (no tmux session) as 'terminated'
-    4. Fixes active_count to match reality
-    5. Updates total_spawned if needed
-
-    Args:
-        registry_path: Path to AGENT_REGISTRY.json
-        dry_run: If True, report what would be changed without actually changing
-
-    Returns:
-        Repair report with changes made
-    """
-    try:
-        # Get actual tmux sessions
-        tmux_result = list_all_tmux_sessions()
-        if not tmux_result['success']:
-            return {
-                'success': False,
-                'error': f"Failed to list tmux sessions: {tmux_result.get('error')}",
-                'changes_made': 0
-            }
-
-        actual_sessions = set(tmux_result['sessions'].keys())
-
-        # Acquire exclusive lock for modification
-        with open(registry_path, 'r+') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
-
-            # Load current registry
-            registry = json.load(f)
-
-            # Track changes
-            changes = {
-                'zombies_terminated': [],
-                'orphans_found': [],
-                'count_corrected': False,
-                'old_active_count': registry.get('active_count', 0),
-                'new_active_count': 0
-            }
-
-            # Process all agents
-            active_statuses = {'running', 'working', 'blocked'}
-            actual_active_count = 0
-
-            for agent in registry.get('agents', []):
-                agent_status = agent.get('status')
-                tmux_session = agent.get('tmux_session')
-
-                # Check if agent claims to be active
-                if agent_status in active_statuses:
-                    # Verify tmux session exists
-                    if tmux_session and tmux_session in actual_sessions:
-                        # Agent is truly active
-                        actual_active_count += 1
-                    else:
-                        # Zombie agent - mark as terminated
-                        if not dry_run:
-                            agent['status'] = 'terminated'
-                            agent['termination_reason'] = 'session_not_found'
-                            agent['terminated_at'] = datetime.now().isoformat()
-                            agent['last_update'] = datetime.now().isoformat()
-
-                        changes['zombies_terminated'].append({
-                            'agent_id': agent['id'],
-                            'agent_type': agent.get('type'),
-                            'old_status': agent_status,
-                            'tmux_session': tmux_session,
-                            'started_at': agent.get('started_at')
-                        })
-
-            # Find orphan sessions
-            registry_sessions = {
-                agent.get('tmux_session')
-                for agent in registry.get('agents', [])
-                if agent.get('tmux_session')
-            }
-
-            for session in actual_sessions:
-                if session not in registry_sessions:
-                    changes['orphans_found'].append(session)
-
-            # Fix active_count
-            if registry.get('active_count', 0) != actual_active_count:
-                changes['count_corrected'] = True
-                changes['new_active_count'] = actual_active_count
-                if not dry_run:
-                    registry['active_count'] = actual_active_count
-            else:
-                changes['new_active_count'] = actual_active_count
-
-            # Write changes if not dry run
-            if not dry_run:
-                f.seek(0)
-                f.write(json.dumps(registry, indent=2))
-                f.truncate()
-                logger.info(f"Registry repaired: {len(changes['zombies_terminated'])} zombies terminated, "
-                           f"active_count corrected to {actual_active_count}")
-
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-            return {
-                'success': True,
-                'dry_run': dry_run,
-                'registry_path': registry_path,
-                'changes': changes,
-                'zombies_terminated': len(changes['zombies_terminated']),
-                'orphans_found': len(changes['orphans_found']),
-                'count_corrected': changes['count_corrected'],
-                'summary': (
-                    f"{'[DRY RUN] ' if dry_run else ''}Terminated {len(changes['zombies_terminated'])} zombies, "
-                    f"found {len(changes['orphans_found'])} orphans, "
-                    f"{'corrected' if changes['count_corrected'] else 'verified'} active_count "
-                    f"({changes['old_active_count']} -> {changes['new_active_count']})"
-                )
-            }
-    except FileNotFoundError:
-        return {
-            'success': False,
-            'error': f'Registry not found: {registry_path}',
-            'changes_made': 0
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': f'Repair exception: {str(e)}',
-            'changes_made': 0
-        }
-
-def calculate_task_complexity(description: str) -> int:
-    """Calculate task complexity to guide orchestration depth"""
-    complexity_keywords = {
-        'comprehensive': 5, 'complete': 4, 'full': 4, 'entire': 4,
-        'system': 3, 'platform': 3, 'application': 3, 'website': 2,
-        'frontend': 2, 'backend': 2, 'database': 2, 'api': 2,
-        'testing': 2, 'security': 2, 'performance': 2, 'optimization': 2,
-        'deployment': 2, 'ci/cd': 2, 'monitoring': 2, 'analytics': 2,
-        'authentication': 2, 'authorization': 2, 'integration': 2
-    }
-    
-    score = 1  # Base complexity
-    description_lower = description.lower()
-    
-    for keyword, points in complexity_keywords.items():
-        if keyword in description_lower:
-            score += points
-    
-    # Additional factors
-    if len(description) > 200:
-        score += 2
-    if 'layers' in description_lower or 'multi' in description_lower:
-        score += 3
-    if 'specialist' in description_lower or 'expert' in description_lower:
-        score += 2
-        
-    return min(score, 20)  # Cap at 20
-
-def generate_specialization_recommendations(task_description: str, current_depth: int) -> List[str]:
-    """Dynamically recommend specialist agent types based on task context"""
-    description_lower = task_description.lower()
-    
-    # Domain detection patterns
-    domain_patterns = {
-        'frontend': ['frontend', 'ui', 'ux', 'react', 'vue', 'angular', 'css', 'javascript', 'html'],
-        'backend': ['backend', 'api', 'server', 'database', 'sql', 'node', 'python', 'java'],
-        'design': ['design', 'ui/ux', 'visual', 'branding', 'typography', 'layout', 'user experience'],
-        'data': ['data', 'analytics', 'metrics', 'tracking', 'database', 'sql', 'mongodb'],
-        'security': ['security', 'auth', 'authentication', 'authorization', 'encryption', 'ssl'],
-        'performance': ['performance', 'optimization', 'speed', 'caching', 'load', 'scalability'],
-        'testing': ['testing', 'qa', 'test', 'validation', 'e2e', 'unit test', 'integration'],
-        'devops': ['deployment', 'ci/cd', 'docker', 'kubernetes', 'infrastructure', 'monitoring'],
-        'mobile': ['mobile', 'ios', 'android', 'react native', 'flutter', 'responsive'],
-        'ai_ml': ['ai', 'ml', 'machine learning', 'recommendation', 'algorithm', 'intelligence']
-    }
-    
-    recommendations = []
-    
-    for domain, keywords in domain_patterns.items():
-        if any(keyword in description_lower for keyword in keywords):
-            if current_depth == 1:
-                # First level: broad coordinators
-                recommendations.append(f"{domain}_lead")
-            elif current_depth == 2:
-                # Second level: specific specialists
-                if domain == 'frontend':
-                    recommendations.extend(['css_specialist', 'js_specialist', 'component_specialist', 'animation_specialist'])
-                elif domain == 'backend':
-                    recommendations.extend(['api_specialist', 'database_specialist', 'auth_specialist', 'integration_specialist'])
-                elif domain == 'design':
-                    recommendations.extend(['visual_designer', 'ux_researcher', 'interaction_designer', 'brand_specialist'])
-                elif domain == 'data':
-                    recommendations.extend(['data_engineer', 'analytics_specialist', 'visualization_expert', 'etl_specialist'])
-            elif current_depth >= 3:
-                # Deeper levels: hyper-specialized micro-agents
-                recommendations.extend([
-                    f"{domain}_optimizer", f"{domain}_validator", f"{domain}_implementer", f"{domain}_tester"
-                ])
-    
-    # Always recommend some general specialists for comprehensive coverage
-    if current_depth <= 2:
-        recommendations.extend(['architect', 'quality_assurance', 'documentation_specialist'])
-    
-    return list(set(recommendations))  # Remove duplicates
-
-def parse_markdown_context(content: str, context: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Parse markdown content to extract language, framework, and testing information.
-
-    Args:
-        content: Markdown file content
-        context: Existing context dict to update
-
-    Returns:
-        Updated context dict with extracted information
-    """
-    content_lower = content.lower()
-
-    # Language detection - search for explicit mentions
-    language_keywords = {
-        'python': ['python', 'py', 'pip', 'pyproject', 'virtualenv', 'venv'],
-        'javascript': ['javascript', 'js', 'node.js', 'nodejs', 'npm'],
-        'typescript': ['typescript', 'ts', 'tsc'],
-        'go': ['golang', 'go ', ' go'],
-        'rust': ['rust', 'cargo', 'rustc'],
-        'java': ['java', 'jvm', 'maven', 'gradle'],
-        'ruby': ['ruby', 'gem', 'bundler'],
-        'php': ['php', 'composer'],
-        'c++': ['c++', 'cpp', 'cmake'],
-        'c#': ['c#', 'csharp', '.net', 'dotnet']
-    }
-
-    for lang, keywords in language_keywords.items():
-        if any(kw in content_lower for kw in keywords):
-            context['language'] = lang.title() if lang != 'c++' else 'C++'
-            if lang == 'typescript':
-                context['language'] = 'TypeScript'
-            elif lang == 'javascript':
-                context['language'] = 'JavaScript'
-            break
-
-    # Framework detection
-    framework_keywords = {
-        'FastMCP': ['fastmcp', 'fast mcp', 'mcp server'],
-        'Django': ['django'],
-        'Flask': ['flask'],
-        'FastAPI': ['fastapi', 'fast api'],
-        'React': ['react', 'reactjs'],
-        'Vue': ['vue', 'vuejs', 'vue.js'],
-        'Angular': ['angular'],
-        'Next.js': ['next.js', 'nextjs'],
-        'Express': ['express', 'expressjs'],
-        'Svelte': ['svelte'],
-        'Spring': ['spring boot', 'spring framework'],
-        'Rails': ['rails', 'ruby on rails']
-    }
-
-    for framework, keywords in framework_keywords.items():
-        if any(kw in content_lower for kw in keywords):
-            if framework not in context['frameworks']:
-                context['frameworks'].append(framework)
-
-    # Testing framework detection
-    testing_keywords = {
-        'pytest': ['pytest'],
-        'unittest': ['unittest'],
-        'jest': ['jest'],
-        'mocha': ['mocha'],
-        'vitest': ['vitest'],
-        'playwright': ['playwright'],
-        'cypress': ['cypress'],
-        'go test': ['go test', 'testing package'],
-        'cargo test': ['cargo test'],
-        'junit': ['junit']
-    }
-
-    for test_fw, keywords in testing_keywords.items():
-        if any(kw in content_lower for kw in keywords):
-            if not context['testing_framework']:
-                context['testing_framework'] = test_fw
-            break
-
-    # Package manager detection
-    pm_keywords = {
-        'pip': ['pip', 'pypi'],
-        'npm': ['npm'],
-        'yarn': ['yarn'],
-        'pnpm': ['pnpm'],
-        'cargo': ['cargo'],
-        'go mod': ['go mod', 'go modules'],
-        'maven': ['maven'],
-        'gradle': ['gradle']
-    }
-
-    for pm, keywords in pm_keywords.items():
-        if any(kw in content_lower for kw in keywords):
-            if not context['package_manager']:
-                context['package_manager'] = pm
-            break
-
-    # Project type inference
-    if 'mcp' in content_lower or 'fastmcp' in content_lower:
-        context['project_type'] = 'mcp_server'
-    elif any(fw in content_lower for fw in ['django', 'flask', 'fastapi', 'express', 'rails', 'spring']):
-        context['project_type'] = 'web_application'
-    elif any(fw in content_lower for fw in ['react', 'vue', 'angular', 'svelte', 'next']):
-        context['project_type'] = 'web_application'
-
-    return context
-
-def detect_project_context(project_dir: str) -> Dict[str, Any]:
-    """
-    Detect project language, frameworks, testing tools, and patterns.
-    Prioritizes human-curated markdown files over config file scanning.
-
-    Priority order:
-    1. .claude/CLAUDE.md (project-specific)
-    2. project_context.md (project root)
-    3. Config files (pyproject.toml, package.json, go.mod, etc.) as fallback
-
-    Fast detection (<500ms) with graceful error handling.
-    """
-    cache_key = os.path.abspath(project_dir)
-    if cache_key in _project_context_cache:
-        return _project_context_cache[cache_key]
-
-    context = {
-        'language': 'Unknown',
-        'frameworks': [],
-        'testing_framework': None,
-        'package_manager': None,
-        'project_type': 'unknown',
-        'config_files_found': [],
-        'confidence': 'low',
-        'source': 'none'
-    }
-
-    # PRIORITY 1: Check .claude/CLAUDE.md (relative to project_dir)
-    claude_md_path = os.path.join(project_dir, '.claude', 'CLAUDE.md')
-    if os.path.exists(claude_md_path):
-        try:
-            with open(claude_md_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                context = parse_markdown_context(content, context)
-                context['source'] = '.claude/CLAUDE.md'
-                context['confidence'] = 'high'
-                context['config_files_found'].append('.claude/CLAUDE.md')
-                _project_context_cache[cache_key] = context
-                return context
-        except Exception as e:
-            logger.warning(f"Error reading .claude/CLAUDE.md: {e}")
-            # Fall through to next priority
-
-    # PRIORITY 2: Check project_context.md (project root)
-    project_md_path = os.path.join(project_dir, 'project_context.md')
-    if os.path.exists(project_md_path):
-        try:
-            with open(project_md_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                context = parse_markdown_context(content, context)
-                context['source'] = 'project_context.md'
-                context['confidence'] = 'high'
-                context['config_files_found'].append('project_context.md')
-                _project_context_cache[cache_key] = context
-                return context
-        except Exception as e:
-            logger.warning(f"Error reading project_context.md: {e}")
-            # Fall through to config file scanning
-
-    # FALLBACK: Use config file scanning (existing logic)
-    try:
-        # Python detection
-        pyproject_path = os.path.join(project_dir, 'pyproject.toml')
-        if os.path.exists(pyproject_path):
-            context['language'] = 'Python'
-            context['config_files_found'].append('pyproject.toml')
-            try:
-                with open(pyproject_path, 'r') as f:
-                    content = f.read().lower()
-                    if 'fastmcp' in content:
-                        context['frameworks'].append('FastMCP')
-                        context['project_type'] = 'mcp_server'
-                    if 'django' in content:
-                        context['frameworks'].append('Django')
-                        context['project_type'] = 'web_application'
-                    if 'flask' in content:
-                        context['frameworks'].append('Flask')
-                        context['project_type'] = 'web_application'
-                    if 'fastapi' in content:
-                        context['frameworks'].append('FastAPI')
-                        context['project_type'] = 'web_application'
-                    if 'pytest' in content:
-                        context['testing_framework'] = 'pytest'
-                    if 'unittest' in content and not context['testing_framework']:
-                        context['testing_framework'] = 'unittest'
-                    context['package_manager'] = 'pip'
-                    context['confidence'] = 'high'
-            except Exception:
-                pass
-
-        requirements_path = os.path.join(project_dir, 'requirements.txt')
-        if os.path.exists(requirements_path) and context['language'] == 'Unknown':
-            context['language'] = 'Python'
-            context['config_files_found'].append('requirements.txt')
-            context['package_manager'] = 'pip'
-            context['confidence'] = 'medium'
-            try:
-                with open(requirements_path, 'r') as f:
-                    content = f.read().lower()
-                    if 'fastmcp' in content:
-                        context['frameworks'].append('FastMCP')
-                        context['project_type'] = 'mcp_server'
-                    if 'django' in content:
-                        context['frameworks'].append('Django')
-                        context['project_type'] = 'web_application'
-                    if 'flask' in content:
-                        context['frameworks'].append('Flask')
-                        context['project_type'] = 'web_application'
-                    if 'pytest' in content:
-                        context['testing_framework'] = 'pytest'
-            except Exception:
-                pass
-
-        # JavaScript/TypeScript detection
-        package_json_path = os.path.join(project_dir, 'package.json')
-        if os.path.exists(package_json_path):
-            context['language'] = 'JavaScript'
-            context['config_files_found'].append('package.json')
-            try:
-                with open(package_json_path, 'r') as f:
-                    pkg_data = json.load(f)
-                    deps = {**pkg_data.get('dependencies', {}), **pkg_data.get('devDependencies', {})}
-
-                    if 'react' in deps:
-                        context['frameworks'].append('React')
-                        context['project_type'] = 'web_application'
-                    if 'vue' in deps:
-                        context['frameworks'].append('Vue')
-                        context['project_type'] = 'web_application'
-                    if 'angular' in deps or '@angular/core' in deps:
-                        context['frameworks'].append('Angular')
-                        context['project_type'] = 'web_application'
-                    if 'next' in deps:
-                        context['frameworks'].append('Next.js')
-                        context['project_type'] = 'web_application'
-                    if 'express' in deps:
-                        context['frameworks'].append('Express')
-                        context['project_type'] = 'web_application'
-                    if 'jest' in deps:
-                        context['testing_framework'] = 'jest'
-                    if 'mocha' in deps and not context['testing_framework']:
-                        context['testing_framework'] = 'mocha'
-                    if 'playwright' in deps:
-                        if not context['testing_framework']:
-                            context['testing_framework'] = 'playwright'
-                        context['frameworks'].append('Playwright')
-
-                    # Check for lock files
-                    if os.path.exists(os.path.join(project_dir, 'package-lock.json')):
-                        context['package_manager'] = 'npm'
-                    elif os.path.exists(os.path.join(project_dir, 'yarn.lock')):
-                        context['package_manager'] = 'yarn'
-                    elif os.path.exists(os.path.join(project_dir, 'pnpm-lock.yaml')):
-                        context['package_manager'] = 'pnpm'
-                    else:
-                        context['package_manager'] = 'npm'
-
-                    context['confidence'] = 'high'
-            except Exception:
-                context['package_manager'] = 'npm'
-                context['confidence'] = 'low'
-
-        tsconfig_path = os.path.join(project_dir, 'tsconfig.json')
-        if os.path.exists(tsconfig_path) and context['language'] == 'JavaScript':
-            context['language'] = 'TypeScript'
-            context['config_files_found'].append('tsconfig.json')
-
-        # Go detection
-        go_mod_path = os.path.join(project_dir, 'go.mod')
-        if os.path.exists(go_mod_path):
-            context['language'] = 'Go'
-            context['config_files_found'].append('go.mod')
-            context['package_manager'] = 'go mod'
-            context['testing_framework'] = 'go test'
-            context['confidence'] = 'high'
-
-        # Rust detection
-        cargo_path = os.path.join(project_dir, 'Cargo.toml')
-        if os.path.exists(cargo_path):
-            context['language'] = 'Rust'
-            context['config_files_found'].append('Cargo.toml')
-            context['package_manager'] = 'cargo'
-            context['testing_framework'] = 'cargo test'
-            context['confidence'] = 'high'
-
-    except Exception as e:
-        logger.warning(f"Error detecting project context: {e}")
-
-    # Set source for config file fallback
-    if context['source'] == 'none' and context['config_files_found']:
-        context['source'] = 'config_files'
-
-    # Cache and return
-    _project_context_cache[cache_key] = context
-    return context
-
-
-def format_project_context_prompt(context: Dict[str, Any]) -> str:
-    """
-    Format detected project context as a prompt section with implications and constraints.
-    """
-    if context['language'] == 'Unknown' or context['confidence'] == 'low':
-        return """
-🏗️ PROJECT CONTEXT:
-Unable to auto-detect project details. Search for config files (package.json, pyproject.toml, go.mod, etc.) to understand project structure, language, and frameworks before proceeding.
-"""
-
-    frameworks_str = ', '.join(context['frameworks']) if context['frameworks'] else 'None detected'
-    testing_str = context['testing_framework'] or 'Not detected'
-    pm_str = context['package_manager'] or 'Not detected'
-
-    source_str = context.get('source', 'unknown')
-    prompt = f"""
-🏗️ PROJECT CONTEXT (Source: {source_str}):
-- Language: {context['language']}
-- Frameworks: {frameworks_str}
-- Testing: {testing_str}
-- Package Manager: {pm_str}
-- Project Type: {context['project_type']}
-- Config Files: {', '.join(context['config_files_found'])}
-"""
-
-    # Add language-specific implications
-    if context['language'] == 'Python':
-        prompt += """
-IMPLICATIONS FOR YOUR WORK:
-- Use snake_case for functions and variables
-- Follow PEP 8 style guidelines
-- Check pyproject.toml or requirements.txt for dependencies before importing
-- Write async functions if the project uses async/await patterns
-"""
-        if 'FastMCP' in context['frameworks']:
-            prompt += """- Follow FastMCP conventions: @mcp.tool decorator for tools
-- Use .fn attribute when calling MCP tools from within other MCP tools
-"""
-        if context['testing_framework'] == 'pytest':
-            prompt += """- Add tests in tests/ directory with test_*.py naming
-- Use pytest fixtures and assertions
-"""
-        prompt += """
-DO NOT:
-- Use camelCase (this is Python, not JavaScript)
-- Import libraries not in requirements.txt/pyproject.toml
-- Write synchronous code if async patterns are used
-"""
-
-    elif context['language'] in ['JavaScript', 'TypeScript']:
-        prompt += """
-IMPLICATIONS FOR YOUR WORK:
-- Use camelCase for variables and functions
-- Follow modern ES6+ syntax
-- Check package.json for dependencies before importing
-"""
-        if context['testing_framework'] == 'jest':
-            prompt += """- Write tests with .test.js or .spec.js suffix
-- Use Jest assertions and mocking
-"""
-        elif context['testing_framework'] == 'playwright':
-            prompt += """- Write browser automation tests using Playwright
-- Follow page object model patterns
-"""
-        prompt += """
-DO NOT:
-- Use snake_case (this is JavaScript, not Python)
-- Import packages not in package.json
-- Use outdated var declarations (use const/let)
-"""
-
-    elif context['language'] == 'Go':
-        prompt += """
-IMPLICATIONS FOR YOUR WORK:
-- Use Go naming conventions (exported names start with capital letter)
-- Handle errors explicitly (if err != nil pattern)
-- Write tests in *_test.go files
-- Use go fmt for formatting
-
-DO NOT:
-- Ignore error returns
-- Use try/catch (Go uses error returns)
-- Import packages without go.mod entry
-"""
-
-    elif context['language'] == 'Rust':
-        prompt += """
-IMPLICATIONS FOR YOUR WORK:
-- Use snake_case for functions and variables
-- Handle Result and Option types properly
-- Write tests with #[test] attribute
-- Use cargo fmt for formatting
-
-DO NOT:
-- Use unwrap() without good reason (handle errors properly)
-- Ignore compiler warnings
-- Import crates not in Cargo.toml
-"""
-
-    return prompt
-
-
-def format_task_enrichment_prompt(task_registry: Dict[str, Any]) -> str:
-    """
-    Format task enrichment context as a prompt section for agents.
-    Reads task_context from registry and returns formatted markdown or empty string.
-
-    Args:
-        task_registry: Task registry dict that may contain 'task_context' field
-
-    Returns:
-        Formatted markdown section with task context, or empty string if no enrichment
-    """
-    task_context = task_registry.get('task_context', {})
-    if not task_context:
-        return ""
-
-    sections = []
-
-    # Background context
-    if bg := task_context.get('background_context'):
-        sections.append(f"""
-📋 BACKGROUND CONTEXT:
-{bg}
-""")
-
-    # Expected deliverables
-    if deliverables := task_context.get('expected_deliverables'):
-        items = '\n'.join(f"  • {d}" for d in deliverables)
-        sections.append(f"""
-✅ EXPECTED DELIVERABLES:
-{items}
-""")
-
-    # Success criteria
-    if criteria := task_context.get('success_criteria'):
-        items = '\n'.join(f"  • {c}" for c in criteria)
-        sections.append(f"""
-🎯 SUCCESS CRITERIA:
-{items}
-""")
-
-    # Constraints
-    if constraints := task_context.get('constraints'):
-        items = '\n'.join(f"  • {c}" for c in constraints)
-        sections.append(f"""
-⚠️ CONSTRAINTS:
-{items}
-""")
-
-    # Relevant files (limit to first 10)
-    if files := task_context.get('relevant_files'):
-        items = '\n'.join(f"  • {f}" for f in files[:10])
-        if len(files) > 10:
-            items += f"\n  • ... and {len(files) - 10} more files"
-        sections.append(f"""
-📁 RELEVANT FILES TO EXAMINE:
-{items}
-""")
-
-    # Related documentation
-    if docs := task_context.get('related_documentation'):
-        items = '\n'.join(f"  • {d}" for d in docs)
-        sections.append(f"""
-📚 RELATED DOCUMENTATION:
-{items}
-""")
-
-    # Conversation history that led to this task
-    if conv_history := task_context.get('conversation_history'):
-        messages = conv_history.get('messages', [])
-        metadata = conv_history.get('metadata', {})
-        truncated_count = conv_history.get('truncated_count', 0)
-
-        if messages:
-            # Format messages with numbering and role indicators
-            formatted_messages = []
-            for idx, msg in enumerate(messages, 1):
-                role = msg['role']
-                content = msg['content']
-                timestamp = msg.get('timestamp', 'unknown time')
-                truncated_flag = " [TRUNCATED]" if msg.get('truncated') else ""
-
-                # Parse timestamp to human-readable format
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(timestamp)
-                    time_str = dt.strftime('%H:%M:%S')
-                except:
-                    time_str = timestamp
-
-                # Role emoji mapping
-                role_emoji = {
-                    'user': '👤',
-                    'assistant': '🤖',
-                    'orchestrator': '🎯'
-                }
-                emoji = role_emoji.get(role, '💬')
-
-                formatted_messages.append(
-                    f"[{idx}] {emoji} {role.capitalize()} ({time_str}){truncated_flag}:\n    {content}\n"
-                )
-
-            messages_text = '\n'.join(formatted_messages)
-
-            # Add metadata footer
-            footer = f"\n📊 History metadata: {len(messages)} messages"
-            if truncated_count > 0:
-                footer += f", {truncated_count} truncated (user messages kept concise)"
-
-            sections.append(f"""
-💬 CONVERSATION HISTORY (Leading to This Task):
-
-The orchestrator had the following conversation before creating this task.
-This provides context for WHY this task exists and WHAT the user wants.
-
-{messages_text}{footer}
-""")
-
-    if sections:
-        return f"""
-{'='*80}
-🎯 TASK CONTEXT (Provided by task creator)
-{'='*80}
-
-{''.join(sections)}
-
-{'='*80}
-"""
-    return ""
-
-
-def create_orchestration_guidance_prompt(agent_type: str, task_description: str, current_depth: int, max_depth: int) -> str:
-    """Generate dynamic guidance for orchestration based on context"""
-    complexity = calculate_task_complexity(task_description)
-    recommendations = generate_specialization_recommendations(task_description, current_depth + 1)
-    
-    if current_depth >= max_depth - 1:
-        return "\n⚠️  DEPTH LIMIT REACHED - Focus on implementation rather than spawning children."
-    
-    # Determine orchestration intensity based on complexity and depth
-    if complexity >= 15:
-        intensity = "STRONGLY ENCOURAGED"
-        child_count = "3-4 child agents"
-    elif complexity >= 10:
-        intensity = "ENCOURAGED"
-        child_count = "2-3 child agents"
-    else:
-        intensity = "may consider"
-        child_count = "1-2 child agents"
-    
-    guidance = f"""
-
-🎯 ORCHESTRATION GUIDANCE (Depth {current_depth}/{max_depth}, Complexity: {complexity}/20):
-
-You are {intensity} to spawn specialized child agents for better implementation quality.
-
-RECOMMENDED CHILD SPECIALISTS:
-{chr(10).join(f'• {agent}' for agent in recommendations[:6])}
-
-🚀 ORCHESTRATION STRATEGY:
-1. ANALYZE if your task benefits from specialization
-2. SPAWN {child_count} with focused, specific roles
-3. COORDINATE their work efficiently
-4. Each child should handle a distinct domain
-
-💡 NAMING CONVENTION: Use clear, descriptive names:
-   - 'css_responsive_specialist' not just 'css'
-   - 'api_authentication_handler' not just 'auth'
-   - 'database_optimization_expert' not just 'db'
-
-⭐ SUCCESS CRITERIA: Balance specialization with efficiency:
-   - Spawn specialists only when beneficial
-   - Coordinate effectively without micro-management
-   - Deliver comprehensive, integrated results"""
-    
-    return guidance
-
-
-def get_investigator_requirements() -> str:
-    """Return investigator-specific requirements enforcing Read-First Development."""
-    return """
-🔍 INVESTIGATOR PROTOCOL - READ-FIRST DEVELOPMENT
-
-📋 MANDATORY INVESTIGATION STEPS (IN ORDER):
-1. CONTEXT GATHERING (30-40% of time):
-   - Search codebase for existing patterns FIRST
-   - Read relevant files to understand current state
-   - Identify what exists vs what's missing
-   - Check documentation, comments, git history
-   - Map dependencies and relationships
-
-2. PATTERN ANALYSIS (30-40% of time):
-   - What patterns are used consistently?
-   - What conventions must be followed?
-   - What are the architectural boundaries?
-   - What similar code exists that we can learn from?
-   - What constraints exist (performance, compatibility)?
-
-3. EVIDENCE COLLECTION (20-30% of time):
-   - Document findings with file paths and line numbers
-   - Quote relevant code sections
-   - Capture metrics (file counts, complexity, coverage)
-   - List gaps, issues, or inconsistencies found
-   - Provide concrete examples, not generalizations
-
-✅ SUCCESS CRITERIA - Definition of 'DONE':
-Your investigation is ONLY complete when:
-- All relevant code has been READ (not assumed)
-- Findings are DOCUMENTED with evidence (file paths, line numbers)
-- Patterns are IDENTIFIED and EXPLAINED (not just listed)
-- Gaps or issues are SPECIFIC (not vague)
-- Recommendations are ACTIONABLE (not generic)
-
-📊 EVIDENCE REQUIRED FOR COMPLETION:
-BEFORE reporting status='completed', you MUST provide:
-1. Files you read - list specific paths and what you learned
-2. Patterns you found - describe with code examples
-3. Findings documented - use report_agent_finding for each discovery
-4. Metrics collected - how many files, functions, patterns?
-5. Gaps identified - what's missing or broken?
-6. Recommendations - specific, actionable next steps
-
-🚫 ANTI-PATTERNS TO AVOID:
-- Assuming without reading actual code
-- Generic findings without evidence
-- Incomplete investigation (only surface-level)
-- No concrete examples or quotes
-- Vague recommendations like "needs improvement"
-- Claiming done without documenting findings
-
-🎯 FORCED SELF-INTERROGATION CHECKLIST:
-Answer BEFORE claiming done:
-1. Did I READ the code or just assume based on filenames?
-2. Can I quote specific lines from files I claim to have analyzed?
-3. Did I document findings with file paths and line numbers?
-4. Are my recommendations specific and actionable?
-5. What did I miss? What should I investigate deeper?
-6. Would another investigator reach the same conclusions from my findings?
-
-🔍 VALIDATION CHECKPOINT - Answer Before Claiming Complete:
-
-Run this self-check. If you answer 'NO' to ANY question, you are NOT done:
-
-□ Did I read at least 3 relevant files? (List them: ___, ___, ___)
-□ Can I cite specific line numbers for my findings? (Show examples: file.py:123, ...)
-□ Did I document findings using report_agent_finding? (How many: ___)
-□ Did I identify at least 2 alternative approaches? (List: 1.___, 2.___)
-□ Are my findings specific enough that a builder could act on them without asking questions?
-□ Did I check for similar patterns elsewhere in the codebase?
-□ Would a senior engineer approve this investigation without follow-up questions?
-
-If ANY checkbox is unchecked, CONTINUE investigating before reporting completed.
-"""
-
-
-def get_builder_requirements() -> str:
-    """Return builder-specific requirements enforcing Quality Implementation."""
-    return """
-🏗️ BUILDER PROTOCOL - QUALITY IMPLEMENTATION
-
-📋 MANDATORY BUILD STEPS (IN ORDER):
-1. UNDERSTAND BEFORE CODING (30% of time):
-   - Read existing code to match style and patterns
-   - Identify project conventions (naming, structure, testing)
-   - Check what APIs must NOT break (backward compatibility)
-   - Search for similar existing implementations
-   - Identify constraints: performance, security, compatibility
-
-2. ERROR-FIRST IMPLEMENTATION (40% of time):
-   - Think: What can go wrong? List failure modes FIRST
-   - Implement error handling for edge cases BEFORE happy path
-   - What if input is null/empty/invalid/huge?
-   - What if network fails? What if dependency is unavailable?
-   - Add logging for debugging future issues
-
-3. TEST AND VERIFY (30% of time):
-   - Write or update tests for new functionality
-   - Test edge cases (empty, null, boundary values)
-   - Run test suite - MUST pass before claiming done
-   - Manual testing: actually use what you built
-   - Check: did I break anything else?
-
-✅ SUCCESS CRITERIA - Definition of 'DONE':
-Your build is ONLY complete when:
-- Tests pass (show test output)
-- Edge cases handled (null, empty, invalid, boundary)
-- No regressions (existing functionality still works)
-- Code follows project patterns (style, structure, conventions)
-- Error handling is comprehensive (not just happy path)
-
-📊 EVIDENCE REQUIRED FOR COMPLETION:
-BEFORE reporting status='completed', you MUST provide:
-1. List of files you modified (with what changed)
-2. Test results - show actual command output
-3. Edge cases you handled - list them specifically
-4. Manual testing performed - what did you test?
-5. Impact analysis - what else could this affect?
-6. Self-review - what's the weakest part of your implementation?
-
-🚫 ANTI-PATTERNS TO AVOID:
-- Coding before understanding existing patterns
-- Implementing without error handling
-- Not testing edge cases (null, empty, invalid)
-- Claiming done without running tests
-- Breaking existing APIs without migration path
-- No logging for future debugging
-- Leaving debug code or console.logs
-
-🎯 FORCED SELF-INTERROGATION CHECKLIST:
-Answer BEFORE claiming done:
-1. Did tests pass? Show command output.
-2. What files did I modify? List them.
-3. What edge cases did I handle? Name 3 minimum.
-4. What breaks if input is null/empty/invalid?
-5. Did I manually test this? What did I test?
-6. What's the weakest part of my implementation?
-7. Would I approve this PR if someone else wrote it?
-
-🔍 VALIDATION CHECKPOINT - Answer Before Claiming Complete:
-
-Run this self-check. If you answer 'NO' to ANY question, you are NOT done:
-
-□ Did tests pass? (Show command output: ___)
-□ What files did I modify? (List them: ___)
-□ What edge cases did I handle? (Name 3 minimum: ___, ___, ___)
-□ What breaks if input is null/empty/invalid? (Answer: ___)
-□ Did I manually test this? (What did I test: ___)
-□ What's the weakest part of my implementation? (Be honest: ___)
-□ Would I approve this PR if someone else wrote it? (Yes/No with reason: ___)
-□ Did I add error handling and logging for debugging?
-□ Does my code follow project patterns and conventions?
-
-If ANY checkbox is unchecked, CONTINUE building before reporting completed.
-"""
-
-
-def get_fixer_requirements() -> str:
-    """Return fixer-specific requirements enforcing Root Cause Diagnosis."""
-    return """
-🔧 FIXER PROTOCOL - ROOT CAUSE DIAGNOSIS
-
-📋 MANDATORY DEBUGGING STEPS (IN ORDER):
-1. REPRODUCE FIRST (25% of time):
-   - Reproduce the bug reliably with exact steps
-   - Document EXACT reproduction steps (command/input/environment)
-   - If you can't reproduce it, you can't verify the fix
-   - Test on clean environment: is it environmental or code?
-   - Verify error message/behavior matches reported issue
-
-2. ROOT CAUSE ANALYSIS (40% of time):
-   - Identify root cause, NOT just symptoms
-   - Ask: Why did this happen? Trace execution path
-   - Read the actual code, don't trust error messages
-   - Check git history: when was this introduced? Why?
-   - Is this a regression? Was it working before?
-   - What assumptions were violated?
-
-3. FIX AND VERIFY (25% of time):
-   - Fix the root cause, not the symptom
-   - Verify fix addresses the actual problem
-   - Test that bug no longer reproduces
-   - Add regression test to prevent recurrence
-   - Check: did my fix break anything else?
-
-4. PREVENT RECURRENCE (10% of time):
-   - Search for similar bugs in other code
-   - Add tests for edge cases that caused this
-   - Update documentation if assumptions were wrong
-   - Consider: how could we have caught this earlier?
-
-✅ SUCCESS CRITERIA - Definition of 'DONE':
-Your fix is ONLY complete when:
-- Bug is reproducible (documented exact steps)
-- Root cause identified (not just symptoms)
-- Fix verified (bug no longer occurs)
-- Regression tests added (prevents future recurrence)
-- Similar issues checked (are there other instances?)
-
-📊 EVIDENCE REQUIRED FOR COMPLETION:
-BEFORE reporting status='completed', you MUST provide:
-1. Bug reproduction steps - exact commands/input
-2. Root cause explanation - why did this happen?
-3. Files modified to fix the issue
-4. Test results - show bug fixed
-5. Regression tests added - show test code
-6. Similar issues checked - where did you look?
-
-🚫 ANTI-PATTERNS TO AVOID:
-- Fixing symptoms instead of root cause
-- Claiming fix without reproducing bug first
-- No regression tests to prevent recurrence
-- Not checking for similar bugs elsewhere
-- Trusting error messages without reading code
-- Not verifying the fix actually works
-- Breaking other functionality with the fix
-
-🔍 VALIDATION CHECKPOINT - Answer Before Claiming Complete:
-
-Run this self-check. If you answer 'NO' to ANY question, you are NOT done:
-
-□ Can I reproduce the bug? (Show exact steps: ___)
-□ What is the root cause? (Explain why it happens: ___)
-□ Does my fix address root cause or just symptoms? (Which: ___)
-□ Did I verify the bug no longer occurs? (How: ___)
-□ What regression tests did I add? (Show test code or file: ___)
-□ Did I check for similar bugs? (Where did I look: ___)
-□ Could my fix break anything else? (Analyzed: ___)
-□ Did I update documentation if assumptions were wrong? (Files: ___)
-
-If ANY checkbox is unchecked, CONTINUE fixing before reporting completed.
-"""
-
-
-def get_universal_protocol() -> str:
-    """
-    Return universal protocol that works for ANY agent type without restriction.
-    Allows fully dynamic agent types per user request for flexibility.
-
-    The specialized protocols (investigator/builder/fixer) remain available as reference
-    but are no longer enforced, enabling custom agent types like 'jwt-validator',
-    'security-analyzer', etc. without forcing them into predefined buckets.
-    """
-    return """
-📋 AGENT PROTOCOL - SYSTEMATIC APPROACH
-
-🎯 MISSION EXECUTION STEPS:
-1. UNDERSTAND (30% of time):
-   - Read relevant code/documentation to understand context
-   - Identify what exists vs what needs to change
-   - Check project conventions and patterns
-   - Map dependencies and constraints
-
-2. PLAN & IMPLEMENT (40% of time):
-   - Break down the task into specific steps
-   - Consider edge cases and error scenarios
-   - Implement with proper error handling
-   - Follow project coding standards
-
-3. VERIFY & DOCUMENT (30% of time):
-   - Test your changes work correctly
-   - Check for regressions or side effects
-   - Document findings with file:line citations
-   - Provide evidence of completion
-
-✅ SUCCESS CRITERIA - Definition of 'DONE':
-Your work is ONLY complete when:
-- Task requirements fully addressed (not partial)
-- Changes tested and verified working
-- Evidence provided (file paths, test results, findings)
-- No regressions introduced
-- Work follows project patterns and conventions
-
-📊 EVIDENCE REQUIRED FOR COMPLETION:
-BEFORE reporting status='completed', you MUST provide:
-1. What you accomplished - specific changes made
-2. Files modified - list paths with what changed
-3. Testing performed - show results/output
-4. Findings documented - use report_agent_finding for discoveries
-5. Quality check - did you verify it works?
-
-🚫 ANTI-PATTERNS TO AVOID:
-- Assuming without reading actual code
-- Generic findings without specific evidence
-- Claiming done without testing/verification
-- Breaking existing functionality
-- No file:line citations for your findings
-
-🎯 FORCED SELF-INTERROGATION CHECKLIST:
-Answer BEFORE claiming done:
-1. Did I READ the relevant code or assume?
-2. Can I cite specific files/lines I analyzed or modified?
-3. Did I TEST my changes work?
-4. Did I document findings with evidence?
-5. What could go wrong? Did I handle edge cases?
-6. Would I accept this work quality from someone else?
-"""
-
-def get_type_specific_requirements(agent_type: str) -> str:
-    """Get type-specific requirements for agent based on type.
-
-    Now fully dynamic - accepts ANY agent_type string without restriction.
-    Specialized protocols (investigator/builder/fixer) kept for reference
-    but no longer enforced, allowing custom types like 'jwt-validator',
-    'security-analyzer', 'performance-optimizer', etc.
-
-    Args:
-        agent_type: Type of agent - ANY string accepted
-
-    Returns:
-        Universal protocol that works for all agent types
-    """
-    # Check if user wants a specific specialized protocol (optional)
-    # Otherwise, return universal protocol that works for any type
-    type_specific_protocols = {
-        'investigator': get_investigator_requirements,
-        'builder': get_builder_requirements,
-        'fixer': get_fixer_requirements,
-    }
-
-    # If agent_type exactly matches a specialized protocol, use it
-    # Otherwise use universal protocol (allows ANY custom type)
-    if agent_type.lower() in type_specific_protocols:
-        return type_specific_protocols[agent_type.lower()]()
-    else:
-        # Universal protocol works for ANY agent type - fully dynamic
-        return get_universal_protocol()
-
-
-def resolve_workspace_variables(path: str) -> str:
-    """
-    Resolve template variables in workspace paths.
-
-    Detects and resolves template variables like:
-    - ${workspaceFolder} (VSCode/Claude Code style)
-    - $WORKSPACE_FOLDER (environment variable style)
-    - {workspaceFolder} (simple bracket style)
-
-    Resolves them to os.getcwd() (the actual project directory).
-
-    Args:
-        path: Path string that may contain template variables
-
-    Returns:
-        Resolved path with template variables replaced
-
-    Examples:
-        >>> resolve_workspace_variables("${workspaceFolder}")
-        "/Users/user/project"
-        >>> resolve_workspace_variables("${workspaceFolder}/subdir")
-        "/Users/user/project/subdir"
-        >>> resolve_workspace_variables("/absolute/path")
-        "/absolute/path"
-        >>> resolve_workspace_variables(None)
-        None
-    """
-    # Handle None and empty strings
-    if not path:
-        return path
-
-    # Get the actual workspace folder (current working directory)
-    actual_workspace = os.getcwd()
-
-    # Define template patterns to detect and replace
-    # Order matters: more specific patterns first
-    patterns = [
-        r'\$\{workspaceFolder\}',      # ${workspaceFolder}
-        r'\$\{WORKSPACE_FOLDER\}',     # ${WORKSPACE_FOLDER}
-        r'\$WORKSPACE_FOLDER',         # $WORKSPACE_FOLDER
-        r'\{workspaceFolder\}',        # {workspaceFolder}
-        r'\{WORKSPACE_FOLDER\}',       # {WORKSPACE_FOLDER}
-    ]
-
-    resolved_path = path
-    for pattern in patterns:
-        resolved_path = re.sub(pattern, actual_workspace, resolved_path)
-
-    # If path was already resolved (absolute path without template vars), return as-is
-    return resolved_path
 
 
 # ============================================================================
-# JSONL Utility Functions for Agent Log Management
-# ============================================================================
-
-def parse_jsonl_robust(file_path: str) -> List[Dict[str, Any]]:
-    """
-    Parse JSONL file with robust error recovery.
-
-    Handles edge cases:
-    - Incomplete lines from agent crashes (SIGKILL)
-    - Malformed JSON
-    - Empty lines
-    - File corruption
-
-    Args:
-        file_path: Path to JSONL file
-
-    Returns:
-        List of successfully parsed JSON objects. Malformed lines are skipped
-        with a warning logged.
-
-    Examples:
-        >>> parse_jsonl_robust("agent_stream.jsonl")
-        [{"timestamp": "...", "type": "progress"}, ...]
-    """
-    if not os.path.exists(file_path):
-        return []
-
-    if os.path.getsize(file_path) == 0:
-        return []
-
-    lines = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:  # Skip empty lines
-                continue
-
-            try:
-                parsed = json.loads(line)
-                lines.append(parsed)
-            except json.JSONDecodeError as e:
-                # Log warning but continue parsing
-                logger.warning(f"Malformed JSON at {file_path}:{line_num}: {e}")
-                # Include error record for debugging
-                lines.append({
-                    "type": "parse_error",
-                    "line_number": line_num,
-                    "raw_content": line[:200],  # Truncate for safety
-                    "error": str(e)
-                })
-
-    return lines
-
-
-def tail_jsonl_efficient(file_path: str, n_lines: int = 100) -> List[Dict[str, Any]]:
-    """
-    Efficiently read last N lines from JSONL file using file seeking.
-
-    Critical for large logs (10GB+) - avoids loading entire file into memory.
-    Performance requirement: <100ms even for 10GB files.
-
-    Algorithm:
-    - For files >10MB: Seek from EOF, estimate bytes = n_lines * 300
-    - Binary mode seeking to avoid encoding issues
-    - Parse only tail portion
-    - Return last N valid JSONL entries
-
-    Args:
-        file_path: Path to JSONL file
-        n_lines: Number of lines to return from end of file
-
-    Returns:
-        List of last N successfully parsed JSON objects
-
-    Examples:
-        >>> tail_jsonl_efficient("large_agent.jsonl", 100)
-        [{"timestamp": "...", "message": "..."}, ...]  # Last 100 lines
-    """
-    if not os.path.exists(file_path):
-        return []
-
-    file_size = os.path.getsize(file_path)
-    if file_size == 0:
-        return []
-
-    # For small files (<10MB), just parse entire file
-    if file_size < 10 * 1024 * 1024:  # 10MB
-        all_lines = parse_jsonl_robust(file_path)
-        return all_lines[-n_lines:] if len(all_lines) > n_lines else all_lines
-
-    # For large files: efficient tail using seeking
-    # Estimate: average line ~200 bytes, read 50% extra to ensure we get n_lines
-    seek_size = min(n_lines * 300, file_size)
-
-    try:
-        with open(file_path, 'rb') as f:
-            # Acquire shared lock (multiple readers OK, blocks writers)
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-            try:
-                f.seek(-seek_size, os.SEEK_END)
-                data = f.read().decode('utf-8', errors='ignore')
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-        lines = data.split('\n')
-        valid_lines = []
-
-        # Parse from end, collecting last n_lines valid JSON objects
-        for line in reversed(lines):
-            if len(valid_lines) >= n_lines:
-                break
-
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                parsed = json.loads(line)
-                valid_lines.append(parsed)
-            except json.JSONDecodeError:
-                # Skip malformed lines in tail
-                continue
-
-        return list(reversed(valid_lines))
-
-    except Exception as e:
-        logger.error(f"Error tailing {file_path}: {e}")
-        # Fallback: try parsing entire file
-        all_lines = parse_jsonl_robust(file_path)
-        return all_lines[-n_lines:] if len(all_lines) > n_lines else all_lines
-
-
-# ============================================================================
-# Cursor CLI Stream-JSON Parser Functions
-# ============================================================================
-
-def parse_cursor_stream_jsonl(log_file: str, include_thinking: bool = None) -> Dict[str, Any]:
-    """
-    Parse cursor-agent stream-json output and extract structured information.
-    
-    Cursor stream-json format emits NDJSON events with types:
-    - system: Initialization metadata
-    - user: User messages
-    - thinking: Internal reasoning (if thinking model used)
-    - assistant: Assistant responses
-    - tool_call: Tool invocations with results
-    - result: Final completion status
-    
-    Args:
-        log_file: Path to cursor-agent stream-json log file
-        include_thinking: Whether to include thinking deltas (defaults to CURSOR_ENABLE_THINKING_LOGS)
-    
-    Returns:
-        Dictionary with parsed information:
-        {
-            "session_id": str,
-            "events": List[Dict],
-            "tool_calls": List[Dict],
-            "assistant_messages": List[str],
-            "thinking_text": str (if include_thinking=True),
-            "final_result": Dict or None,
-            "duration_ms": int,
-            "success": bool,
-            "error": str or None
-        }
-    """
-    if include_thinking is None:
-        include_thinking = CURSOR_ENABLE_THINKING_LOGS
-    
-    if not os.path.exists(log_file):
-        return {
-            "success": False,
-            "error": f"Log file not found: {log_file}"
-        }
-    
-    result = {
-        "session_id": None,
-        "events": [],
-        "tool_calls": [],
-        "assistant_messages": [],
-        "thinking_text": "",
-        "final_result": None,
-        "duration_ms": 0,
-        "success": False,
-        "error": None,
-        "model": None,
-        "cwd": None
-    }
-    
-    try:
-        with open(log_file, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                
-                try:
-                    event = json.loads(line)
-                    event_type = event.get("type")
-                    
-                    # Extract session_id from any event that has it
-                    if "session_id" in event and not result["session_id"]:
-                        result["session_id"] = event["session_id"]
-                    
-                    # System initialization
-                    if event_type == "system" and event.get("subtype") == "init":
-                        result["model"] = event.get("model")
-                        result["cwd"] = event.get("cwd")
-                        result["events"].append({
-                            "type": "system_init",
-                            "model": event.get("model"),
-                            "cwd": event.get("cwd"),
-                            "permission_mode": event.get("permissionMode")
-                        })
-                    
-                    # Thinking deltas (optional)
-                    elif event_type == "thinking" and include_thinking:
-                        if event.get("subtype") == "delta":
-                            text = event.get("text", "")
-                            if text:
-                                result["thinking_text"] += text
-                        elif event.get("subtype") == "completed":
-                            result["events"].append({
-                                "type": "thinking_completed",
-                                "timestamp_ms": event.get("timestamp_ms")
-                            })
-                    
-                    # Assistant messages
-                    elif event_type == "assistant":
-                        message = event.get("message", {})
-                        content = message.get("content", [])
-                        for item in content:
-                            if item.get("type") == "text":
-                                text = item.get("text", "")
-                                result["assistant_messages"].append(text)
-                                result["events"].append({
-                                    "type": "assistant_message",
-                                    "text": text,
-                                    "timestamp_ms": event.get("timestamp_ms"),
-                                    "model_call_id": event.get("model_call_id")
-                                })
-                    
-                    # Tool calls
-                    elif event_type == "tool_call":
-                        tool_call_info = parse_cursor_tool_call(event)
-                        if tool_call_info:
-                            result["tool_calls"].append(tool_call_info)
-                            result["events"].append({
-                                "type": "tool_call",
-                                "subtype": event.get("subtype"),
-                                "tool_info": tool_call_info,
-                                "timestamp_ms": event.get("timestamp_ms")
-                            })
-                    
-                    # Final result
-                    elif event_type == "result":
-                        result["final_result"] = {
-                            "subtype": event.get("subtype"),
-                            "is_error": event.get("is_error", False),
-                            "duration_ms": event.get("duration_ms", 0),
-                            "result_text": event.get("result", ""),
-                            "request_id": event.get("request_id")
-                        }
-                        result["duration_ms"] = event.get("duration_ms", 0)
-                        result["success"] = event.get("subtype") == "success" and not event.get("is_error", False)
-                        if event.get("is_error"):
-                            result["error"] = event.get("result", "Unknown error")
-                
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Malformed JSON at line {line_num} in {log_file}: {e}")
-                    continue
-                except Exception as e:
-                    logger.error(f"Error parsing line {line_num} in {log_file}: {e}")
-                    continue
-        
-        return result
-
-    except Exception as e:
-        logger.error(f"Error reading cursor log file {log_file}: {e}")
-        return {
-            "success": False,
-            "error": f"Failed to read log file: {e}"
-        }
-
-
-def truncate_content_smart(content: str, max_len: int = 500, keep_tail: int = 100) -> str:
-    """
-    Smart truncation that keeps beginning and end of content.
-
-    Args:
-        content: String to truncate
-        max_len: Maximum total length
-        keep_tail: Chars to preserve at end
-
-    Returns:
-        Truncated string with middle removed if needed
-    """
-    if not content or len(content) <= max_len:
-        return content
-
-    head_len = max_len - keep_tail - 30  # 30 chars for ellipsis marker
-    if head_len < 50:
-        head_len = 50
-        keep_tail = max_len - head_len - 30
-
-    return f"{content[:head_len]}\n... [{len(content) - head_len - keep_tail} chars truncated] ...\n{content[-keep_tail:]}"
-
-
-def truncate_tool_result_smart(tool_info: Dict[str, Any], aggressive: bool = False) -> Dict[str, Any]:
-    """
-    Apply smart truncation to tool call results.
-
-    Args:
-        tool_info: Parsed tool call dictionary
-        aggressive: Use aggressive limits (True for recent logs)
-
-    Returns:
-        Tool info with truncated content
-    """
-    # Truncation limits
-    stdout_limit = 300 if aggressive else 1000
-    stderr_limit = 500  # Keep more stderr (errors are important)
-    file_content_limit = 200 if aggressive else 500
-    diff_limit = 300 if aggressive else 800
-
-    result = tool_info.copy()
-
-    # Truncate stdout
-    if 'stdout' in result and result['stdout']:
-        result['stdout'] = truncate_content_smart(result['stdout'], stdout_limit, 50)
-
-    # Truncate stderr (keep more - errors matter)
-    if 'stderr' in result and result['stderr']:
-        result['stderr'] = truncate_content_smart(result['stderr'], stderr_limit, 100)
-
-    # Truncate file content
-    if 'file_content' in result and result['file_content']:
-        result['file_content'] = truncate_content_smart(result['file_content'], file_content_limit, 50)
-
-    # Truncate diff strings
-    if 'diff_string' in result and result['diff_string']:
-        result['diff_string'] = truncate_content_smart(result['diff_string'], diff_limit, 100)
-
-    return result
-
-
-def truncate_tool_result_content(content: str, is_error: bool, aggressive: bool) -> str:
-    """
-    Intelligently truncate tool result content based on content type.
-
-    Truncation rules:
-    - Errors: Keep more (500 chars) - debugging matters
-    - Read results (file content): HARD truncate (100 chars) - just show it worked
-    - MCP coordination results: Strip task_status, keep success/error only
-    - Grep/Glob results: Keep more (300 chars) - search results useful
-    - Other: Default truncate (150 chars)
-
-    Args:
-        content: Raw tool result content string
-        is_error: Whether this result is an error
-        aggressive: Whether to use aggressive truncation
-
-    Returns:
-        Truncated content string
-    """
-    if not content:
-        return ""
-
-    content_len = len(content)
-
-    # Errors - keep more for debugging
-    if is_error:
-        limit = 500 if aggressive else 1000
-        if content_len <= limit:
-            return content
-        return content[:limit] + f"... [{content_len - limit} more chars]"
-
-    # Try to parse as JSON for smarter handling
-    try:
-        data = json.loads(content)
-
-        # MCP coordination results (update_agent_progress, report_agent_finding)
-        if isinstance(data, dict):
-            # Strip task_status entirely - it's huge and redundant
-            if "task_status" in data:
-                summary = {
-                    "success": data.get("success"),
-                    "agent_id": data.get("agent_id", data.get("own_update", {}).get("agent_id")),
-                }
-                if data.get("own_update"):
-                    summary["status"] = data["own_update"].get("status")
-                    summary["progress"] = data["own_update"].get("progress")
-                if data.get("own_finding"):
-                    summary["finding_type"] = data["own_finding"].get("finding_type")
-                    summary["severity"] = data["own_finding"].get("severity")
-                return f"MCP: {json.dumps(summary)}"
-
-            # get_agent_output results - just show success + agent
-            if "output" in data and "agent_id" in data:
-                output_size = len(str(data.get("output", "")))
-                return f"agent_output: {data.get('agent_id', 'unknown')} ({output_size} chars)"
-
-            # Other success responses
-            if "success" in data:
-                return f"success={data['success']}" + (f" error={data.get('error', '')[:100]}" if not data['success'] else "")
-
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # Read tool results (file content with line numbers)
-    if "→" in content[:200] and any(c.isdigit() for c in content[:20]):
-        # This is file content with line numbers like "  123→ code here"
-        lines = content.split('\n')
-        if aggressive:
-            # Just show first 2 lines
-            preview = '\n'.join(lines[:2])[:100]
-            return f"[{len(lines)} lines] {preview}..."
-        else:
-            preview = '\n'.join(lines[:5])[:300]
-            return f"[{len(lines)} lines]\n{preview}..."
-
-    # Grep/Glob results - slightly more generous
-    if "matches found" in content.lower() or "No matches" in content:
-        limit = 200 if aggressive else 400
-        if content_len <= limit:
-            return content
-        return content[:limit] + f"... [{content_len - limit} more]"
-
-    # Default truncation
-    limit = 100 if aggressive else 200
-    if content_len <= limit:
-        return content
-    return content[:limit] + f"... [{content_len - limit} more]"
-
-
-def parse_cursor_stream_jsonl_recent(
-    log_file: str,
-    recent_lines: int = 100,
-    include_thinking: bool = False,
-    aggressive_truncate: bool = True
-) -> Dict[str, Any]:
-    """
-    Parse RECENT cursor-agent stream-json output efficiently.
-
-    This function:
-    1. Reads FIRST line for system init (session_id, model, cwd)
-    2. Tails LAST N lines for recent activity
-    3. Applies smart truncation to tool results
-    4. Skips thinking blocks by default (huge token cost)
-
-    Args:
-        log_file: Path to cursor-agent stream-json log file
-        recent_lines: Number of recent lines to parse (default 100)
-        include_thinking: Include thinking deltas (default False - saves tokens)
-        aggressive_truncate: Apply aggressive content truncation (default True)
-
-    Returns:
-        Dictionary with parsed recent activity:
-        {
-            "session_id": str,
-            "model": str,
-            "cwd": str,
-            "recent_events": List[Dict],  # Recent events only
-            "recent_tool_calls": List[Dict],
-            "recent_messages": List[str],
-            "final_result": Dict or None,
-            "stats": {
-                "total_lines": int,
-                "lines_parsed": int,
-                "truncation_applied": bool
-            },
-            "success": bool
-        }
-    """
-    if not os.path.exists(log_file):
-        return {
-            "success": False,
-            "error": f"Log file not found: {log_file}"
-        }
-
-    result = {
-        "session_id": None,
-        "model": None,
-        "cwd": None,
-        "recent_events": [],
-        "recent_tool_calls": [],
-        "recent_messages": [],
-        "final_result": None,
-        "stats": {
-            "total_lines": 0,
-            "lines_parsed": 0,
-            "truncation_applied": aggressive_truncate
-        },
-        "success": True
-    }
-
-    try:
-        # Step 1: Count total lines and read first line (system init)
-        with open(log_file, 'r', encoding='utf-8') as f:
-            first_line = f.readline().strip()
-            total_lines = 1
-            for _ in f:
-                total_lines += 1
-
-        result["stats"]["total_lines"] = total_lines
-
-        # Parse first line for system init info
-        if first_line:
-            try:
-                first_event = json.loads(first_line)
-                if first_event.get("type") == "system" and first_event.get("subtype") == "init":
-                    result["session_id"] = first_event.get("session_id")
-                    result["model"] = first_event.get("model")
-                    result["cwd"] = first_event.get("cwd")
-            except json.JSONDecodeError:
-                pass
-
-        # Step 2: Tail last N lines efficiently
-        lines_to_read = min(recent_lines, total_lines)
-        recent_raw_lines = []
-
-        with open(log_file, 'rb') as f:
-            # Seek to end and work backwards
-            f.seek(0, 2)  # End of file
-            file_size = f.tell()
-
-            if file_size == 0:
-                return result
-
-            # Read chunks from end until we have enough lines
-            buffer = b''
-            chunk_size = 8192
-            position = file_size
-
-            while len(recent_raw_lines) < lines_to_read and position > 0:
-                read_size = min(chunk_size, position)
-                position -= read_size
-                f.seek(position)
-                chunk = f.read(read_size)
-                buffer = chunk + buffer
-
-                # Split into lines
-                lines = buffer.split(b'\n')
-
-                # Keep incomplete first line in buffer for next iteration
-                if position > 0:
-                    buffer = lines[0]
-                    recent_raw_lines = lines[1:] + recent_raw_lines
-                else:
-                    recent_raw_lines = lines + recent_raw_lines
-
-            # Trim to requested count and remove empty lines
-            recent_raw_lines = [l for l in recent_raw_lines if l.strip()][-lines_to_read:]
-
-        result["stats"]["lines_parsed"] = len(recent_raw_lines)
-
-        # Step 3: Parse recent lines
-        for raw_line in recent_raw_lines:
-            try:
-                line = raw_line.decode('utf-8') if isinstance(raw_line, bytes) else raw_line
-                event = json.loads(line.strip())
-                event_type = event.get("type")
-
-                # Extract session_id if not yet found
-                if "session_id" in event and not result["session_id"]:
-                    result["session_id"] = event["session_id"]
-
-                # Skip thinking by default (huge token cost)
-                if event_type == "thinking" and not include_thinking:
-                    continue
-
-                # Assistant messages - keep full text
-                if event_type == "assistant":
-                    message = event.get("message", {})
-                    content = message.get("content", [])
-                    for item in content:
-                        if item.get("type") == "text":
-                            text = item.get("text", "")
-                            if text:
-                                result["recent_messages"].append(text)
-                                result["recent_events"].append({
-                                    "type": "assistant_message",
-                                    "text": text[:500] if aggressive_truncate else text,
-                                    "timestamp_ms": event.get("timestamp_ms")
-                                })
-
-                # Tool calls - with smart truncation
-                elif event_type == "tool_call":
-                    tool_info = parse_cursor_tool_call(event)
-                    if tool_info:
-                        # Apply smart truncation
-                        truncated_tool = truncate_tool_result_smart(tool_info, aggressive_truncate)
-                        result["recent_tool_calls"].append(truncated_tool)
-                        result["recent_events"].append({
-                            "type": "tool_call",
-                            "subtype": event.get("subtype"),
-                            "tool_info": truncated_tool
-                        })
-
-                # Final result - always include
-                elif event_type == "result":
-                    result["final_result"] = {
-                        "subtype": event.get("subtype"),
-                        "is_error": event.get("is_error", False),
-                        "duration_ms": event.get("duration_ms", 0),
-                        "result_text": truncate_content_smart(event.get("result", ""), 500, 100) if aggressive_truncate else event.get("result", "")
-                    }
-                    result["recent_events"].append({
-                        "type": "result",
-                        "subtype": event.get("subtype"),
-                        "is_error": event.get("is_error", False),
-                        "duration_ms": event.get("duration_ms", 0)
-                    })
-
-                # User messages (tool results) - AGGRESSIVE summarization
-                elif event_type == "user":
-                    msg = event.get("message", {})
-                    content = msg.get("content", [])
-                    for item in content:
-                        if item.get("type") == "tool_result":
-                            tool_use_id = item.get("tool_use_id", "")
-                            is_error = item.get("is_error", False)
-                            raw_content = str(item.get("content", ""))
-
-                            # Smart truncation based on content type
-                            truncated = truncate_tool_result_content(raw_content, is_error, aggressive_truncate)
-
-                            result["recent_events"].append({
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id[-8:] if tool_use_id else "",
-                                "is_error": is_error,
-                                "preview": truncated
-                            })
-
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                logger.warning(f"Error parsing recent log line: {e}")
-                continue
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Error reading cursor log file {log_file}: {e}")
-        return {
-            "success": False,
-            "error": f"Failed to read log file: {e}"
-        }
-
-
-def parse_cursor_tool_call(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Parse a cursor tool_call event and extract relevant information.
-    
-    Args:
-        event: Tool call event from cursor stream-json
-    
-    Returns:
-        Dictionary with tool call info, or None if not parseable
-    """
-    tool_call = event.get("tool_call", {})
-    call_id = event.get("call_id")
-    subtype = event.get("subtype")  # "started" or "completed"
-    
-    # Shell tool calls
-    if "shellToolCall" in tool_call:
-        shell_info = tool_call["shellToolCall"]
-        args = shell_info.get("args", {})
-        result_data = shell_info.get("result", {})
-        
-        info = {
-            "tool_type": "shell",
-            "call_id": call_id,
-            "status": subtype,
-            "command": args.get("command"),
-            "working_directory": args.get("workingDirectory"),
-            "timeout": args.get("timeout"),
-        }
-        
-        # Add result info if completed
-        if subtype == "completed":
-            if "success" in result_data:
-                success = result_data["success"]
-                info.update({
-                    "success": True,
-                    "exit_code": success.get("exitCode"),
-                    "stdout": success.get("stdout", ""),
-                    "stderr": success.get("stderr", ""),
-                    "execution_time_ms": success.get("executionTime")
-                })
-            elif "failure" in result_data:
-                failure = result_data["failure"]
-                info.update({
-                    "success": False,
-                    "exit_code": failure.get("exitCode"),
-                    "stdout": failure.get("stdout", ""),
-                    "stderr": failure.get("stderr", ""),
-                    "execution_time_ms": failure.get("executionTime")
-                })
-        
-        return info
-    
-    # Edit tool calls (file operations)
-    elif "editToolCall" in tool_call:
-        edit_info = tool_call["editToolCall"]
-        args = edit_info.get("args", {})
-        result_data = edit_info.get("result", {})
-        
-        info = {
-            "tool_type": "edit",
-            "call_id": call_id,
-            "status": subtype,
-            "path": args.get("path"),
-        }
-        
-        # Add result info if completed
-        if subtype == "completed" and "success" in result_data:
-            success = result_data["success"]
-            info.update({
-                "success": True,
-                "lines_added": success.get("linesAdded"),
-                "lines_removed": success.get("linesRemoved"),
-                "diff_string": success.get("diffString"),
-                "file_size": len(success.get("afterFullFileContent", ""))
-            })
-        
-        return info
-    
-    # Read tool calls
-    elif "readToolCall" in tool_call:
-        read_info = tool_call["readToolCall"]
-        args = read_info.get("args", {})
-        result_data = read_info.get("result", {})
-        
-        info = {
-            "tool_type": "read",
-            "call_id": call_id,
-            "status": subtype,
-            "path": args.get("path"),
-        }
-        
-        # Add result info if completed
-        if subtype == "completed" and "success" in result_data:
-            success = result_data["success"]
-            info.update({
-                "success": True,
-                "file_size": success.get("fileSize"),
-                "total_lines": success.get("totalLines"),
-                "is_empty": success.get("isEmpty", False)
-            })
-        
-        return info
-    
-    # Unknown tool type
-    else:
-        return {
-            "tool_type": "unknown",
-            "call_id": call_id,
-            "status": subtype,
-            "raw_data": tool_call
-        }
-
-
-def check_disk_space(workspace: str, min_mb: int = 100) -> tuple[bool, float, str]:
-    """
-    Pre-flight check for disk space before agent deployment.
-
-    Critical to prevent:
-    - OSError ENOSPC during agent writes
-    - Partial writes corrupting JSONL
-    - System-wide disk full impact
-
-    Args:
-        workspace: Workspace directory path to check
-        min_mb: Minimum required free space in MB (default: 100MB)
-
-    Returns:
-        Tuple of (has_space: bool, free_mb: float, error_msg: str)
-
-    Examples:
-        >>> check_disk_space("/path/to/workspace", min_mb=100)
-        (True, 5432.1, "")  # 5.4GB free
-
-        >>> check_disk_space("/full/partition", min_mb=100)
-        (False, 12.3, "Insufficient disk space: 12.3 MB free, need 100 MB")
-    """
-    try:
-        stat = shutil.disk_usage(workspace)
-        free_mb = stat.free / (1024 * 1024)
-
-        if free_mb >= min_mb:
-            return (True, free_mb, "")
-        else:
-            error_msg = f"Insufficient disk space: {free_mb:.1f} MB free, need {min_mb} MB"
-            return (False, free_mb, error_msg)
-
-    except Exception as e:
-        return (False, 0.0, f"Failed to check disk space: {e}")
-
-
-def test_write_access(workspace: str) -> tuple[bool, str]:
-    """
-    Test write access to workspace before agent deployment.
-
-    Critical to detect:
-    - Read-only filesystems
-    - Permission issues
-    - Network mount failures
-    - SELinux/AppArmor restrictions
-
-    Args:
-        workspace: Workspace directory path to test
-
-    Returns:
-        Tuple of (is_writable: bool, error_msg: str)
-
-    Examples:
-        >>> test_write_access("/writable/workspace")
-        (True, "")
-
-        >>> test_write_access("/readonly/mount")
-        (False, "Workspace is not writable: [Errno 30] Read-only file system")
-    """
-    test_file = None
-    try:
-        # Ensure directory exists
-        os.makedirs(workspace, mode=0o755, exist_ok=True)
-
-        # Create test file with unique name
-        test_file = os.path.join(workspace, f".write_test_{uuid.uuid4().hex[:8]}")
-
-        # Attempt write
-        with open(test_file, 'w') as f:
-            f.write("test")
-
-        # Attempt read back (verify write succeeded)
-        with open(test_file, 'r') as f:
-            content = f.read()
-            if content != "test":
-                return (False, "Write verification failed: content mismatch")
-
-        # Clean up
-        os.remove(test_file)
-
-        return (True, "")
-
-    except (OSError, IOError, PermissionError) as e:
-        error_msg = f"Workspace is not writable: {e}"
-        # Attempt cleanup if test file was created
-        if test_file and os.path.exists(test_file):
-            try:
-                os.remove(test_file)
-            except:
-                pass
-        return (False, error_msg)
-
-    except Exception as e:
-        return (False, f"Unexpected error testing write access: {e}")
-
-
-# ============================================================================
-# CONVERSATION HISTORY HELPER FUNCTION
-# ============================================================================
-
-def truncate_conversation_history(messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    """
-    Apply intelligent asymmetric truncation to conversation history.
-
-    User messages: kept mostly intact (8KB max) - preserve valuable user context
-    Assistant/Orchestrator: heavily truncated (150 chars max) - summarize verbose responses
-
-    Args:
-        messages: List of validated message dicts with role, content, timestamp
-
-    Returns:
-        Dict with truncated messages and metadata
-    """
-    USER_MAX_CHARS = 8000  # Keep user context intact
-    ASSISTANT_MAX_CHARS = 150  # Heavily truncate verbose assistant responses
-
-    truncated_messages = []
-    truncated_count = 0
-
-    for msg in messages:
-        role = msg['role']
-        content = msg['content']
-        original_length = len(content)
-        truncated = False
-
-        # Apply role-specific truncation
-        if role == 'user':
-            # Keep user messages mostly intact (up to 8KB)
-            if original_length > USER_MAX_CHARS:
-                remaining = USER_MAX_CHARS - 100  # space for suffix
-                content = content[:remaining] + f" ... (truncated, original: {original_length} chars)"
-                truncated = True
-                truncated_count += 1
-        else:  # assistant or orchestrator
-            # Heavily truncate verbose assistant responses (150 chars)
-            if original_length > ASSISTANT_MAX_CHARS:
-                content = content[:ASSISTANT_MAX_CHARS] + " ... (truncated)"
-                truncated = True
-                truncated_count += 1
-
-        truncated_messages.append({
-            'role': role,
-            'content': content,
-            'timestamp': msg['timestamp'],
-            'truncated': truncated,
-            'original_length': original_length
-        })
-
-    # Calculate metadata
-    timestamps = [msg['timestamp'] for msg in messages]
-
-    return {
-        'messages': truncated_messages,
-        'total_messages': len(truncated_messages),
-        'truncated_count': truncated_count,
-        'metadata': {
-            'collection_time': datetime.now().isoformat(),
-            'oldest_message': min(timestamps) if timestamps else None,
-            'newest_message': max(timestamps) if timestamps else None
-        }
-    }
-
-
-# ============================================================================
-# TASK PARAMETER VALIDATION FUNCTION
-# ============================================================================
-
-def validate_task_parameters(
-    description: str,
-    priority: str = "P2",
-    background_context: Optional[str] = None,
-    expected_deliverables: Optional[List[str]] = None,
-    success_criteria: Optional[List[str]] = None,
-    constraints: Optional[List[str]] = None,
-    relevant_files: Optional[List[str]] = None,
-    related_documentation: Optional[List[str]] = None,
-    client_cwd: Optional[str] = None,
-    conversation_history: Optional[List[Dict[str, str]]] = None
-) -> tuple[Dict[str, Any], List[TaskValidationWarning]]:
-    """
-    Validate all task parameters and return cleaned data + warnings.
-
-    Args:
-        description: Task description (required)
-        priority: Priority level (P0-P3)
-        background_context: Multi-line context about the problem
-        expected_deliverables: List of concrete outputs required
-        success_criteria: List of measurable completion criteria
-        conversation_history: Optional conversation context (list of message dicts)
-        constraints: List of boundaries agents must respect
-        relevant_files: List of file paths to examine
-        related_documentation: List of docs to reference
-        client_cwd: Client working directory for path resolution
-
-    Returns:
-        Tuple of (validated_data, warnings)
-
-    Raises:
-        TaskValidationError: On critical validation failures
-    """
-    warnings: List[TaskValidationWarning] = []
-    validated: Dict[str, Any] = {}
-
-    # Validate description
-    description = description.strip()
-    if len(description) < 10:
-        raise TaskValidationError("description", "Must be at least 10 characters", description)
-    if len(description) > 500:
-        raise TaskValidationError("description", "Must be at most 500 characters", description)
-
-    # Check for overly generic descriptions
-    generic_patterns = [r'^fix bug$', r'^do task$', r'^implement feature$', r'^update code$']
-    if any(re.match(pattern, description.lower()) for pattern in generic_patterns):
-        warnings.append(TaskValidationWarning("description", f"Description is too generic: '{description}'. Consider being more specific."))
-
-    validated['description'] = description
-
-    # Validate priority
-    priority = priority.upper()
-    if priority not in ["P0", "P1", "P2", "P3"]:
-        raise TaskValidationError("priority", "Must be P0, P1, P2, or P3", priority)
-    validated['priority'] = priority
-
-    # Validate background_context
-    if background_context is not None:
-        background_context = background_context.strip()
-        if len(background_context) < 50:
-            warnings.append(TaskValidationWarning("background_context", f"Background context is very short ({len(background_context)} chars). Consider adding more detail."))
-        if len(background_context) > 5000:
-            raise TaskValidationError("background_context", "Must be at most 5000 characters", f"{background_context[:100]}...")
-        validated['background_context'] = background_context
-
-    # Validate expected_deliverables
-    if expected_deliverables is not None:
-        deliverables = [d.strip() for d in expected_deliverables if d and d.strip()]
-        deliverables = list(dict.fromkeys(deliverables))
-        if len(deliverables) == 0:
-            warnings.append(TaskValidationWarning("expected_deliverables", "List is empty after filtering. Consider omitting this parameter."))
-        if len(deliverables) > 20:
-            raise TaskValidationError("expected_deliverables", f"Maximum 20 items allowed, got {len(deliverables)}", deliverables)
-        for i, item in enumerate(deliverables):
-            if len(item) < 10:
-                warnings.append(TaskValidationWarning(f"expected_deliverables[{i}]", f"Deliverable is very short: '{item}'. Consider being more specific."))
-            if len(item) > 200:
-                raise TaskValidationError(f"expected_deliverables[{i}]", "Each item must be at most 200 characters", item)
-        validated['expected_deliverables'] = {'items': deliverables, 'validation_added': datetime.now().isoformat()}
-
-    # Validate success_criteria
-    if success_criteria is not None:
-        criteria = [c.strip() for c in success_criteria if c and c.strip()]
-        criteria = list(dict.fromkeys(criteria))
-        if len(criteria) == 0:
-            warnings.append(TaskValidationWarning("success_criteria", "List is empty after filtering. Consider omitting this parameter."))
-        if len(criteria) > 15:
-            raise TaskValidationError("success_criteria", f"Maximum 15 items allowed, got {len(criteria)}", criteria)
-        measurable_keywords = ['pass', 'complete', 'under', 'above', 'below', 'equal', 'verify', 'test', 'validate', 'all', 'no', 'zero', 'every', 'none', 'within', 'less than', 'greater than', 'at least', 'at most']
-        for i, item in enumerate(criteria):
-            if len(item) < 10:
-                warnings.append(TaskValidationWarning(f"success_criteria[{i}]", f"Criterion is very short: '{item}'. Consider being more specific."))
-            if len(item) > 200:
-                raise TaskValidationError(f"success_criteria[{i}]", "Each item must be at most 200 characters", item)
-            if not any(keyword in item.lower() for keyword in measurable_keywords):
-                warnings.append(TaskValidationWarning(f"success_criteria[{i}]", f"Criterion may not be measurable: '{item}'. Consider adding quantifiable metrics."))
-        validated['success_criteria'] = {'criteria': criteria, 'all_required': True}
-
-    # Validate constraints
-    if constraints is not None:
-        constraint_list = [c.strip() for c in constraints if c and c.strip()]
-        constraint_list = list(dict.fromkeys(constraint_list))
-        if len(constraint_list) == 0:
-            warnings.append(TaskValidationWarning("constraints", "List is empty after filtering. Consider omitting this parameter."))
-        if len(constraint_list) > 15:
-            raise TaskValidationError("constraints", f"Maximum 15 items allowed, got {len(constraint_list)}", constraint_list)
-        constraint_keywords = ['do not', 'must not', 'never', 'cannot', 'should not', 'must use', 'required to', 'only use', 'must maintain']
-        for i, item in enumerate(constraint_list):
-            if len(item) < 10:
-                warnings.append(TaskValidationWarning(f"constraints[{i}]", f"Constraint is very short: '{item}'. Consider being more specific."))
-            if len(item) > 200:
-                raise TaskValidationError(f"constraints[{i}]", "Each item must be at most 200 characters", item)
-            if not any(keyword in item.lower() for keyword in constraint_keywords):
-                warnings.append(TaskValidationWarning(f"constraints[{i}]", f"Constraint should start with imperative: '{item}'"))
-        validated['constraints'] = {'rules': constraint_list, 'enforcement_level': 'strict'}
-
-    # Validate relevant_files
-    if relevant_files is not None:
-        file_list = [f.strip() for f in relevant_files if f and f.strip()]
-        file_list = list(dict.fromkeys(file_list))
-        if len(file_list) == 0:
-            warnings.append(TaskValidationWarning("relevant_files", "List is empty after filtering. Consider omitting this parameter."))
-        if len(file_list) > 50:
-            raise TaskValidationError("relevant_files", f"Maximum 50 files allowed, got {len(file_list)}", file_list)
-        validated_files = []
-        for filepath in file_list:
-            original_path = filepath
-            if not os.path.isabs(filepath):
-                if client_cwd:
-                    filepath = os.path.join(client_cwd, filepath)
-                else:
-                    filepath = os.path.abspath(filepath)
-            try:
-                filepath = os.path.realpath(filepath)
-            except Exception as e:
-                warnings.append(TaskValidationWarning("relevant_files", f"Could not resolve path '{original_path}': {e}"))
-                continue
-            if not os.path.exists(filepath):
-                warnings.append(TaskValidationWarning("relevant_files", f"File not found: '{filepath}' - agents will skip if unavailable"))
-            elif not os.path.isfile(filepath):
-                warnings.append(TaskValidationWarning("relevant_files", f"Path is not a file: '{filepath}' - may be a directory"))
-            validated_files.append(filepath)
-        validated['relevant_files'] = validated_files
-
-    # Validate related_documentation
-    if related_documentation is not None:
-        doc_list = [d.strip() for d in related_documentation if d and d.strip()]
-        doc_list = list(dict.fromkeys(doc_list))
-        if len(doc_list) == 0:
-            warnings.append(TaskValidationWarning("related_documentation", "List is empty after filtering. Consider omitting this parameter."))
-        if len(doc_list) > 20:
-            raise TaskValidationError("related_documentation", f"Maximum 20 items allowed, got {len(doc_list)}", doc_list)
-        validated_docs = []
-        for item in doc_list:
-            if item.startswith('http://') or item.startswith('https://'):
-                if ' ' in item:
-                    warnings.append(TaskValidationWarning("related_documentation", f"URL contains spaces (may be invalid): '{item}'"))
-                if item.endswith('.'):
-                    warnings.append(TaskValidationWarning("related_documentation", f"URL ends with period (may be typo): '{item}'"))
-                validated_docs.append(item)
-            else:
-                original_path = item
-                if not os.path.isabs(item):
-                    if client_cwd:
-                        item = os.path.join(client_cwd, item)
-                    else:
-                        item = os.path.abspath(item)
-                if not os.path.exists(item):
-                    warnings.append(TaskValidationWarning("related_documentation", f"Documentation file not found: '{original_path}' - agents will skip if unavailable"))
-                validated_docs.append(item)
-        validated['related_documentation'] = validated_docs
-
-    # Validate conversation_history
-    if conversation_history is not None:
-        if not isinstance(conversation_history, list):
-            raise TaskValidationError(
-                "conversation_history",
-                "Must be a list of message dictionaries",
-                type(conversation_history).__name__
-            )
-
-        # Limit to 50 most recent messages
-        if len(conversation_history) > 50:
-            warnings.append(TaskValidationWarning(
-                "conversation_history",
-                f"Too many messages ({len(conversation_history)} > 50). Keeping only the last 50 messages."
-            ))
-            conversation_history = conversation_history[-50:]
-
-        # Validate each message
-        validated_messages = []
-        for i, msg in enumerate(conversation_history):
-            if not isinstance(msg, dict):
-                raise TaskValidationError(
-                    f"conversation_history[{i}]",
-                    "Each message must be a dictionary",
-                    type(msg).__name__
-                )
-
-            # Check required fields
-            missing_fields = []
-            if 'role' not in msg:
-                missing_fields.append('role')
-            if 'content' not in msg:
-                missing_fields.append('content')
-
-            if missing_fields:
-                raise TaskValidationError(
-                    f"conversation_history[{i}]",
-                    f"Missing required fields: {', '.join(missing_fields)}",
-                    list(msg.keys())
-                )
-
-            # Validate role
-            role = msg['role'].strip().lower()
-            if role not in ['user', 'assistant', 'orchestrator']:
-                raise TaskValidationError(
-                    f"conversation_history[{i}].role",
-                    f"Role must be one of ['user', 'assistant', 'orchestrator'], got '{role}'",
-                    role
-                )
-
-            # Get and clean content
-            content = str(msg['content']).strip()
-
-            # Skip empty messages
-            if not content:
-                warnings.append(TaskValidationWarning(
-                    f"conversation_history[{i}].content",
-                    "Empty message content - message will be skipped"
-                ))
-                continue
-
-            # Validate/fix timestamp
-            timestamp = msg.get('timestamp', '')
-            if not timestamp:
-                timestamp = datetime.now().isoformat()
-                warnings.append(TaskValidationWarning(
-                    f"conversation_history[{i}].timestamp",
-                    f"Missing timestamp - added current time: {timestamp}"
-                ))
-            else:
-                try:
-                    datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                except (ValueError, AttributeError):
-                    new_timestamp = datetime.now().isoformat()
-                    timestamp = new_timestamp
-                    warnings.append(TaskValidationWarning(
-                        f"conversation_history[{i}].timestamp",
-                        f"Invalid timestamp format - replaced with current time"
-                    ))
-
-            validated_messages.append({
-                'role': role,
-                'content': content,
-                'timestamp': timestamp
-            })
-
-        # Check if all messages were filtered out
-        if len(validated_messages) == 0:
-            warnings.append(TaskValidationWarning(
-                "conversation_history",
-                "All messages were filtered out due to validation issues. History will be omitted."
-            ))
-            validated['conversation_history'] = None
-        else:
-            validated['conversation_history'] = validated_messages
-
-    return validated, warnings
-
-
 @mcp.tool
 def create_real_task(
     description: str,
     priority: str = "P2",
+    phases: Optional[List[Dict[str, Any]]] = None,
     client_cwd: str = None,
     background_context: Optional[str] = None,
     expected_deliverables: Optional[List[str]] = None,
@@ -3378,36 +228,66 @@ def create_real_task(
     conversation_history: Optional[List[Dict[str, str]]] = None
 ) -> Dict[str, Any]:
     """
-    Create a real orchestration task with proper workspace.
+    Create an orchestration task with mandatory phases.
+
+    IMPORTANT: Phases are MANDATORY. The orchestrator must think and plan phases
+    upfront. No auto-defaults are created - if phases are not provided, the task
+    creation will fail with PHASES_REQUIRED error.
+
+    Phase State Machine (8 states):
+        PENDING -> ACTIVE -> AWAITING_REVIEW -> UNDER_REVIEW -> APPROVED
+                                             -> REJECTED -> REVISING -> ACTIVE
+                                             -> ESCALATED
 
     Args:
         description: Description of the task
-        priority: Task priority
-        client_cwd: Optional client working directory (defaults to server's location if not provided)
-        background_context: Optional background information and context for the task
+        priority: Task priority (P0-P4)
+        phases: REQUIRED - List of phase definitions. Each phase needs 'name', optional 'description'.
+        client_cwd: IMPORTANT - The client's working directory where agents should run.
+                    Pass the current project path so agents operate in the correct location.
+                    If not provided, agents may run in the wrong directory.
+        background_context: Optional background information
         expected_deliverables: Optional list of expected deliverables
         success_criteria: Optional list of success criteria
         constraints: Optional list of constraints
         relevant_files: Optional list of relevant file paths
-        conversation_history: Optional conversation context (list of message dicts with role, content, timestamp)
+        conversation_history: Optional conversation context
+
+    Example phases:
+        [
+            {"name": "Investigation", "description": "Research the codebase"},
+            {"name": "Implementation", "description": "Write the code"},
+            {"name": "Testing", "description": "Verify everything works"}
+        ]
 
     Returns:
-        Task creation result with optional validation warnings and enhancement flags
+        Task creation result with phases, validation warnings, and enhancement flags
     """
-    ensure_workspace()
+    # Debug log incoming parameters to help diagnose cross-project issues
+    logger.info(f"create_real_task called: description={description[:50]}..., phases={len(phases) if phases else 0}, client_cwd={client_cwd}")
 
-    # Use client's working directory if provided, otherwise use server's WORKSPACE_BASE
-    if client_cwd:
-        # Resolve template variables (e.g., ${workspaceFolder} -> actual path)
-        client_cwd = resolve_workspace_variables(client_cwd)
-        workspace_base = os.path.join(client_cwd, '.agent-workspace')
-        logger.info(f"Using client workspace: {workspace_base}")
-    else:
-        workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
-        logger.info(f"Using server workspace: {workspace_base}")
-    
-    # Ensure client workspace directory exists
-    os.makedirs(workspace_base, exist_ok=True)
+    try:
+        ensure_workspace()
+
+        # Use client's working directory if provided, otherwise use server's WORKSPACE_BASE
+        if client_cwd:
+            # Resolve template variables (e.g., ${workspaceFolder} -> actual path)
+            client_cwd = resolve_workspace_variables(client_cwd)
+            workspace_base = os.path.join(client_cwd, '.agent-workspace')
+            logger.info(f"Using client workspace: {workspace_base}")
+        else:
+            workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
+            logger.info(f"Using server workspace: {workspace_base}")
+
+        # Ensure client workspace directory exists
+        os.makedirs(workspace_base, exist_ok=True)
+    except Exception as e:
+        logger.error(f"create_real_task workspace setup failed: {e}")
+        return {
+            "success": False,
+            "error": f"Workspace setup failed: {str(e)}",
+            "hint": "Check if client_cwd is a valid path and you have write permissions"
+        }
 
     # Ensure global registry exists in this workspace
     ensure_global_registry(workspace_base)
@@ -3544,18 +424,54 @@ def create_real_task(
     os.makedirs(f"{workspace}/progress", exist_ok=True)
     os.makedirs(f"{workspace}/logs", exist_ok=True)
     os.makedirs(f"{workspace}/findings", exist_ok=True)
-    os.makedirs(f"{workspace}/output", exist_ok=True)  # For agent outputs
-    
+    os.makedirs(f"{workspace}/output", exist_ok=True)
+    os.makedirs(f"{workspace}/handovers", exist_ok=True)
+
+    # Process phases - MANDATORY: Phases must be explicitly defined
+    # The orchestrator MUST think and plan phases upfront - no auto-defaults allowed
+    if not phases or len(phases) == 0:
+        return {
+            "success": False,
+            "error": "PHASES_REQUIRED: You must define phases for this task.",
+            "hint": "Break down your task into logical phases (e.g., Investigation, Implementation, Testing). "
+                    "Each phase should have a 'name' and optional 'description'.",
+            "example": [
+                {"name": "Phase 1: Investigation", "description": "Research and understand the problem"},
+                {"name": "Phase 2: Implementation", "description": "Write the code"},
+                {"name": "Phase 3: Verification", "description": "Test and verify the solution"}
+            ]
+        }
+    else:
+        # Validate and enrich provided phases
+        enriched_phases = []
+        for i, phase in enumerate(phases):
+            if not isinstance(phase, dict):
+                return {"success": False, "error": f"Phase {i+1} must be a dictionary"}
+            if not phase.get('name'):
+                return {"success": False, "error": f"Phase {i+1} missing required 'name' field"}
+
+            enriched_phases.append({
+                "id": f"phase-{uuid.uuid4().hex[:8]}",
+                "order": i + 1,
+                "name": phase.get('name'),
+                "description": phase.get('description', ''),
+                "status": "ACTIVE" if i == 0 else "PENDING",
+                "created_at": datetime.now().isoformat(),
+                "started_at": datetime.now().isoformat() if i == 0 else None
+            })
+
     # Create task registry
     registry = {
         "task_id": task_id,
         "task_description": description,
         "created_at": datetime.now().isoformat(),
         "workspace": workspace,
-        "workspace_base": workspace_base,  # Store the workspace base for global registry updates
-        "client_cwd": client_cwd,  # Store client's working directory for context detection
+        "workspace_base": workspace_base,
+        "client_cwd": client_cwd,
         "status": "INITIALIZED",
         "priority": priority,
+        "phases": enriched_phases,
+        "current_phase_index": 0,
         "agents": [],
         "agent_hierarchy": {"orchestrator": []},
         "max_agents": DEFAULT_MAX_AGENTS,
@@ -3564,6 +480,7 @@ def create_real_task(
         "total_spawned": 0,
         "active_count": 0,
         "completed_count": 0,
+        "reviews": [],
         "orchestration_guidance": {
             "min_specialization_depth": 2,  # Encourage at least 2 layers (practical minimum)
             "recommended_child_agents_per_parent": 3,  # Each parent should spawn ~3 children (manageable)
@@ -3646,7 +563,8 @@ def create_real_task(
             logger.warning(f"Failed to register task in default global registry: {e}")
             # Non-fatal - task is still properly registered in its own workspace
     
-    # Build return value with enhanced context info
+    # Build return value with phases and enhanced context info
+    first_phase_name = enriched_phases[0]['name'] if enriched_phases else "Phase 1"
     result = {
         "success": True,
         "task_id": task_id,
@@ -3654,7 +572,27 @@ def create_real_task(
         "priority": priority,
         "workspace": workspace,
         "status": "INITIALIZED",
-        "has_enhanced_context": has_enhanced_context
+        "phases_count": len(enriched_phases),
+        "current_phase": first_phase_name,
+        "phases": [{"name": p['name'], "status": p['status']} for p in enriched_phases],
+        "has_enhanced_context": has_enhanced_context,
+        # GUIDANCE: Tell orchestrator what to do next
+        "guidance": {
+            "current_state": "task_initialized",
+            "next_action": f"Deploy agents for '{first_phase_name}' phase using deploy_headless_agent",
+            "available_actions": [
+                f"deploy_headless_agent - Deploy agents to work on '{first_phase_name}'",
+                "get_real_task_status - Check full task details",
+                "get_phase_status - View current phase state"
+            ],
+            "warnings": validation_warnings if validation_warnings else None,
+            "blocked_reason": None,
+            "context": {
+                "first_phase": first_phase_name,
+                "total_phases": len(enriched_phases),
+                "workspace": workspace
+            }
+        }
     }
 
     # Include validation warnings if any
@@ -3666,141 +604,80 @@ def create_real_task(
         for key, value in task_context.items():
             result[key] = value
 
+    # Register task for health monitoring
+    try:
+        register_task_for_monitoring(task_id, workspace_base)
+        logger.info(f"Registered task {task_id} for health monitoring")
+    except Exception as e:
+        logger.warning(f"Failed to register task {task_id} for health monitoring: {e}")
+        # Non-critical - continue without health monitoring
+
     return result
-
-def find_existing_agent(task_id: str, agent_type: str, registry: dict, status_filter: list = None) -> dict:
-    """
-    Check if an agent of the same type already exists for this task.
-
-    Args:
-        task_id: Task ID to check
-        agent_type: Type of agent to look for
-        registry: Task registry dictionary
-        status_filter: List of statuses to consider (default: ['running', 'working'])
-
-    Returns:
-        Existing agent dict if found, None otherwise
-    """
-    if status_filter is None:
-        status_filter = ['running', 'working']
-
-    # Search task registry for existing agent of same type
-    for agent in registry.get('agents', []):
-        if agent.get('type') == agent_type and agent.get('status') in status_filter:
-            return agent
-
-    return None
-
-def verify_agent_id_unique(agent_id: str, registry: dict, global_registry: dict) -> bool:
-    """
-    Verify that an agent_id doesn't already exist in task or global registry.
-
-    Args:
-        agent_id: Generated agent ID to verify
-        registry: Task registry dictionary
-        global_registry: Global registry dictionary
-
-    Returns:
-        True if unique, False if already exists
-    """
-    # Check task registry
-    for agent in registry.get('agents', []):
-        if agent.get('id') == agent_id:
-            return False
-
-    # Check global registry
-    if agent_id in global_registry.get('agents', {}):
-        return False
-
-    return True
-
-def generate_unique_agent_id(agent_type: str, registry: dict, global_registry: dict, max_attempts: int = 10) -> str:
-    """
-    Generate a unique agent ID with collision detection.
-
-    Args:
-        agent_type: Type of agent
-        registry: Task registry dictionary
-        global_registry: Global registry dictionary
-        max_attempts: Maximum number of attempts to generate unique ID
-
-    Returns:
-        Unique agent ID
-
-    Raises:
-        RuntimeError: If unable to generate unique ID after max_attempts
-    """
-    for attempt in range(max_attempts):
-        # Generate ID with timestamp and random component
-        timestamp = datetime.now().strftime('%H%M%S')
-        random_suffix = uuid.uuid4().hex[:6]
-        agent_id = f"{agent_type}-{timestamp}-{random_suffix}"
-
-        # Verify uniqueness
-        if verify_agent_id_unique(agent_id, registry, global_registry):
-            return agent_id
-
-        # If collision detected, add microseconds for next attempt
-        if attempt > 0:
-            microseconds = datetime.now().strftime('%f')[:3]
-            agent_id = f"{agent_type}-{timestamp}{microseconds}-{random_suffix}"
-            if verify_agent_id_unique(agent_id, registry, global_registry):
-                return agent_id
-
-    raise RuntimeError(f"Failed to generate unique agent_id after {max_attempts} attempts")
 
 @mcp.tool
 def deploy_headless_agent(
     task_id: str,
-    agent_type: str, 
+    agent_type: str,
     prompt: str,
-    parent: str = "orchestrator"
+    parent: str = "orchestrator",
+    phase_index: Optional[int] = None,
+    model: str = "opus"
 ) -> Dict[str, Any]:
     """
-    Deploy a headless agent using configured backend (tmux+claude or cursor-agent).
-    
-    Automatically routes to appropriate deployment method based on AGENT_BACKEND config:
-    - 'claude': Uses tmux + claude CLI (original method)
-    - 'cursor': Uses cursor-agent with native process management
-    
+    Deploy a headless Claude agent using tmux for background execution.
+
+    IMPORTANT: phase_index is automatically set to current_phase_index if not provided.
+    This ensures all agents are properly tagged for automatic phase enforcement.
+
+    MODEL SELECTION GUIDE (aim for ~50/50 ratio):
+    - "opus": Complex reasoning, architecture decisions, security analysis, difficult bugs,
+              multi-step planning, UI implementation, critical code review. USE FOR HARD TASKS.
+    - "sonnet": Codebase research, file searches, documentation, simple fixes, data gathering,
+                validation tasks, straightforward implementation. USE FOR EASIER TASKS.
+
     Args:
         task_id: Task ID to deploy agent for
         agent_type: Type of agent (investigator, fixer, etc.)
         prompt: Instructions for the agent
         parent: Parent agent ID
-    
+        phase_index: Phase index this agent belongs to (auto-set if None)
+        model: "opus" (default) for complex logic/implementation, "sonnet" for research/simple tasks
+
     Returns:
         Agent deployment result
     """
-    # Route to appropriate backend
-    if AGENT_BACKEND == 'cursor':
-        logger.info(f"Using cursor-agent backend for deployment")
-        return deploy_cursor_agent(task_id, agent_type, prompt, parent)
-    else:
-        logger.info(f"Using claude+tmux backend for deployment")
-        return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent)
+    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, model)
 
 
 def deploy_claude_tmux_agent(
     task_id: str,
-    agent_type: str, 
+    agent_type: str,
     prompt: str,
-    parent: str = "orchestrator"
+    parent: str = "orchestrator",
+    phase_index: Optional[int] = None,
+    model: str = "opus"
 ) -> Dict[str, Any]:
     """
     Deploy a headless Claude agent using tmux for background execution.
-    
+
     Original deployment method using tmux sessions and claude CLI.
-    
+
     Args:
         task_id: Task ID to deploy agent for
         agent_type: Type of agent (investigator, fixer, etc.)
         prompt: Instructions for the agent
         parent: Parent agent ID
-    
+        phase_index: Phase index this agent belongs to (auto-set from registry if None)
+        model: Claude model to use - "opus" (default) or "sonnet" (faster, cheaper)
+
     Returns:
         Agent deployment result
     """
+    # Validate model parameter
+    valid_models = ["opus", "sonnet"]
+    if model not in valid_models:
+        logger.warning(f"Invalid model '{model}', defaulting to 'opus'. Valid: {valid_models}")
+        model = "opus"
     if not check_tmux_available():
         logger.error("tmux not available for agent deployment")
         return {
@@ -3817,71 +694,98 @@ def deploy_claude_tmux_agent(
         }
     
     registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    # Load registry
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
-    
-    # Anti-spiral checks
-    if registry['active_count'] >= registry['max_concurrent']:
-        return {
-            "success": False,
-            "error": f"Too many active agents ({registry['active_count']}/{registry['max_concurrent']})"
-        }
-    
-    if registry['total_spawned'] >= registry['max_agents']:
-        return {
-            "success": False,
-            "error": f"Max agents reached ({registry['total_spawned']}/{registry['max_agents']})"
-        }
 
-    # Check for duplicate agents (deduplication)
-    existing_agent = find_existing_agent(task_id, agent_type, registry)
-    if existing_agent:
-        logger.warning(f"Agent type '{agent_type}' already exists for task {task_id}: {existing_agent['id']}")
-        return {
-            "success": False,
-            "error": f"Agent of type '{agent_type}' already running for this task",
-            "existing_agent_id": existing_agent['id'],
-            "existing_agent_status": existing_agent['status'],
-            "note": "Use the existing agent or wait for it to complete before spawning a new one"
-        }
-
-    # Load global registry for unique ID verification
-    workspace_base = get_workspace_base_from_task_workspace(workspace)
-    global_reg_path = get_global_registry_path(workspace_base)
-    with open(global_reg_path, 'r') as f:
-        global_registry = json.load(f)
-
-    # Generate unique agent ID with collision detection
+    # CRITICAL: Consolidate ALL registry operations under a single lock to prevent race conditions
+    # This prevents concurrent agent deployments from corrupting registry counts
     try:
-        agent_id = generate_unique_agent_id(agent_type, registry, global_registry)
-    except RuntimeError as e:
-        logger.error(f"Failed to generate unique agent ID: {e}")
+        with LockedRegistryFile(registry_path) as (registry, registry_file):
+            # DEFENSIVE: Recalculate active_count from actual agent statuses to auto-heal inconsistencies
+            # This fixes cases where agents complete without proper decrement (e.g., reviewer bug fixed above)
+            active_statuses = ['running', 'working', 'blocked']
+            actual_active = sum(1 for a in registry.get('agents', []) if a.get('status') in active_statuses)
+            if registry.get('active_count', 0) != actual_active:
+                logger.warning(f"ACTIVE_COUNT_HEAL: Correcting active_count from {registry.get('active_count')} to {actual_active} (actual)")
+                registry['active_count'] = actual_active
+
+            # Anti-spiral checks
+            if registry['active_count'] >= registry['max_concurrent']:
+                return {
+                    "success": False,
+                    "error": f"Too many active agents ({registry['active_count']}/{registry['max_concurrent']})"
+                }
+
+            if registry['total_spawned'] >= registry['max_agents']:
+                return {
+                    "success": False,
+                    "error": f"Max agents reached ({registry['total_spawned']}/{registry['max_agents']})"
+                }
+
+            # Check for duplicate agents (deduplication)
+            existing_agent = find_existing_agent(task_id, agent_type, registry)
+            if existing_agent:
+                logger.warning(f"Agent type '{agent_type}' already exists for task {task_id}: {existing_agent['id']}")
+                return {
+                    "success": False,
+                    "error": f"Agent of type '{agent_type}' already running for this task",
+                    "existing_agent_id": existing_agent['id'],
+                    "existing_agent_status": existing_agent['status'],
+                    "note": "Use the existing agent or wait for it to complete before spawning a new one"
+                }
+
+            # Load global registry for unique ID verification (separate lock)
+            workspace_base = get_workspace_base_from_task_workspace(workspace)
+            global_reg_path = get_global_registry_path(workspace_base)
+
+            try:
+                with LockedRegistryFile(global_reg_path) as (global_registry, global_file):
+                    # Generate unique agent ID with collision detection
+                    try:
+                        agent_id = generate_unique_agent_id(agent_type, registry, global_registry)
+                    except RuntimeError as e:
+                        logger.error(f"Failed to generate unique agent ID: {e}")
+                        return {
+                            "success": False,
+                            "error": str(e)
+                        }
+
+                    # Keep global registry loaded for later update
+                    global_registry_snapshot = dict(global_registry)
+            except TimeoutError as e:
+                logger.error(f"Timeout acquiring global registry lock: {e}")
+                return {
+                    "success": False,
+                    "error": "Global registry locked - too many concurrent deployments"
+                }
+
+            session_name = f"agent_{agent_id}"
+
+            # Calculate agent depth based on parent (using already-loaded registry)
+            depth = 1 if parent == "orchestrator" else 2
+            if parent != "orchestrator":
+                for agent in registry['agents']:
+                    if agent['id'] == parent:
+                        depth = agent.get('depth', 1) + 1
+                        break
+
+            # Get task description for orchestration guidance (using already-loaded registry)
+            task_description = registry.get('task_description', '')
+            max_depth = registry.get('max_depth', 5)
+
+            # AUTO-SET phase_index if not provided - ensures all agents tagged to current phase
+            if phase_index is None:
+                phase_index = registry.get('current_phase_index', 0)
+                logger.info(f"Auto-assigning agent {agent_id} to phase {phase_index}")
+
+            # Store registry reference for later use (still within lock)
+            task_registry = registry
+
+    except TimeoutError as e:
+        logger.error(f"Timeout acquiring registry lock for deployment: {e}")
         return {
             "success": False,
-            "error": str(e)
+            "error": "Registry locked - too many concurrent deployments"
         }
 
-    session_name = f"agent_{agent_id}"
-    
-    # Calculate agent depth based on parent
-    depth = 1 if parent == "orchestrator" else 2
-    if parent != "orchestrator":
-        # Try to find parent depth and increment
-        with open(registry_path, 'r') as f:
-            registry = json.load(f)
-        for agent in registry['agents']:
-            if agent['id'] == parent:
-                depth = agent.get('depth', 1) + 1
-                break
-    
-    # Load registry to get task description for orchestration guidance
-    with open(registry_path, 'r') as f:
-        task_registry = json.load(f)
-
-    task_description = task_registry.get('task_description', '')
-    max_depth = task_registry.get('max_depth', 5)
     orchestration_prompt = create_orchestration_guidance_prompt(agent_type, task_description, depth, max_depth)
 
     # Build task enrichment context from registry
@@ -3898,16 +802,22 @@ def deploy_claude_tmux_agent(
 
     # Detect project context from CLIENT's project directory (not MCP server's cwd)
     client_project_dir = task_registry.get('client_cwd')
-    if not client_project_dir:
+    if client_project_dir:
+        logger.info(f"Agent {agent_id} working dir from registry client_cwd: {client_project_dir}")
+    else:
         # Fallback: extract from workspace path if client_cwd not stored
         # workspace = "/path/to/client/project/.agent-workspace/TASK-xxx"
         # client_project_dir = "/path/to/client/project"
         workspace_parent = os.path.dirname(workspace)
         if workspace_parent.endswith('.agent-workspace'):
             client_project_dir = os.path.dirname(workspace_parent)
+            logger.info(f"Agent {agent_id} working dir extracted from workspace path: {client_project_dir}")
         else:
             # Workspace is in server's WORKSPACE_BASE, use that as fallback
+            # WARNING: This means agents will run in MCP server's directory, not client's
             client_project_dir = os.getcwd()
+            logger.warning(f"WORKING_DIR_FALLBACK: Agent {agent_id} using MCP server cwd '{client_project_dir}' - "
+                          f"client_cwd was not stored in registry. Agents may run in wrong directory!")
 
     project_context = detect_project_context(client_project_dir)
     context_prompt = format_project_context_prompt(project_context)
@@ -4000,7 +910,36 @@ Parameters:
 - If you don't report for 5+ minutes, you'll be flagged as stalled
 - BEFORE claiming done: perform self-review and list what could be improved
 
+🚫 DO NOT USE THESE TOOLS (they waste tokens and return nothing useful):
+- get_agent_output - This is for ORCHESTRATOR monitoring only, not agent coordination
+- Peer agent logs are NOT accessible to you - use findings/progress instead
+
 You are working independently but can coordinate through the MCP orchestrator system.
+
+═══════════════════════════════════════════════════════════════════════════════
+⚡ MANDATORY COMPLETION STEP - YOUR WORK IS NOT FINISHED UNTIL YOU DO THIS ⚡
+═══════════════════════════════════════════════════════════════════════════════
+
+Before you stop working, you MUST call:
+
+```
+mcp__claude-orchestrator__update_agent_progress(
+    task_id="{task_id}",
+    agent_id="{agent_id}",
+    status="completed",
+    message="<SUMMARY: List what you accomplished and any key findings>",
+    progress=100
+)
+```
+
+IF YOU DO NOT CALL THIS:
+- The system will think you are still working
+- The phase CANNOT proceed to review
+- Other agents will wait indefinitely for you
+- The orchestrator will be stuck
+
+COMPLETE YOUR WORK AND REPORT STATUS!
+═══════════════════════════════════════════════════════════════════════════════
 
 BEGIN YOUR WORK NOW!
 """
@@ -4050,10 +989,14 @@ BEGIN YOUR WORK NOW!
             f.write(agent_prompt)
         prompt_file_created = prompt_file  # Track for cleanup on failure
 
-        # Run Claude in the calling project's directory, not the orchestrator workspace
-        calling_project_dir = os.getcwd()
+        # Run Claude in the CLIENT's project directory, not the MCP server's cwd
+        # client_project_dir was extracted earlier from task_registry.get('client_cwd') or workspace path
+        calling_project_dir = client_project_dir
         claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'npx -y @anthropic-ai/claude-code')
-        claude_flags = os.getenv('CLAUDE_FLAGS', '--print --output-format stream-json --verbose --dangerously-skip-permissions --model sonnet')
+        # Build claude flags with dynamic model selection (opus=best reasoning, sonnet=faster/cheaper)
+        base_flags = '--print --output-format stream-json --verbose --dangerously-skip-permissions'
+        claude_flags = f'{base_flags} --model {model}'
+        logger.info(f"Deploying agent {agent_id} with model: {model}")
 
         # JSONL log file path - unique per agent_id
         log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
@@ -4096,13 +1039,16 @@ BEGIN YOUR WORK NOW!
                 "error": "Agent session terminated immediately after creation"
             }
         
-        # Update registry with new agent
+        # CRITICAL: Atomically update BOTH registries to prevent race conditions
+        # This ensures agent deployment is all-or-nothing
         agent_data = {
             "id": agent_id,
             "type": agent_type,
+            "model": model,  # Track which model this agent uses (opus/sonnet)
             "tmux_session": session_name,
             "parent": parent,
-            "depth": 1 if parent == "orchestrator" else 2,
+            "depth": depth,  # Use the calculated depth
+            "phase_index": phase_index,  # PHASE ENFORCEMENT: Tag agent to phase for auto-completion tracking
             "status": "running",
             "started_at": datetime.now().isoformat(),
             "progress": 0,
@@ -4116,46 +1062,100 @@ BEGIN YOUR WORK NOW!
                 "deploy_log": f"{workspace}/logs/deploy_{agent_id}.json"
             }
         }
-        
-        registry['agents'].append(agent_data)
-        registry['total_spawned'] += 1
-        registry['active_count'] += 1
-        
-        # Update hierarchy
-        if parent not in registry['agent_hierarchy']:
-            registry['agent_hierarchy'][parent] = []
-        registry['agent_hierarchy'][parent].append(agent_id)
-        
-        # Save updated registry
-        with open(registry_path, 'w') as f:
-            json.dump(registry, f, indent=2)
-        registry_updated = True  # Track for cleanup awareness
 
-        # Update global registry (in the same workspace_base as the task)
+        # Update local registry with atomic locking
+        try:
+            with LockedRegistryFile(registry_path) as (registry, f):
+                registry['agents'].append(agent_data)
+                registry['total_spawned'] += 1
+                registry['active_count'] += 1
+
+                # Update hierarchy
+                if parent not in registry['agent_hierarchy']:
+                    registry['agent_hierarchy'][parent] = []
+                registry['agent_hierarchy'][parent].append(agent_id)
+
+                # Write atomically
+                f.seek(0)
+                f.write(json.dumps(registry, indent=2))
+                f.truncate()
+                registry_updated = True  # Track for cleanup awareness
+        except TimeoutError as e:
+            logger.error(f"Timeout acquiring registry lock for update: {e}")
+            # Clean up tmux session since deployment failed
+            if tmux_session_created:
+                try:
+                    subprocess.run(['tmux', 'kill-session', '-t', session_name],
+                                 capture_output=True, timeout=5)
+                    logger.info(f"Killed orphaned tmux session after lock timeout: {session_name}")
+                except Exception:
+                    pass
+            return {
+                "success": False,
+                "error": "Registry locked - deployment failed"
+            }
+
+        # Update global registry with atomic locking
         workspace_base = get_workspace_base_from_task_workspace(workspace)
         global_reg_path = get_global_registry_path(workspace_base)
-        with open(global_reg_path, 'r') as f:
-            global_reg = json.load(f)
-        
-        global_reg['total_agents_spawned'] += 1
-        global_reg['active_agents'] += 1
-        global_reg['agents'][agent_id] = {
-            'task_id': task_id,
-            'type': agent_type,
-            'parent': parent,
-            'started_at': datetime.now().isoformat(),
-            'tmux_session': session_name
-        }
-        
-        with open(global_reg_path, 'w') as f:
-            json.dump(global_reg, f, indent=2)
-        global_registry_updated = True  # Track for cleanup awareness
+
+        try:
+            with LockedRegistryFile(global_reg_path) as (global_reg, f):
+                global_reg['total_agents_spawned'] += 1
+                global_reg['active_agents'] += 1
+                global_reg['agents'][agent_id] = {
+                    'task_id': task_id,
+                    'type': agent_type,
+                    'parent': parent,
+                    'status': 'running',  # Initial status - CRITICAL for cleanup detection
+                    'started_at': datetime.now().isoformat(),
+                    'tmux_session': session_name
+                }
+
+                # Write atomically
+                f.seek(0)
+                f.write(json.dumps(global_reg, indent=2))
+                f.truncate()
+                global_registry_updated = True  # Track for cleanup awareness
+        except TimeoutError as e:
+            logger.error(f"Timeout acquiring global registry lock: {e}")
+            # Rollback local registry since global failed
+            try:
+                with LockedRegistryFile(registry_path) as (registry, f):
+                    # Remove the agent we just added
+                    registry['agents'] = [a for a in registry['agents'] if a['id'] != agent_id]
+                    registry['total_spawned'] -= 1
+                    registry['active_count'] -= 1
+                    if parent in registry['agent_hierarchy']:
+                        registry['agent_hierarchy'][parent].remove(agent_id)
+
+                    f.seek(0)
+                    f.write(json.dumps(registry, indent=2))
+                    f.truncate()
+                    logger.info(f"Rolled back local registry after global registry lock timeout")
+            except Exception as rollback_err:
+                logger.error(f"Failed to rollback local registry: {rollback_err}")
+
+            # Clean up tmux session
+            if tmux_session_created:
+                try:
+                    subprocess.run(['tmux', 'kill-session', '-t', session_name],
+                                 capture_output=True, timeout=5)
+                    logger.info(f"Killed orphaned tmux session after global lock timeout: {session_name}")
+                except Exception:
+                    pass
+
+            return {
+                "success": False,
+                "error": "Global registry locked - deployment failed and rolled back"
+            }
 
         # Log successful deployment
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "action": "agent_deployed",
             "agent_id": agent_id,
+            "model": model,
             "tmux_session": session_name,
             "command": claude_command[:100] + "...",
             "success": True,
@@ -4170,13 +1170,33 @@ BEGIN YOUR WORK NOW!
             "agent_id": agent_id,
             "tmux_session": session_name,
             "type": agent_type,
+            "model": model,  # Model used for this agent (opus/sonnet)
             "parent": parent,
             "task_id": task_id,
             "status": "deployed",
             "workspace": workspace,
-            "deployment_method": "tmux session"
+            "deployment_method": "tmux session",
+            # GUIDANCE: Tell orchestrator what to do next
+            "guidance": {
+                "current_state": "agent_deployed",
+                "next_action": f"Monitor agent progress using get_agent_output or deploy more agents",
+                "available_actions": [
+                    f"get_agent_output - Monitor agent {agent_id}",
+                    "deploy_headless_agent - Deploy additional agents",
+                    "check_phase_progress - Check if phase is ready for review",
+                    "get_real_task_status - View all agents status"
+                ],
+                "warnings": None,
+                "blocked_reason": None,
+                "context": {
+                    "agent_id": agent_id,
+                    "agent_type": agent_type,
+                    "model": model,
+                    "tmux_session": session_name
+                }
+            }
         }
-        
+
     except Exception as e:
         logger.error(f"Agent deployment failed: {e}")
         logger.error(f"Cleaning up orphaned resources...")
@@ -4214,433 +1234,6 @@ BEGIN YOUR WORK NOW!
         }
 
 
-def deploy_cursor_agent(
-    task_id: str,
-    agent_type: str,
-    prompt: str,
-    parent: str = "orchestrator"
-) -> Dict[str, Any]:
-    """
-    Deploy a headless agent using cursor-agent for background execution.
-    
-    Alternative to tmux+claude deployment, using cursor-agent with:
-    - Native process management (PID tracking instead of tmux)
-    - Stream-JSON output format (structured NDJSON logs)
-    - Built-in session management
-    - Better tool call tracking
-    
-    Args:
-        task_id: Task ID to deploy agent for
-        agent_type: Type of agent (investigator, fixer, etc.)
-        prompt: Instructions for the agent
-        parent: Parent agent ID
-    
-    Returns:
-        Agent deployment result with cursor-specific metadata
-    """
-    if not check_cursor_agent_available():
-        logger.error("cursor-agent not available for agent deployment")
-        return {
-            "success": False,
-            "error": "cursor-agent is not available - required for cursor backend. Install: curl https://cursor.com/install -fsSL | bash"
-        }
-    
-    # Find the task workspace
-    workspace = find_task_workspace(task_id)
-    if not workspace:
-        return {
-            "success": False,
-            "error": f"Task {task_id} not found in any workspace location"
-        }
-    
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    # Load registry
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
-    
-    # Anti-spiral checks
-    if registry['active_count'] >= registry['max_concurrent']:
-        return {
-            "success": False,
-            "error": f"Too many active agents ({registry['active_count']}/{registry['max_concurrent']})"
-        }
-    
-    if registry['total_spawned'] >= registry['max_agents']:
-        return {
-            "success": False,
-            "error": f"Max agents reached ({registry['total_spawned']}/{registry['max_agents']})"
-        }
-    
-    # Check for duplicate agents
-    existing_agent = find_existing_agent(task_id, agent_type, registry)
-    if existing_agent:
-        logger.warning(f"Agent type '{agent_type}' already exists for task {task_id}: {existing_agent['id']}")
-        return {
-            "success": False,
-            "error": f"Agent of type '{agent_type}' already running for this task",
-            "existing_agent_id": existing_agent['id'],
-            "existing_agent_status": existing_agent['status']
-        }
-    
-    # Load global registry for unique ID verification
-    workspace_base = get_workspace_base_from_task_workspace(workspace)
-    global_reg_path = get_global_registry_path(workspace_base)
-    with open(global_reg_path, 'r') as f:
-        global_registry = json.load(f)
-    
-    # Generate unique agent ID
-    try:
-        agent_id = generate_unique_agent_id(agent_type, registry, global_registry)
-    except RuntimeError as e:
-        logger.error(f"Failed to generate unique agent ID: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
-    
-    # Calculate agent depth
-    depth = 1 if parent == "orchestrator" else 2
-    if parent != "orchestrator":
-        with open(registry_path, 'r') as f:
-            registry = json.load(f)
-        for agent in registry['agents']:
-            if agent['id'] == parent:
-                depth = agent.get('depth', 1) + 1
-                break
-    
-    # Load registry for task context
-    with open(registry_path, 'r') as f:
-        task_registry = json.load(f)
-    
-    task_description = task_registry.get('task_description', '')
-    max_depth = task_registry.get('max_depth', 5)
-    orchestration_prompt = create_orchestration_guidance_prompt(agent_type, task_description, depth, max_depth)
-    
-    # Build enrichment context
-    try:
-        enrichment_prompt = format_task_enrichment_prompt(task_registry)
-    except Exception as e:
-        logger.error(f"Error in format_task_enrichment_prompt: {e}")
-        raise
-    
-    # Detect project context
-    client_project_dir = task_registry.get('client_cwd')
-    if not client_project_dir:
-        workspace_parent = os.path.dirname(workspace)
-        if workspace_parent.endswith('.agent-workspace'):
-            client_project_dir = os.path.dirname(workspace_parent)
-        else:
-            client_project_dir = os.getcwd()
-    
-    project_context = detect_project_context(client_project_dir)
-    context_prompt = format_project_context_prompt(project_context)
-    
-    # Get type-specific requirements
-    type_requirements = get_type_specific_requirements(agent_type)
-    
-    # Create agent prompt (same as tmux version)
-    agent_prompt = f"""You are a headless Claude agent in an orchestrator system.
-
-🤖 AGENT IDENTITY:
-- Agent ID: {agent_id}
-- Agent Type: {agent_type}
-- Task ID: {task_id}
-- Parent Agent: {parent}
-- Depth Level: {depth}
-- Workspace: {workspace}
-
-📝 YOUR MISSION:
-{prompt}
-{enrichment_prompt}
-{context_prompt}
-
-{type_requirements}
-
-{orchestration_prompt}
-
-🔗 MCP SELF-REPORTING WITH COORDINATION - You MUST use these MCP functions to report progress:
-
-1. PROGRESS UPDATES (every few minutes):
-```
-mcp__claude-orchestrator__update_agent_progress
-Parameters: 
-- task_id: "{task_id}"
-- agent_id: "{agent_id}"  
-- status: "working" | "blocked" | "completed" | "error"
-- message: "Description of current work"
-- progress: 0-100 (percentage)
-
-RETURNS: Your update confirmation + comprehensive status of ALL agents for coordination!
-```
-
-2. REPORT FINDINGS (whenever you discover something important):
-```
-mcp__claude-orchestrator__report_agent_finding
-Parameters:
-- task_id: "{task_id}"
-- agent_id: "{agent_id}"
-- finding_type: "issue" | "solution" | "insight" | "recommendation"
-- severity: "low" | "medium" | "high" | "critical"  
-- message: "What you discovered"
-- data: {{"any": "additional info"}}
-
-RETURNS: Your finding confirmation + comprehensive status of ALL agents for coordination!
-```
-
-3. SPAWN CHILD AGENTS (if you need specialized help):
-```
-mcp__claude-orchestrator__spawn_child_agent
-Parameters:
-- task_id: "{task_id}"
-- parent_agent_id: "{agent_id}"
-- child_agent_type: "investigator" | "builder" | "fixer" | etc
-- child_prompt: "Specific task for the child agent"
-```
-
-🚨 CRITICAL PROTOCOL:
-1. START by calling update_agent_progress with status="working", progress=0
-2. REGULARLY update progress every few minutes
-3. REPORT key findings as you discover them
-4. SPAWN child agents if you need specialized help
-5. END by calling update_agent_progress with status="completed", progress=100
-
-You are working independently but can coordinate through the MCP orchestrator system.
-
-BEGIN YOUR WORK NOW!
-"""
-    
-    # Resource tracking for cleanup on failure
-    prompt_file_created = None
-    process_started = None
-    log_file_created = None
-    registry_updated = False
-    global_registry_updated = False
-    
-    try:
-        # Pre-flight checks
-        has_space, free_mb, space_error = check_disk_space(workspace, min_mb=100)
-        if not has_space:
-            return {
-                "success": False,
-                "error": space_error
-            }
-        
-        # Create logs directory
-        logs_dir = f"{workspace}/logs"
-        try:
-            os.makedirs(logs_dir, exist_ok=True)
-            # Test write access
-            test_file = f"{logs_dir}/.write_test_{uuid.uuid4().hex[:8]}"
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
-        except Exception as e:
-            logger.error(f"Workspace logs directory not writable: {e}")
-            return {
-                "success": False,
-                "error": f"Workspace logs directory not writable: {e}"
-            }
-        
-        # Store agent prompt in file
-        prompt_file = os.path.abspath(f"{workspace}/agent_prompt_{agent_id}.txt")
-        with open(prompt_file, 'w') as f:
-            f.write(agent_prompt)
-        prompt_file_created = prompt_file
-        
-        # Get cursor-agent path and prepare command
-        cursor_path = get_cursor_agent_path()
-        log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
-        log_file_created = log_file
-        
-        # Prepare cursor-agent flags
-        cursor_flags = CURSOR_AGENT_FLAGS.split()
-        model = CURSOR_AGENT_MODEL
-        
-        # Build cursor-agent command
-        cmd = [
-            cursor_path,
-            "-p", agent_prompt,
-            "--output-format", "stream-json",
-            "--model", model
-        ] + cursor_flags
-        
-        logger.info(f"Deploying cursor-agent: {agent_id}")
-        logger.info(f"Command: {' '.join(cmd[:5])}... (prompt truncated)")
-        logger.info(f"Working directory: {client_project_dir}")
-        logger.info(f"Log file: {log_file}")
-        
-        # Start cursor-agent as background process
-        with open(log_file, 'w') as log_f:
-            process = subprocess.Popen(
-                cmd,
-                cwd=client_project_dir,
-                stdout=log_f,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,  # Detach from parent
-                preexec_fn=os.setpgrp if hasattr(os, 'setpgrp') else None
-            )
-        
-        process_started = process.pid
-        logger.info(f"cursor-agent started with PID: {process.pid}")
-        
-        # Give process a moment to start
-        time.sleep(2)
-        
-        # Check if process is still running
-        try:
-            process.poll()
-            if process.returncode is not None:
-                # Process died immediately
-                logger.error(f"cursor-agent terminated immediately with exit code: {process.returncode}")
-                
-                # Read log file for error details
-                error_details = ""
-                if os.path.exists(log_file):
-                    with open(log_file, 'r') as f:
-                        error_details = f.read()[:500]
-                
-                # Cleanup
-                if prompt_file_created and os.path.exists(prompt_file_created):
-                    os.remove(prompt_file_created)
-                
-                return {
-                    "success": False,
-                    "error": f"cursor-agent terminated immediately (exit code: {process.returncode})",
-                    "error_details": error_details
-                }
-        except Exception as e:
-            logger.warning(f"Could not check process status: {e}")
-        
-        # Update registry with new agent
-        agent_data = {
-            "id": agent_id,
-            "type": agent_type,
-            "backend": "cursor",  # Mark as cursor-agent deployment
-            "cursor_pid": process.pid,
-            "cursor_session_id": None,  # Will be extracted from logs later
-            "parent": parent,
-            "depth": depth,
-            "status": "running",
-            "started_at": datetime.now().isoformat(),
-            "progress": 0,
-            "last_update": datetime.now().isoformat(),
-            "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
-            "tracked_files": {
-                "prompt_file": prompt_file,
-                "log_file": log_file,
-                "progress_file": f"{workspace}/progress/{agent_id}_progress.jsonl",
-                "findings_file": f"{workspace}/findings/{agent_id}_findings.jsonl",
-                "deploy_log": f"{workspace}/logs/deploy_{agent_id}.json"
-            }
-        }
-        
-        registry['agents'].append(agent_data)
-        registry['total_spawned'] += 1
-        registry['active_count'] += 1
-        
-        # Update hierarchy
-        if parent not in registry['agent_hierarchy']:
-            registry['agent_hierarchy'][parent] = []
-        registry['agent_hierarchy'][parent].append(agent_id)
-        
-        # Save updated registry
-        with open(registry_path, 'w') as f:
-            json.dump(registry, f, indent=2)
-        registry_updated = True
-        
-        # Update global registry
-        with open(global_reg_path, 'r') as f:
-            global_reg = json.load(f)
-        
-        global_reg['total_agents_spawned'] += 1
-        global_reg['active_agents'] += 1
-        global_reg['agents'][agent_id] = {
-            'task_id': task_id,
-            'type': agent_type,
-            'backend': 'cursor',
-            'parent': parent,
-            'started_at': datetime.now().isoformat(),
-            'cursor_pid': process.pid
-        }
-        
-        with open(global_reg_path, 'w') as f:
-            json.dump(global_reg, f, indent=2)
-        global_registry_updated = True
-        
-        # Log successful deployment
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "action": "agent_deployed",
-            "agent_id": agent_id,
-            "backend": "cursor",
-            "cursor_pid": process.pid,
-            "cursor_agent_path": cursor_path,
-            "model": model,
-            "command": f"{cursor_path} -p [PROMPT] --output-format stream-json --model {model} {' '.join(cursor_flags)}",
-            "success": True
-        }
-        
-        with open(f"{workspace}/logs/deploy_{agent_id}.json", 'w') as f:
-            json.dump(log_entry, f, indent=2)
-        
-        return {
-            "success": True,
-            "agent_id": agent_id,
-            "cursor_pid": process.pid,
-            "type": agent_type,
-            "parent": parent,
-            "task_id": task_id,
-            "status": "deployed",
-            "workspace": workspace,
-            "deployment_method": "cursor-agent",
-            "model": model,
-            "log_file": log_file
-        }
-        
-    except Exception as e:
-        logger.error(f"cursor-agent deployment failed: {e}")
-        logger.error(f"Cleaning up orphaned resources...")
-        
-        # Kill process if it was started
-        if process_started:
-            try:
-                os.kill(process_started, 9)  # SIGKILL
-                logger.info(f"Killed orphaned cursor-agent process: {process_started}")
-            except Exception as cleanup_err:
-                logger.error(f"Failed to kill process: {cleanup_err}")
-        
-        # Remove orphaned files
-        if prompt_file_created and os.path.exists(prompt_file_created):
-            try:
-                os.remove(prompt_file_created)
-                logger.info(f"Removed orphaned prompt file: {prompt_file_created}")
-            except Exception as cleanup_err:
-                logger.error(f"Failed to remove prompt file: {cleanup_err}")
-        
-        if log_file_created and os.path.exists(log_file_created):
-            try:
-                os.remove(log_file_created)
-                logger.info(f"Removed orphaned log file: {log_file_created}")
-            except Exception as cleanup_err:
-                logger.error(f"Failed to remove log file: {cleanup_err}")
-        
-        # Note registry corruption
-        if registry_updated or global_registry_updated:
-            logger.error(f"Registry was partially updated before failure - may need manual cleanup")
-        
-        return {
-            "success": False,
-            "error": f"Failed to deploy cursor-agent: {str(e)}",
-            "cleanup_performed": True,
-            "resources_cleaned": {
-                "cursor_pid": process_started,
-                "prompt_file": prompt_file_created,
-                "log_file": log_file_created
-            }
-        }
-
-
 @mcp.tool
 def get_real_task_status(task_id: str) -> Dict[str, Any]:
     """
@@ -4661,45 +1254,61 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
         }
     
     registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
-    
-    # Update agent statuses based on tmux sessions
+
+    # CRITICAL: Use LockedRegistryFile to prevent race conditions
+    # Multiple status checks can run concurrently - without locking, we get:
+    # - Lost updates (active_count decremented multiple times for same agent)
+    # - Corrupted counters (read-modify-write races)
     agents_completed = []
-    for agent in registry['agents']:
-        if agent['status'] == 'running' and 'tmux_session' in agent:
-            # Check if tmux session still exists
-            if not check_tmux_session_exists(agent['tmux_session']):
-                agent['status'] = 'completed'
-                agent['completed_at'] = datetime.now().isoformat()
-                registry['active_count'] = max(0, registry['active_count'] - 1)
-                registry['completed_count'] = registry.get('completed_count', 0) + 1
-                agents_completed.append(agent['id'])
-                logger.info(f"Detected agent {agent['id']} completed (tmux session terminated)")
-    
-    # Save updated registry
-    with open(registry_path, 'w') as f:
-        json.dump(registry, f, indent=2)
-    
-    # Update global registry for agents that completed
+
+    # IMPORTANT: Check ALL active statuses, not just 'running'
+    # Agents change to 'working' when they start, so we must check all active states
+    active_statuses_to_check = {'running', 'working', 'blocked'}
+
+    try:
+        with LockedRegistryFile(registry_path) as (registry, f):
+            # Update agent statuses based on tmux sessions
+            for agent in registry['agents']:
+                agent_status = agent.get('status', '')
+                # Check if agent is in an active status AND has a tmux session
+                if agent_status in active_statuses_to_check and 'tmux_session' in agent:
+                    # Check if tmux session still exists
+                    if not check_tmux_session_exists(agent['tmux_session']):
+                        agent['status'] = 'completed'
+                        agent['completed_at'] = datetime.now().isoformat()
+                        agent['completion_reason'] = 'tmux_session_terminated'
+                        registry['active_count'] = max(0, registry['active_count'] - 1)
+                        registry['completed_count'] = registry.get('completed_count', 0) + 1
+                        agents_completed.append(agent['id'])
+                        logger.info(f"Detected agent {agent['id']} completed (tmux session terminated, was {agent_status})")
+
+            # Write back atomically while still holding lock
+            f.seek(0)
+            f.write(json.dumps(registry, indent=2))
+            f.truncate()
+    except TimeoutError as e:
+        logger.error(f"Timeout acquiring lock on task registry: {e}")
+        return {"success": False, "error": "Registry locked by another process"}
+    except FileNotFoundError:
+        return {"success": False, "error": f"Registry file not found: {registry_path}"}
+
+    # Update global registry for agents that completed (also with locking)
     if agents_completed:
         try:
             workspace_base = get_workspace_base_from_task_workspace(workspace)
             global_reg_path = get_global_registry_path(workspace_base)
             if os.path.exists(global_reg_path):
-                with open(global_reg_path, 'r') as f:
-                    global_reg = json.load(f)
-                
-                for agent_id in agents_completed:
-                    if agent_id in global_reg.get('agents', {}):
-                        global_reg['agents'][agent_id]['status'] = 'completed'
-                        global_reg['agents'][agent_id]['completed_at'] = datetime.now().isoformat()
-                        global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
-                
-                with open(global_reg_path, 'w') as f:
-                    json.dump(global_reg, f, indent=2)
-                
+                with LockedRegistryFile(global_reg_path) as (global_reg, gf):
+                    for agent_id in agents_completed:
+                        if agent_id in global_reg.get('agents', {}):
+                            global_reg['agents'][agent_id]['status'] = 'completed'
+                            global_reg['agents'][agent_id]['completed_at'] = datetime.now().isoformat()
+                            global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
+
+                    gf.seek(0)
+                    gf.write(json.dumps(global_reg, indent=2))
+                    gf.truncate()
+
                 logger.info(f"Global registry updated: {len(agents_completed)} agents completed, active agents: {global_reg['active_agents']}")
         except Exception as e:
             logger.error(f"Failed to update global registry for completed agents: {e}")
@@ -4748,12 +1357,173 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
     progress_entries.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
     findings_entries.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
     
+    # Add phase tracking info
+    phases = registry.get('phases', [])
+    current_phase_index = registry.get('current_phase_index', 0)
+    current_phase = phases[current_phase_index] if current_phase_index < len(phases) else None
+
+    # Check phase completion status
+    phase_completion = None
+    if current_phase:
+        phase_id = current_phase.get('id')
+        phase_agents = [a for a in registry.get('agents', []) if a.get('phase_id') == phase_id]
+        completed_agents = [a for a in phase_agents if a.get('status') in AGENT_TERMINAL_STATUSES]
+        pending_agents = [a.get('id') for a in phase_agents if a.get('status') not in AGENT_TERMINAL_STATUSES]
+
+        all_complete = len(phase_agents) > 0 and len(completed_agents) == len(phase_agents)
+        phase_completion = {
+            "all_agents_done": all_complete,
+            "total_agents": len(phase_agents),
+            "completed_agents": len(completed_agents),
+            "pending_agents": pending_agents,
+            "ready_for_review": all_complete and current_phase.get('status') == 'ACTIVE'
+        }
+
+    # Generate contextual guidance based on current state
+    phase_status = current_phase.get('status') if current_phase else 'UNKNOWN'
+    phase_name = current_phase.get('name') if current_phase else 'Unknown'
+    active_count = registry.get('active_count', 0)
+
+    # Determine guidance based on phase status and agent states
+    if phase_status == 'ACTIVE':
+        if active_count > 0:
+            guidance = {
+                "current_state": "phase_active_agents_working",
+                "next_action": f"Wait for {active_count} agents to complete or monitor with get_agent_output",
+                "available_actions": [
+                    "get_agent_output - Monitor specific agent logs",
+                    "check_phase_progress - Check if ready for review",
+                    "deploy_headless_agent - Add more agents if needed"
+                ],
+                "warnings": None,
+                "blocked_reason": None
+            }
+        elif phase_completion and phase_completion.get('all_agents_done'):
+            guidance = {
+                "current_state": "phase_active_all_done",
+                "next_action": "Phase will auto-submit for review. Use check_phase_progress to verify.",
+                "available_actions": [
+                    "check_phase_progress - Verify phase completion",
+                    "get_phase_status - View phase details"
+                ],
+                "warnings": None,
+                "blocked_reason": None
+            }
+        else:
+            guidance = {
+                "current_state": "phase_active_no_agents",
+                "next_action": f"Deploy agents for '{phase_name}' phase using deploy_headless_agent",
+                "available_actions": [
+                    "deploy_headless_agent - Deploy phase agents",
+                    "get_phase_status - View phase requirements"
+                ],
+                "warnings": None,
+                "blocked_reason": None
+            }
+    elif phase_status == 'AWAITING_REVIEW':
+        guidance = {
+            "current_state": "phase_awaiting_review",
+            "next_action": "Reviewers will be auto-spawned. Wait for UNDER_REVIEW status.",
+            "available_actions": [
+                "get_phase_status - Check review status",
+                "trigger_agentic_review - Manually trigger if not started"
+            ],
+            "warnings": None,
+            "blocked_reason": None
+        }
+    elif phase_status == 'UNDER_REVIEW':
+        guidance = {
+            "current_state": "phase_under_review",
+            "next_action": "Wait for reviewer verdicts. Check progress with get_review_status.",
+            "available_actions": [
+                "get_review_status - Check reviewer verdicts",
+                "get_agent_output - Monitor reviewer agents",
+                "abort_stalled_review - Abort if reviewers stalled"
+            ],
+            "warnings": None,
+            "blocked_reason": None
+        }
+    elif phase_status == 'APPROVED':
+        next_phase = phases[current_phase_index + 1] if current_phase_index + 1 < len(phases) else None
+        if next_phase:
+            guidance = {
+                "current_state": "phase_approved_has_next",
+                "next_action": f"Advance to '{next_phase.get('name')}' using advance_to_next_phase",
+                "available_actions": [
+                    "advance_to_next_phase - Move to next phase",
+                    "get_phase_handover - Review phase handover"
+                ],
+                "warnings": None,
+                "blocked_reason": None
+            }
+        else:
+            guidance = {
+                "current_state": "task_complete",
+                "next_action": "All phases completed. Task is finished.",
+                "available_actions": [
+                    "get_phase_handover - Review final deliverables"
+                ],
+                "warnings": None,
+                "blocked_reason": None
+            }
+    elif phase_status == 'REJECTED':
+        guidance = {
+            "current_state": "phase_rejected",
+            "next_action": "Review rejection reasons and deploy fix agents",
+            "available_actions": [
+                "get_review_status - View rejection feedback",
+                "deploy_headless_agent - Deploy agents to fix issues"
+            ],
+            "warnings": ["Phase was rejected by reviewers"],
+            "blocked_reason": "Review rejected - fixes required before re-submission"
+        }
+    elif phase_status == 'REVISING':
+        guidance = {
+            "current_state": "phase_revising",
+            "next_action": "Deploy agents to fix issues, then phase will auto-resubmit",
+            "available_actions": [
+                "deploy_headless_agent - Deploy fix agents",
+                "get_review_status - View required fixes"
+            ],
+            "warnings": None,
+            "blocked_reason": None
+        }
+    elif phase_status == 'ESCALATED':
+        guidance = {
+            "current_state": "phase_escalated",
+            "next_action": "Manual intervention required - all reviewers failed",
+            "available_actions": [
+                "approve_phase_review(force_escalated=True) - Force approval",
+                "trigger_agentic_review - Retry with new reviewers"
+            ],
+            "warnings": ["All reviewers crashed without submitting verdicts"],
+            "blocked_reason": "Escalated - manual decision required"
+        }
+    else:
+        guidance = {
+            "current_state": f"phase_{phase_status.lower()}",
+            "next_action": "Check phase status for details",
+            "available_actions": [
+                "get_phase_status - View current phase state"
+            ],
+            "warnings": None,
+            "blocked_reason": None
+        }
+
     return {
         "success": True,
         "task_id": task_id,
         "description": registry.get('task_description'),
         "status": registry.get('status'),
         "workspace": workspace,
+        "phases": {
+            "total": len(phases),
+            "current_index": current_phase_index,
+            "current_phase": current_phase.get('name') if current_phase else None,
+            "current_status": current_phase.get('status') if current_phase else None,
+            "completion": phase_completion,
+            "all_phases": [{"name": p.get('name'), "status": p.get('status')} for p in phases]
+        },
         "agents": {
             "total_spawned": registry.get('total_spawned', 0),
             "active": registry.get('active_count', 0),
@@ -4773,871 +1543,10 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
             "max_agents": registry.get('max_agents', 10),
             "max_concurrent": registry.get('max_concurrent', 5),
             "max_depth": registry.get('max_depth', 3)
-        }
+        },
+        # GUIDANCE: Tell orchestrator what to do next
+        "guidance": guidance
     }
-
-# ============================================================================
-# JSONL Helper Functions for Robust Log Reading
-# ============================================================================
-
-def read_jsonl_lines(filepath: str, max_lines: Optional[int] = None) -> List[str]:
-    """
-    Read JSONL file with robust error handling for incomplete/malformed lines.
-    Returns raw text lines (not parsed JSON).
-
-    Args:
-        filepath: Path to JSONL file
-        max_lines: Maximum number of lines to read (None = all)
-
-    Returns:
-        List of text lines
-    """
-    if not os.path.exists(filepath):
-        return []
-
-    try:
-        lines = []
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if line:  # Skip empty lines
-                    lines.append(line)
-                    if max_lines and len(lines) >= max_lines:
-                        break
-        return lines
-    except Exception as e:
-        logger.warning(f"Error reading JSONL file {filepath}: {e}")
-        return []
-
-def tail_jsonl_efficient(filepath: str, n_lines: int) -> List[str]:
-    """
-    Efficiently read last N lines from JSONL file using reverse seeking.
-    Handles large files (GB+) without loading entire file into memory.
-
-    Args:
-        filepath: Path to JSONL file
-        n_lines: Number of lines to read from end
-
-    Returns:
-        List of last N text lines
-    """
-    if not os.path.exists(filepath):
-        return []
-
-    if n_lines <= 0:
-        return []
-
-    try:
-        file_size = os.path.getsize(filepath)
-        if file_size == 0:
-            return []
-
-        # For small files, just read all lines
-        if file_size < 1024 * 1024:  # < 1MB
-            all_lines = read_jsonl_lines(filepath)
-            return all_lines[-n_lines:] if len(all_lines) > n_lines else all_lines
-
-        # For large files, seek from end
-        # Estimate: avg line ~300 bytes, read slightly more to be safe
-        seek_size = min(n_lines * 400, file_size)
-
-        with open(filepath, 'rb') as f:
-            f.seek(-seek_size, os.SEEK_END)
-            data = f.read().decode('utf-8', errors='ignore')
-
-        # Split into lines and filter
-        lines = [line.strip() for line in data.split('\n') if line.strip()]
-
-        # Return last N lines
-        return lines[-n_lines:] if len(lines) > n_lines else lines
-
-    except Exception as e:
-        logger.warning(f"Error tailing JSONL file {filepath}: {e}")
-        return []
-
-def filter_lines_regex(lines: List[str], pattern: Optional[str]) -> tuple[List[str], Optional[str]]:
-    """
-    Apply regex filter to lines.
-
-    Args:
-        lines: List of text lines
-        pattern: Regex pattern (None = no filtering)
-
-    Returns:
-        Tuple of (filtered_lines, error_message)
-        error_message is None if successful, string if regex invalid
-    """
-    if not pattern:
-        return lines, None
-
-    try:
-        regex = re.compile(pattern)
-    except re.error as e:
-        return [], f"Invalid regex pattern: {e}"
-
-    filtered = [line for line in lines if regex.search(line)]
-    return filtered, None
-
-def parse_jsonl_lines(lines: List[str]) -> tuple[List[dict], List[dict]]:
-    """
-    Parse JSONL lines with robust error recovery.
-    Skips malformed lines and continues parsing.
-
-    Args:
-        lines: List of text lines (each should be valid JSON)
-
-    Returns:
-        Tuple of (parsed_objects, parse_errors)
-        parse_errors contains info about lines that failed to parse
-    """
-    parsed = []
-    errors = []
-
-    for i, line in enumerate(lines):
-        try:
-            obj = json.loads(line)
-            parsed.append(obj)
-        except json.JSONDecodeError as e:
-            errors.append({
-                "line_number": i + 1,
-                "line_preview": line[:100],  # Truncate for safety
-                "error": str(e)
-            })
-            # Continue parsing next lines (don't fail on single bad line)
-
-    return parsed, errors
-
-def format_output_by_type(lines: List[str], format_type: str) -> tuple[Any, Optional[List[dict]]]:
-    """
-    Format lines according to requested output format.
-
-    Args:
-        lines: List of text lines
-        format_type: 'text', 'jsonl', or 'parsed'
-
-    Returns:
-        Tuple of (formatted_output, parse_errors)
-        parse_errors is None unless format_type='parsed'
-    """
-    if format_type == "text":
-        return '\n'.join(lines), None
-
-    elif format_type == "jsonl":
-        return '\n'.join(lines), None
-
-    elif format_type == "parsed":
-        parsed, errors = parse_jsonl_lines(lines)
-        return parsed, errors if errors else None
-
-    else:
-        raise ValueError(f"Unknown format type: {format_type}. Must be 'text', 'jsonl', or 'parsed'")
-
-def collect_log_metadata(filepath: str, lines: List[str], filtered_lines: List[str],
-                         parse_errors: Optional[List[dict]], source: str) -> dict:
-    """
-    Collect metadata about the log file and processing.
-
-    Args:
-        filepath: Path to log file
-        lines: Original lines before filtering
-        filtered_lines: Lines after filtering
-        parse_errors: Parse errors if format='parsed', None otherwise
-        source: 'jsonl_log' or 'tmux_session'
-
-    Returns:
-        Metadata dictionary
-    """
-    metadata = {
-        "log_source": source,
-        "total_lines": len(lines),
-        "returned_lines": len(filtered_lines)
-    }
-
-    if os.path.exists(filepath):
-        stat = os.stat(filepath)
-        metadata["file_path"] = filepath
-        metadata["file_size_bytes"] = stat.st_size
-        metadata["file_modified_time"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
-
-    # Extract timestamps from first and last lines (if JSONL)
-    if filtered_lines:
-        try:
-            first_obj = json.loads(filtered_lines[0])
-            if 'timestamp' in first_obj:
-                metadata["first_timestamp"] = first_obj['timestamp']
-        except:
-            pass
-
-        try:
-            last_obj = json.loads(filtered_lines[-1])
-            if 'timestamp' in last_obj:
-                metadata["last_timestamp"] = last_obj['timestamp']
-        except:
-            pass
-
-    if parse_errors:
-        metadata["parse_errors"] = parse_errors
-
-    return metadata
-
-# ============================================================================
-# JSONL Truncation Functions - Prevent Log Bloat
-# ============================================================================
-
-# Truncation limits
-MAX_LINE_LENGTH = 8192  # 8KB per JSONL line
-MAX_TOOL_RESULT_CONTENT = 2048  # 2KB for tool_result.content
-MAX_ASSISTANT_TEXT = 4096  # 4KB for assistant text messages
-
-# Aggressive truncation limits (for quick status checks)
-AGGRESSIVE_LINE_LENGTH = 1024  # 1KB per line
-AGGRESSIVE_TOOL_RESULT = 512  # 512 bytes for tool_result.content
-
-def detect_repetitive_content(lines: List[str]) -> dict:
-    """
-    Analyze lines for repetitive patterns (e.g., same tool calls repeated).
-
-    Returns:
-        Dict with repetition statistics and groups of similar lines
-    """
-    tool_call_counts = {}
-    error_patterns = {}
-    status_updates = []
-
-    for i, line in enumerate(lines):
-        try:
-            obj = json.loads(line)
-
-            # Track tool calls
-            if obj.get('type') == 'tool_use':
-                tool_name = obj.get('name', 'unknown')
-                tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
-
-            # Track errors
-            elif 'error' in obj or obj.get('type') == 'error':
-                error_msg = str(obj.get('error', obj.get('message', '')))[:100]
-                error_patterns[error_msg] = error_patterns.get(error_msg, 0) + 1
-
-            # Track status updates
-            elif obj.get('type') in ['status', 'progress']:
-                status_updates.append(i)
-
-        except (json.JSONDecodeError, AttributeError):
-            continue
-
-    # Identify highly repetitive tool calls (more than 5 occurrences)
-    repetitive_tools = {k: v for k, v in tool_call_counts.items() if v > 5}
-
-    return {
-        'tool_call_counts': tool_call_counts,
-        'repetitive_tools': repetitive_tools,
-        'error_patterns': error_patterns,
-        'status_update_indices': status_updates,
-        'has_repetition': bool(repetitive_tools) or any(count > 3 for count in error_patterns.values())
-    }
-
-def extract_critical_lines(lines: List[str], analysis: dict) -> List[int]:
-    """
-    Identify indices of critical lines that should be preserved.
-
-    Returns:
-        List of line indices that are critical
-    """
-    critical_indices = set()
-
-    for i, line in enumerate(lines):
-        try:
-            obj = json.loads(line)
-            obj_type = obj.get('type', '')
-
-            # Always keep errors
-            if 'error' in obj or obj_type == 'error':
-                critical_indices.add(i)
-
-            # Keep status changes (but not all status updates)
-            elif obj_type in ['completed', 'failed', 'blocked']:
-                critical_indices.add(i)
-
-            # Keep findings/insights
-            elif obj_type in ['finding', 'insight', 'recommendation']:
-                critical_indices.add(i)
-
-            # Keep first and last occurrence of each unique tool call
-            elif obj_type == 'tool_use':
-                tool_name = obj.get('name', '')
-                # This is simplified - in practice we'd track first/last per tool
-                # For now, we'll handle this in the sampling logic
-                pass
-
-        except (json.JSONDecodeError, AttributeError):
-            continue
-
-    # Always include first and last lines
-    if lines:
-        critical_indices.add(0)
-        critical_indices.add(len(lines) - 1)
-
-    return sorted(list(critical_indices))
-
-def intelligent_sample_lines(lines: List[str], max_bytes: int, analysis: dict) -> tuple[List[str], dict]:
-    """
-    Intelligently sample lines to fit within max_bytes while preserving critical info.
-
-    Strategy:
-    1. Always include critical lines (errors, status changes, findings)
-    2. For repetitive content, show first + last + count summary
-    3. Sample evenly from remaining lines
-
-    Returns:
-        Tuple of (sampled_lines, sampling_stats)
-    """
-    if not lines:
-        return [], {'sampled': False}
-
-    # Calculate current size
-    current_size = sum(len(line) for line in lines)
-    if current_size <= max_bytes:
-        return lines, {'sampled': False, 'original_size': current_size}
-
-    # Get critical line indices
-    critical_indices = extract_critical_lines(lines, analysis)
-    critical_lines_size = sum(len(lines[i]) for i in critical_indices)
-
-    # If critical lines alone exceed max_bytes, we need aggressive truncation
-    if critical_lines_size > max_bytes:
-        # Take first N and last N critical lines
-        budget_per_end = max_bytes // 2
-        result = []
-        size = 0
-
-        # Add from beginning
-        for i in critical_indices:
-            if size + len(lines[i]) > budget_per_end:
-                break
-            result.append((i, lines[i]))
-            size += len(lines[i])
-
-        # Add separator
-        separator = json.dumps({
-            'type': 'truncation_marker',
-            'message': f'... {len(lines) - len(result)} lines omitted ...',
-            'reason': 'Critical lines exceeded budget'
-        })
-        result.append((-1, separator))
-
-        # Add from end
-        size = 0
-        end_lines = []
-        for i in reversed(critical_indices):
-            if size + len(lines[i]) > budget_per_end:
-                break
-            end_lines.insert(0, (i, lines[i]))
-            size += len(lines[i])
-
-        result.extend(end_lines)
-
-        return [line for _, line in result], {
-            'sampled': True,
-            'strategy': 'critical_only',
-            'original_lines': len(lines),
-            'sampled_lines': len(result),
-            'original_size': current_size,
-            'final_size': sum(len(l) for _, l in result)
-        }
-
-    # Otherwise, smart sampling: critical + evenly sampled non-critical
-    remaining_budget = max_bytes - critical_lines_size
-    non_critical_indices = [i for i in range(len(lines)) if i not in critical_indices]
-
-    # Sample non-critical lines
-    sampled_non_critical = []
-    if non_critical_indices and remaining_budget > 0:
-        # Calculate how many we can fit
-        avg_line_size = sum(len(lines[i]) for i in non_critical_indices) / len(non_critical_indices)
-        target_count = min(len(non_critical_indices), int(remaining_budget / avg_line_size))
-
-        # Sample evenly
-        if target_count > 0:
-            step = len(non_critical_indices) / target_count
-            sampled_non_critical = [non_critical_indices[int(i * step)] for i in range(target_count)]
-
-    # Combine and sort
-    all_indices = sorted(critical_indices + sampled_non_critical)
-    result = []
-
-    for i, idx in enumerate(all_indices):
-        result.append(lines[idx])
-        # Add gap markers where we skipped lines
-        if i < len(all_indices) - 1 and all_indices[i + 1] - idx > 1:
-            gap_size = all_indices[i + 1] - idx - 1
-            marker = json.dumps({
-                'type': 'truncation_marker',
-                'message': f'... {gap_size} lines omitted ...'
-            })
-            result.append(marker)
-
-    final_size = sum(len(line) for line in result)
-
-    return result, {
-        'sampled': True,
-        'strategy': 'intelligent_sampling',
-        'original_lines': len(lines),
-        'sampled_lines': len(all_indices),
-        'critical_lines': len(critical_indices),
-        'non_critical_sampled': len(sampled_non_critical),
-        'original_size': current_size,
-        'final_size': final_size,
-        'compression_ratio': round(final_size / current_size, 3)
-    }
-
-def summarize_output(lines: List[str]) -> str:
-    """
-    Create a summary showing only errors, status changes, and key findings.
-
-    Returns:
-        Summary string
-    """
-    summary_items = []
-    errors = []
-    status_changes = []
-    findings = []
-    tool_calls = {}
-
-    for line in lines:
-        try:
-            obj = json.loads(line)
-            obj_type = obj.get('type', '')
-
-            # Collect errors
-            if 'error' in obj or obj_type == 'error':
-                error_msg = obj.get('error', obj.get('message', 'Unknown error'))
-                errors.append(error_msg)
-
-            # Collect status changes
-            elif obj_type in ['completed', 'failed', 'blocked', 'status']:
-                status = obj.get('status', obj_type)
-                message = obj.get('message', '')
-                status_changes.append(f"{status}: {message}")
-
-            # Collect findings
-            elif obj_type in ['finding', 'insight', 'recommendation']:
-                findings.append(obj.get('message', str(obj)))
-
-            # Count tool calls
-            elif obj_type == 'tool_use':
-                tool_name = obj.get('name', 'unknown')
-                tool_calls[tool_name] = tool_calls.get(tool_name, 0) + 1
-
-        except (json.JSONDecodeError, AttributeError):
-            continue
-
-    # Build summary
-    summary_items.append(f"=== OUTPUT SUMMARY ({len(lines)} total lines) ===\n")
-
-    if errors:
-        summary_items.append(f"\nERRORS ({len(errors)}):")
-        for i, err in enumerate(errors[:5], 1):  # Show first 5
-            summary_items.append(f"  {i}. {err}")
-        if len(errors) > 5:
-            summary_items.append(f"  ... and {len(errors) - 5} more errors")
-
-    if status_changes:
-        summary_items.append(f"\nSTATUS CHANGES ({len(status_changes)}):")
-        for i, status in enumerate(status_changes[-5:], 1):  # Show last 5
-            summary_items.append(f"  {i}. {status}")
-
-    if findings:
-        summary_items.append(f"\nFINDINGS ({len(findings)}):")
-        for i, finding in enumerate(findings, 1):
-            summary_items.append(f"  {i}. {finding}")
-
-    if tool_calls:
-        summary_items.append(f"\nTOOL CALLS:")
-        for tool, count in sorted(tool_calls.items(), key=lambda x: -x[1]):
-            summary_items.append(f"  - {tool}: {count}x")
-
-    return '\n'.join(summary_items)
-
-def smart_preview_truncate(text: str, max_length: int) -> str:
-    """
-    Intelligent preview: first N + last M lines.
-    Use for: file contents, long outputs.
-
-    Optimized for orchestrator's use case:
-    - Main agent doesn't need full file contents
-    - Wants to see: what file, rough size, first/last lines
-    - Debugging: can always read raw log if needed
-
-    Args:
-        text: Text to truncate
-        max_length: Maximum length in characters
-
-    Returns:
-        Truncated text with marker
-    """
-    if len(text) <= max_length:
-        return text
-
-    lines = text.split('\n')
-
-    # Strategy: Keep first 30 lines + last 10 lines
-    # This shows: file header/structure + recent changes
-    PREVIEW_HEAD = 30
-    PREVIEW_TAIL = 10
-
-    if len(lines) <= PREVIEW_HEAD + PREVIEW_TAIL:
-        # Fallback to line-based truncation
-        return line_based_truncate(text, max_length)
-
-    head_lines = lines[:PREVIEW_HEAD]
-    tail_lines = lines[-PREVIEW_TAIL:]
-
-    removed_lines = len(lines) - (PREVIEW_HEAD + PREVIEW_TAIL)
-    removed_chars = len(text) - (sum(len(l) for l in head_lines) + sum(len(l) for l in tail_lines))
-
-    marker = f"\n\n[... TRUNCATED: {removed_lines} lines ({removed_chars} chars) removed ...]\n\n"
-
-    preview = '\n'.join(head_lines) + marker + '\n'.join(tail_lines)
-
-    # If preview still too long, use line-based truncation
-    if len(preview) > max_length:
-        return line_based_truncate(preview, max_length)
-
-    return preview
-
-def line_based_truncate(text: str, max_length: int) -> str:
-    """
-    Truncate at line boundaries to preserve readability.
-    Use for: code snippets, structured output.
-
-    Args:
-        text: Text to truncate
-        max_length: Maximum length in characters
-
-    Returns:
-        Truncated text with marker
-    """
-    if len(text) <= max_length:
-        return text
-
-    lines = text.split('\n')
-
-    # Try to fit whole lines within max_length
-    kept_lines = []
-    current_length = 0
-    marker_space = 200  # Reserve space for marker
-
-    for line in lines:
-        line_len = len(line) + 1  # +1 for newline
-        if current_length + line_len > max_length - marker_space:
-            break
-        kept_lines.append(line)
-        current_length += line_len
-
-    if len(kept_lines) == len(lines):
-        return text  # All fit
-
-    removed_lines = len(lines) - len(kept_lines)
-    removed_chars = len(text) - current_length
-
-    marker = f"\n\n[... TRUNCATED: {removed_lines} lines ({removed_chars} chars) removed ...]"
-    return '\n'.join(kept_lines) + marker
-
-def simple_truncate(text: str, max_length: int) -> str:
-    """
-    Simple character-based truncation with marker.
-    Use for: assistant text, simple strings.
-
-    Args:
-        text: Text to truncate
-        max_length: Maximum length in characters
-
-    Returns:
-        Truncated text with marker
-    """
-    if len(text) <= max_length:
-        return text
-
-    marker_template = "\n\n[... TRUNCATED: {removed} chars removed ...]"
-    # Calculate space needed for marker (with placeholder)
-    marker_len = len(marker_template.format(removed=999999))  # Conservative estimate
-
-    removed = len(text) - max_length + marker_len
-    truncated = text[:max_length - marker_len]
-    return truncated + marker_template.format(removed=removed)
-
-def truncate_coordination_info(coord_data: dict) -> dict:
-    """
-    Intelligently truncate coordination_info structure to reduce size from ~25KB to ~5KB.
-
-    This function is designed to handle the coordination_info structure returned by
-    MCP tools (update_agent_progress, report_agent_finding) which contains:
-    - agents_registry: Full details of all agents
-    - coordination_data.recent_progress: Last 20 progress updates
-    - coordination_data.recent_findings: Last 10 findings
-
-    Strategy:
-    - Keep only 3 most recent findings (not 10) → saves ~7KB
-    - Keep only 5 most recent progress updates (not 20) → saves ~5KB
-    - Summarize agents_registry (counts only, not full details) → saves ~4KB
-
-    Args:
-        coord_data: Parsed coordination_info dictionary
-
-    Returns:
-        Truncated coordination_info with same structure but reduced data
-    """
-    import copy
-
-    # Deep copy to avoid mutating original
-    truncated = copy.deepcopy(coord_data)
-
-    # Handle coordination_data if present
-    if 'coordination_data' in truncated:
-        coord = truncated['coordination_data']
-
-        # Truncate recent_findings: keep only 3 most recent (not 10)
-        if 'recent_findings' in coord and isinstance(coord['recent_findings'], list):
-            if len(coord['recent_findings']) > 3:
-                coord['recent_findings'] = coord['recent_findings'][:3]
-                coord['findings_truncated'] = True
-
-        # Truncate recent_progress: keep only 5 most recent (not 20)
-        if 'recent_progress' in coord and isinstance(coord['recent_progress'], list):
-            if len(coord['recent_progress']) > 5:
-                coord['recent_progress'] = coord['recent_progress'][:5]
-                coord['progress_truncated'] = True
-
-    # Summarize agents_registry: keep counts only, not full details
-    if 'agents' in truncated and isinstance(truncated['agents'], list):
-        agent_list = truncated['agents']
-        if len(agent_list) > 0:
-            # Replace full agent list with summary
-            truncated['agents_summary'] = {
-                'total_count': len(agent_list),
-                'by_status': {},
-                'by_type': {}
-            }
-
-            # Count by status and type
-            for agent in agent_list:
-                status = agent.get('status', 'unknown')
-                agent_type = agent.get('type', 'unknown')
-
-                truncated['agents_summary']['by_status'][status] = \
-                    truncated['agents_summary']['by_status'].get(status, 0) + 1
-                truncated['agents_summary']['by_type'][agent_type] = \
-                    truncated['agents_summary']['by_type'].get(agent_type, 0) + 1
-
-            # Keep only 2 sample agents (first and last) for reference
-            truncated['agents'] = [agent_list[0], agent_list[-1]] if len(agent_list) > 1 else agent_list
-            truncated['agents_truncated'] = True
-
-    # Mark as truncated for tracking
-    truncated['_truncated'] = True
-
-    return truncated
-
-def detect_and_truncate_binary(content: str, max_length: int) -> str:
-    """
-    Aggressively truncate base64/binary data.
-
-    Args:
-        content: Content to check and potentially truncate
-        max_length: Maximum length for non-binary content
-
-    Returns:
-        Truncated content or summary if binary
-    """
-    import re
-
-    # Detect base64 pattern (long sequences of base64 chars)
-    if len(content) > 200:
-        base64_pattern = r'^[A-Za-z0-9+/]{100,}={0,2}$'
-        if re.match(base64_pattern, content[:200]):
-            return f"[BASE64_DATA: {len(content)} bytes, truncated for log efficiency]"
-
-    # Detect binary indicators
-    if len(content) > 500:
-        binary_indicators = ['\\x00', 'PNG\\r\\n', 'GIF89', 'JFIF']
-        if any(indicator in content[:500] for indicator in binary_indicators):
-            return f"[BINARY_DATA: {len(content)} bytes, truncated for log efficiency]"
-
-    # Not binary, use smart preview
-    return smart_preview_truncate(content, max_length)
-
-def is_already_truncated(obj: dict) -> bool:
-    """
-    Check if object was already truncated.
-    Prevents re-truncation that loses more data.
-
-    Args:
-        obj: Parsed JSON object
-
-    Returns:
-        True if already truncated
-    """
-    # Check for truncation marker flag
-    if obj.get('truncated') == True:
-        return True
-
-    # Check for truncation text markers (recursive)
-    def has_truncation_marker(value):
-        if isinstance(value, str):
-            return '[... TRUNCATED:' in value or '[BASE64_DATA:' in value or '[BINARY_DATA:' in value
-        elif isinstance(value, dict):
-            return any(has_truncation_marker(v) for v in value.values())
-        elif isinstance(value, list):
-            return any(has_truncation_marker(item) for item in value)
-        return False
-
-    return has_truncation_marker(obj)
-
-def truncate_json_structure(obj: dict, max_length: int) -> dict:
-    """
-    Truncate while preserving JSON structure.
-    Specifically targets tool_result.content and assistant text bloat.
-
-    Args:
-        obj: Parsed JSON object
-        max_length: Maximum length for the serialized JSON
-
-    Returns:
-        Truncated object that maintains JSON validity
-    """
-    import copy
-
-    # Check if already truncated
-    if is_already_truncated(obj):
-        return obj
-
-    # Deep copy to avoid mutating original
-    truncated = copy.deepcopy(obj)
-
-    # Handle different message types
-    msg_type = truncated.get('type')
-
-    # NEVER truncate error messages
-    if msg_type == 'error':
-        return truncated
-
-    # NEVER truncate system init messages
-    if msg_type == 'system' and truncated.get('subtype') == 'init':
-        return truncated
-
-    # Truncate user messages (tool_result content)
-    if msg_type == 'user' and 'message' in truncated:
-        message = truncated['message']
-        if 'content' in message and isinstance(message['content'], list):
-            for item in message['content']:
-                if isinstance(item, dict) and item.get('type') == 'tool_result':
-                    # This is the bloat target!
-                    if 'content' in item and isinstance(item['content'], str):
-                        original_len = len(item['content'])
-                        if original_len > MAX_TOOL_RESULT_CONTENT:
-                            # Try to detect and intelligently truncate coordination_info
-                            try:
-                                parsed_content = json.loads(item['content'])
-
-                                # Check if this is coordination_info structure
-                                # It typically has keys like: coordination_info, own_update, own_finding
-                                is_coordination = (
-                                    isinstance(parsed_content, dict) and
-                                    'coordination_info' in parsed_content
-                                )
-
-                                if is_coordination:
-                                    # Apply intelligent truncation to coordination_info
-                                    if 'coordination_info' in parsed_content:
-                                        parsed_content['coordination_info'] = truncate_coordination_info(
-                                            parsed_content['coordination_info']
-                                        )
-
-                                    # Re-serialize with truncated coordination_info
-                                    item['content'] = json.dumps(parsed_content)
-                                    item['truncated'] = True
-                                    item['truncation_type'] = 'intelligent_coordination_info'
-                                    item['original_length'] = original_len
-                                else:
-                                    # Not coordination_info, use existing blind truncation
-                                    item['content'] = detect_and_truncate_binary(
-                                        item['content'],
-                                        MAX_TOOL_RESULT_CONTENT
-                                    )
-                                    item['truncated'] = True
-                                    item['truncation_type'] = 'blind_string'
-                                    item['original_length'] = original_len
-
-                            except (json.JSONDecodeError, TypeError, KeyError):
-                                # Not JSON or parsing failed, fall back to binary detection
-                                item['content'] = detect_and_truncate_binary(
-                                    item['content'],
-                                    MAX_TOOL_RESULT_CONTENT
-                                )
-                                item['truncated'] = True
-                                item['truncation_type'] = 'blind_string_fallback'
-                                item['original_length'] = original_len
-
-    # Truncate assistant messages (long reasoning)
-    if msg_type == 'assistant' and 'message' in truncated:
-        message = truncated['message']
-        if 'content' in message and isinstance(message['content'], list):
-            for item in message['content']:
-                if isinstance(item, dict) and 'text' in item:
-                    original_len = len(item['text'])
-                    if original_len > MAX_ASSISTANT_TEXT:
-                        item['text'] = line_based_truncate(
-                            item['text'],
-                            MAX_ASSISTANT_TEXT
-                        )
-                        item['truncated'] = True
-                        item['original_length'] = original_len
-
-    return truncated
-
-def safe_json_truncate(line: str, max_length: int) -> str:
-    """
-    Truncate JSONL line while preserving JSON validity.
-    Main entry point for line truncation.
-
-    Args:
-        line: Raw JSONL line
-        max_length: Maximum length for the line
-
-    Returns:
-        Truncated line (still valid JSON)
-    """
-    if len(line) <= max_length:
-        return line
-
-    try:
-        # Parse JSON
-        obj = json.loads(line)
-
-        # Truncate content fields (preserves structure)
-        truncated_obj = truncate_json_structure(obj, max_length)
-
-        # Re-serialize
-        truncated_line = json.dumps(truncated_obj)
-
-        # If STILL too long after smart truncation, aggressive fallback
-        if len(truncated_line) > max_length:
-            # Last resort: return error marker with metadata
-            return json.dumps({
-                "type": "truncation_error",
-                "error": "Line too large even after content truncation",
-                "original_type": obj.get('type'),
-                "original_size": len(line),
-                "max_allowed": max_length,
-                "note": "Check raw log file for full content"
-            })
-
-        return truncated_line
-
-    except json.JSONDecodeError as e:
-        # Malformed JSON, simple truncate
-        logger.warning(f"Malformed JSONL during truncation: {e}")
-        return simple_truncate(line, max_length)
 
 @mcp.tool
 def get_agent_output(
@@ -5653,34 +1562,32 @@ def get_agent_output(
     recent_lines: Optional[int] = None
 ) -> Dict[str, Any]:
     """
-    Get agent output from persistent JSONL log file with filtering and tail support.
-    Falls back to tmux for backward compatibility.
+    Get agent's recent logs from their stream-json log file.
+
+    USE THIS TO MONITOR WHAT AN AGENT IS DOING:
+    - See agent's recent messages and reasoning
+    - See recent tool calls (Read, Edit, Bash, etc.)
+    - Check if agent completed or errored
+    - View truncated output (not full file contents)
+
+    RECOMMENDED: Use response_format="recent" for efficient monitoring.
+    This returns last 100 lines with smart truncation (~86% smaller than full).
 
     Args:
         task_id: Task ID containing the agent
         agent_id: Agent ID to get output from
-        tail: Number of most recent lines to return (None = all lines)
-        filter: Regex pattern to filter output lines (applied before tail)
-        format: Output format - "text", "jsonl", or "parsed"
-        include_metadata: Include file metadata (size, line count, timestamps)
-        max_bytes: Maximum total response size in bytes. If exceeded, intelligently
-                   sample lines (first N + last N) while preserving critical info.
-                   Default: None (no limit)
-        aggressive_truncate: Use aggressive truncation limits (1KB/line, 512B tool_result)
-                             instead of standard (8KB/line, 2KB tool_result). Useful for
-                             quick status checks. Default: False
-        response_format: Response format mode:
-                         - "full": Full output with standard/aggressive truncation
-                         - "summary": Only errors, status changes, key findings
-                         - "compact": Enable aggressive_truncate automatically
-                         - "recent": Use efficient tail-based parsing with smart truncation
-                         Default: "full"
-        recent_lines: Number of recent log lines to parse (for cursor backend).
-                      When specified, uses efficient tail-based parsing that:
-                      - Reads only last N lines instead of entire file
-                      - Applies smart truncation to tool results
-                      - Skips thinking blocks (saves tokens)
-                      Default: None (read all). Recommended: 50-200 for monitoring.
+        response_format: RECOMMENDED "recent" - returns agent's recent activity efficiently
+                         - "recent": Last 100 lines, smart truncation, skips bloat (RECOMMENDED)
+                         - "full": Full output (can be huge)
+                         - "compact": Aggressive truncation
+                         - "summary": Only errors and key findings
+        format: Output format - "text" (human readable), "parsed" (structured JSON)
+        recent_lines: Override number of recent lines (default 100 for "recent" mode)
+        include_metadata: Include stats about log file
+        tail: Legacy - use recent_lines instead
+        filter: Regex pattern to filter output lines
+        max_bytes: Max response size (legacy)
+        aggressive_truncate: Legacy - use response_format="compact" instead
 
     Returns:
         Dict with output and metadata
@@ -5754,213 +1661,16 @@ def get_agent_output(
     log_path = f"{workspace}/logs/{agent_id}_stream.jsonl"
     source = "jsonl_log"
     session_status = "unknown"
-    
-    # Detect backend type for proper parsing
-    backend = agent.get('backend', AGENT_BACKEND)  # Default to configured backend (cursor-agent)
 
     if os.path.exists(log_path):
         try:
-            # Special handling for cursor-agent logs
-            if backend == 'cursor':
-                logger.info(f"Detected cursor-agent log for {agent_id}")
+            # Claude/tmux log handling
+            # Determine how many lines to read
+            # Priority: tail > recent_lines > all
+            lines_to_read = tail if (tail and tail > 0) else recent_lines
 
-                # Use efficient recent parsing when recent_lines is specified
-                if recent_lines is not None and recent_lines > 0:
-                    logger.info(f"Using recent parsing mode: last {recent_lines} lines")
-                    parsed_result = parse_cursor_stream_jsonl_recent(
-                        log_path,
-                        recent_lines=recent_lines,
-                        include_thinking=False,  # Skip thinking for efficiency
-                        aggressive_truncate=aggressive_truncate
-                    )
-
-                    if not parsed_result.get('success', True):
-                        return {
-                            "success": False,
-                            "error": parsed_result.get('error', 'Failed to parse cursor log'),
-                            "agent_id": agent_id
-                        }
-
-                    # Format recent output
-                    if format == "parsed" or format == "jsonl":
-                        output = {
-                            "session_id": parsed_result.get('session_id'),
-                            "model": parsed_result.get('model'),
-                            "cwd": parsed_result.get('cwd'),
-                            "recent_events": parsed_result.get('recent_events', []),
-                            "recent_tool_calls": parsed_result.get('recent_tool_calls', []),
-                            "recent_messages": parsed_result.get('recent_messages', []),
-                            "final_result": parsed_result.get('final_result'),
-                            "stats": parsed_result.get('stats', {})
-                        }
-                    else:  # text format
-                        text_parts = []
-                        stats = parsed_result.get('stats', {})
-                        text_parts.append(f"=== Recent Agent Activity ({stats.get('lines_parsed', 0)}/{stats.get('total_lines', 0)} lines) ===")
-                        text_parts.append(f"Session: {parsed_result.get('session_id', 'unknown')}")
-                        text_parts.append(f"Model: {parsed_result.get('model', 'unknown')}")
-                        text_parts.append("")
-
-                        # Recent messages
-                        recent_msgs = parsed_result.get('recent_messages', [])
-                        if recent_msgs:
-                            text_parts.append(f"=== Recent Messages ({len(recent_msgs)}) ===")
-                            for msg in recent_msgs[-3:]:  # Last 3 messages
-                                text_parts.append(f"▶ {msg[:300]}{'...' if len(msg) > 300 else ''}")
-                            text_parts.append("")
-
-                        # Recent tool calls
-                        recent_tools = parsed_result.get('recent_tool_calls', [])
-                        if recent_tools:
-                            text_parts.append(f"=== Recent Tool Calls ({len(recent_tools)}) ===")
-                            for tool in recent_tools[-5:]:  # Last 5 tool calls
-                                tool_type = tool.get('tool_type', 'unknown')
-                                status = tool.get('status', 'unknown')
-                                if tool_type == 'shell':
-                                    cmd = tool.get('command', '')[:60]
-                                    text_parts.append(f"Shell [{status}]: {cmd}{'...' if len(tool.get('command', '')) > 60 else ''}")
-                                elif tool_type == 'edit':
-                                    text_parts.append(f"Edit [{status}]: {tool.get('path', 'unknown')}")
-                                elif tool_type == 'read':
-                                    text_parts.append(f"Read [{status}]: {tool.get('path', 'unknown')}")
-                                else:
-                                    text_parts.append(f"{tool_type} [{status}]")
-                            text_parts.append("")
-
-                        # Final result if exists
-                        final = parsed_result.get('final_result')
-                        if final:
-                            text_parts.append(f"=== Result: {final.get('subtype', 'unknown')} ===")
-                            if final.get('is_error'):
-                                text_parts.append(f"ERROR: {final.get('result_text', '')[:200]}")
-                            text_parts.append(f"Duration: {final.get('duration_ms', 0)}ms")
-
-                        output = '\n'.join(text_parts)
-
-                    return {
-                        "success": True,
-                        "agent_id": agent_id,
-                        "backend": "cursor",
-                        "session_id": parsed_result.get('session_id'),
-                        "session_status": "completed" if parsed_result.get('final_result') else "running",
-                        "output": output,
-                        "source": "cursor_stream_json_recent",
-                        "format": format,
-                        "metadata": {
-                            "recent_lines_requested": recent_lines,
-                            "total_lines": parsed_result.get('stats', {}).get('total_lines', 0),
-                            "lines_parsed": parsed_result.get('stats', {}).get('lines_parsed', 0),
-                            "truncation_applied": parsed_result.get('stats', {}).get('truncation_applied', False),
-                            "model": parsed_result.get('model')
-                        } if include_metadata else None
-                    }
-
-                # Full parsing (original behavior)
-                parsed_result = parse_cursor_stream_jsonl(log_path, include_thinking=CURSOR_ENABLE_THINKING_LOGS)
-
-                if not parsed_result.get('success', True):  # parse function returns success=False on error
-                    return {
-                        "success": False,
-                        "error": parsed_result.get('error', 'Failed to parse cursor log'),
-                        "agent_id": agent_id
-                    }
-
-                # Extract cursor session_id and update agent if not already set
-                cursor_session_id = parsed_result.get('session_id')
-                if cursor_session_id and not agent.get('cursor_session_id'):
-                    agent['cursor_session_id'] = cursor_session_id
-                    # Update registry with session_id
-                    try:
-                        registry = read_registry_with_lock(registry_path)
-                        for a in registry['agents']:
-                            if a['id'] == agent_id:
-                                a['cursor_session_id'] = cursor_session_id
-                                break
-                        write_registry_with_lock(registry_path, registry)
-                    except Exception as e:
-                        logger.warning(f"Failed to update registry with cursor session_id: {e}")
-                
-                # Format output based on requested format
-                if format == "parsed" or format == "jsonl":
-                    # Return rich parsed structure
-                    output = {
-                        "session_id": parsed_result.get('session_id'),
-                        "model": parsed_result.get('model'),
-                        "cwd": parsed_result.get('cwd'),
-                        "events": parsed_result.get('events', []),
-                        "tool_calls": parsed_result.get('tool_calls', []),
-                        "assistant_messages": parsed_result.get('assistant_messages', []),
-                        "thinking_text": parsed_result.get('thinking_text', ''),
-                        "final_result": parsed_result.get('final_result'),
-                        "duration_ms": parsed_result.get('duration_ms', 0),
-                        "success": parsed_result.get('success', False)
-                    }
-                else:  # text format
-                    # Format as human-readable text
-                    text_parts = []
-                    text_parts.append(f"=== Cursor Agent Output ===")
-                    text_parts.append(f"Session ID: {parsed_result.get('session_id')}")
-                    text_parts.append(f"Model: {parsed_result.get('model')}")
-                    text_parts.append(f"Duration: {parsed_result.get('duration_ms')}ms")
-                    text_parts.append("")
-                    
-                    # Assistant messages
-                    for msg in parsed_result.get('assistant_messages', []):
-                        text_parts.append(f"Assistant: {msg}")
-                        text_parts.append("")
-                    
-                    # Tool calls summary
-                    tool_calls = parsed_result.get('tool_calls', [])
-                    if tool_calls:
-                        text_parts.append(f"=== Tool Calls ({len(tool_calls)}) ===")
-                        for tool in tool_calls:
-                            tool_type = tool.get('tool_type')
-                            status = tool.get('status')
-                            if tool_type == 'shell':
-                                text_parts.append(f"Shell [{status}]: {tool.get('command')}")
-                                if status == 'completed':
-                                    text_parts.append(f"  Exit: {tool.get('exit_code')}, Time: {tool.get('execution_time_ms')}ms")
-                                    if tool.get('stdout'):
-                                        text_parts.append(f"  Stdout: {tool.get('stdout')[:200]}")
-                            elif tool_type == 'edit':
-                                text_parts.append(f"Edit [{status}]: {tool.get('path')}")
-                                if status == 'completed':
-                                    text_parts.append(f"  +{tool.get('lines_added')} -{tool.get('lines_removed')} lines")
-                            elif tool_type == 'read':
-                                text_parts.append(f"Read [{status}]: {tool.get('path')}")
-                        text_parts.append("")
-                    
-                    # Final result
-                    final = parsed_result.get('final_result')
-                    if final:
-                        text_parts.append(f"=== Result ===")
-                        text_parts.append(f"Status: {final.get('subtype')}")
-                        text_parts.append(f"Result: {final.get('result_text', '')[:500]}")
-                    
-                    output = '\n'.join(text_parts)
-                
-                return {
-                    "success": True,
-                    "agent_id": agent_id,
-                    "backend": "cursor",
-                    "session_id": parsed_result.get('session_id'),
-                    "session_status": "completed" if parsed_result.get('success') else "error",
-                    "output": output,
-                    "source": "cursor_stream_json",
-                    "format": format,
-                    "metadata": {
-                        "duration_ms": parsed_result.get('duration_ms'),
-                        "event_count": len(parsed_result.get('events', [])),
-                        "tool_call_count": len(parsed_result.get('tool_calls', [])),
-                        "model": parsed_result.get('model'),
-                        "has_thinking": bool(parsed_result.get('thinking_text'))
-                    } if include_metadata else None
-                }
-            
-            # Standard claude/tmux log handling
-            # Read lines (with tail if specified)
-            if tail and tail > 0:
-                lines = tail_jsonl_efficient(log_path, tail)
+            if lines_to_read and lines_to_read > 0:
+                lines = tail_jsonl_efficient(log_path, lines_to_read)
             else:
                 lines = read_jsonl_lines(log_path)
 
@@ -6038,7 +1748,12 @@ def get_agent_output(
 
             # Format output
             try:
-                output, parse_errors = format_output_by_type(lines, format)
+                # For "recent" mode, use compact human-readable format
+                if response_format == "recent":
+                    output = format_lines_compact(lines)
+                    parse_errors = []
+                else:
+                    output, parse_errors = format_output_by_type(lines, format)
             except ValueError as e:
                 return {
                     "success": False,
@@ -6203,17 +1918,13 @@ def get_agent_output(
 @mcp.tool
 def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual termination") -> Dict[str, Any]:
     """
-    Terminate a real running agent (tmux session or cursor-agent process).
-    
-    Automatically detects backend type and terminates appropriately:
-    - tmux backend: Kills tmux session
-    - cursor backend: Kills process by PID
-    
+    Terminate a running agent (tmux session).
+
     Args:
         task_id: Task containing the agent
-        agent_id: Agent to terminate  
+        agent_id: Agent to terminate
         reason: Reason for termination
-    
+
     Returns:
         Termination status
     """
@@ -6236,66 +1947,27 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
         if a['id'] == agent_id:
             agent = a
             break
-    
+
     if not agent:
         return {
             "success": False,
             "error": f"Agent {agent_id} not found"
         }
-    
+
     try:
-        # Detect backend type
-        backend = agent.get('backend', AGENT_BACKEND)  # Default to configured backend (cursor-agent)
-        
-        if backend == 'cursor':
-            # Cursor-agent: Kill by PID
-            cursor_pid = agent.get('cursor_pid')
-            if not cursor_pid:
-                return {
-                    "success": False,
-                    "error": f"Agent {agent_id} is cursor backend but has no PID"
-                }
-            
-            killed = False
-            try:
-                os.kill(cursor_pid, 9)  # SIGKILL
-                killed = True
-                logger.info(f"Killed cursor-agent process {cursor_pid} for agent {agent_id}")
-            except ProcessLookupError:
-                logger.warning(f"cursor-agent process {cursor_pid} not found (already dead)")
-                killed = True  # Consider it killed if not found
-            except PermissionError:
-                logger.error(f"Permission denied to kill cursor-agent process {cursor_pid}")
-                return {
-                    "success": False,
-                    "error": f"Permission denied to kill process {cursor_pid}"
-                }
-            except Exception as e:
-                logger.error(f"Failed to kill cursor-agent process {cursor_pid}: {e}")
-                return {
-                    "success": False,
-                    "error": f"Failed to kill process: {e}"
-                }
-            
-            cleanup_result = {
-                "cursor_process_killed": killed,
-                "cursor_pid": cursor_pid
-            }
-            
-        else:
-            # Claude/tmux backend: Kill tmux session
-            session_name = agent.get('tmux_session')
+        # Kill tmux session
+        session_name = agent.get('tmux_session')
 
-            # Perform comprehensive resource cleanup using cleanup_agent_resources
-            cleanup_result = cleanup_agent_resources(
-                workspace=workspace,
-                agent_id=agent_id,
-                agent_data=agent,
-                keep_logs=True  # Archive logs instead of deleting
-            )
+        # Perform comprehensive resource cleanup using cleanup_agent_resources
+        cleanup_result = cleanup_agent_resources(
+            workspace=workspace,
+            agent_id=agent_id,
+            agent_data=agent,
+            keep_logs=True  # Archive logs instead of deleting
+        )
 
-            # Track cleanup status
-            killed = cleanup_result.get('tmux_session_killed', False)
+        # Track cleanup status
+        killed = cleanup_result.get('tmux_session_killed', False)
 
         # Update registry
         previous_status = agent.get('status')
@@ -6622,6 +2294,130 @@ def cleanup_agent_resources(
         cleanup_results["errors"].append(error_msg)
         return cleanup_results
 
+def get_enhanced_coordination_response(
+    task_id: str,
+    requesting_agent_id: str,
+    detail_level: str = "standard"
+) -> Dict[str, Any]:
+    """
+    Get enhanced coordination response using the new structured format.
+
+    This provides agents with:
+    - Formatted text response optimized for LLM parsing
+    - Peer status and progress visibility
+    - Conflict detection and recommendations
+    - Relevance-scored findings
+
+    Args:
+        task_id: Task ID
+        requesting_agent_id: ID of agent requesting coordination
+        detail_level: "minimal", "standard", or "full"
+
+    Returns:
+        Dict with formatted_response (text) and raw_data (dict)
+    """
+    from orchestrator.coordination import build_coordination_response
+
+    # Find workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return {
+            "success": False,
+            "error": f"Task {task_id} not found",
+            "formatted_response": f"ERROR: Task {task_id} not found"
+        }
+
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
+
+    try:
+        # Read registry
+        with open(registry_path, 'r') as f:
+            registry = json.load(f)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to read registry: {e}",
+            "formatted_response": f"ERROR: Failed to read task registry"
+        }
+
+    # Collect all findings
+    all_findings = []
+    findings_dir = f"{workspace}/findings"
+    if os.path.exists(findings_dir):
+        for file in os.listdir(findings_dir):
+            if file.endswith('_findings.jsonl'):
+                try:
+                    with open(f"{findings_dir}/{file}", 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    entry = json.loads(line)
+                                    # Extract agent type from filename if not in entry
+                                    if 'agent_type' not in entry:
+                                        agent_id = file.replace('_findings.jsonl', '')
+                                        for agent in registry.get('agents', []):
+                                            if agent['id'] == agent_id:
+                                                entry['agent_type'] = agent.get('type', 'unknown')
+                                                break
+                                    all_findings.append(entry)
+                                except json.JSONDecodeError:
+                                    continue
+                except:
+                    continue
+
+    # Collect all progress entries
+    all_progress = []
+    progress_dir = f"{workspace}/progress"
+    if os.path.exists(progress_dir):
+        for file in os.listdir(progress_dir):
+            if file.endswith('_progress.jsonl'):
+                try:
+                    with open(f"{progress_dir}/{file}", 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    entry = json.loads(line)
+                                    all_progress.append(entry)
+                                except json.JSONDecodeError:
+                                    continue
+                except:
+                    continue
+
+    # Sort by timestamp
+    all_findings.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    all_progress.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+
+    # Build the coordination response
+    try:
+        response = build_coordination_response(
+            task_id=task_id,
+            requesting_agent_id=requesting_agent_id,
+            registry=registry,
+            findings=all_findings,
+            progress_entries=all_progress
+        )
+
+        # Format the text response
+        formatted_text = response.format_text_response(detail_level)
+
+        return {
+            "success": True,
+            "formatted_response": formatted_text,
+            "raw_data": response.to_dict(),
+            "response_size": len(formatted_text),
+            "detail_level": detail_level
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to build coordination response: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "formatted_response": f"ERROR: Failed to build coordination response - {str(e)}"
+        }
+
 def get_minimal_coordination_info(task_id: str) -> Dict[str, Any]:
     """
     Get minimal coordination info for MCP tool responses.
@@ -6688,6 +2484,138 @@ def get_minimal_coordination_info(task_id: str) -> Dict[str, Any]:
             "completed": registry.get('completed_count', 0)
         },
         "recent_findings": recent_findings
+    }
+
+def get_comprehensive_coordination_info(
+    task_id: str,
+    max_findings_per_agent: int = 10,
+    max_progress_per_agent: int = 5,
+    find_task_workspace=None,
+) -> Dict[str, Any]:
+    """
+    Get comprehensive coordination info for enhanced agent collaboration.
+    Returns ALL peer data to enable full visibility and prevent duplicate work.
+
+    Returns:
+    - Full agent status details (who's working on what)
+    - ALL findings grouped by agent (up to max_findings_per_agent per agent)
+    - Recent progress from all agents (up to max_progress_per_agent per agent)
+    - Summary of work distribution
+
+    This enables agents to:
+    - See everything peers have discovered
+    - Understand current work distribution
+    - Avoid duplicate investigations
+    - Build on others' findings
+
+    Args:
+        task_id: Task ID
+        max_findings_per_agent: Max findings to include per agent (default 10)
+        max_progress_per_agent: Max progress updates per agent (default 5)
+
+    Returns:
+        Comprehensive coordination data for LLM consumption
+    """
+    # Use the passed function or default to global
+    find_workspace = find_task_workspace if find_task_workspace is None else find_task_workspace
+
+    workspace = find_workspace(task_id)
+    if not workspace:
+        return {"success": False, "error": f"Task {task_id} not found"}
+
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
+
+    # CRITICAL: Use LockedRegistryFile to prevent race conditions
+    try:
+        with LockedRegistryFile(registry_path) as (registry, f):
+            # 1. Get all agents with current status
+            agents_status = []
+            for agent in registry.get('agents', []):
+                agents_status.append({
+                    "id": agent.get("id"),
+                    "type": agent.get("type"),
+                    "status": agent.get("status"),
+                    "progress": agent.get("progress", 0),
+                    "last_update": agent.get("last_update"),
+                    "parent": agent.get("parent", "orchestrator")
+                })
+    except TimeoutError:
+        return {"success": False, "error": "Registry locked - too many concurrent reads"}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to read registry: {e}"}
+
+    # 2. Get ALL findings grouped by agent
+    findings_by_agent = {}
+    findings_dir = f"{workspace}/findings"
+    if os.path.exists(findings_dir):
+        for file in os.listdir(findings_dir):
+            if file.endswith('_findings.jsonl'):
+                agent_id = file.replace('_findings.jsonl', '')
+                agent_findings = []
+                try:
+                    with open(f"{findings_dir}/{file}", 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    entry = json.loads(line)
+                                    agent_findings.append(entry)
+                                except json.JSONDecodeError:
+                                    continue
+                except:
+                    continue
+
+                # Sort by timestamp and limit
+                agent_findings.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+                findings_by_agent[agent_id] = agent_findings[:max_findings_per_agent]
+
+    # 3. Get recent progress from all agents
+    progress_by_agent = {}
+    progress_dir = f"{workspace}/progress"
+    if os.path.exists(progress_dir):
+        for file in os.listdir(progress_dir):
+            if file.endswith('_progress.jsonl'):
+                agent_id = file.replace('_progress.jsonl', '')
+                agent_progress = []
+                try:
+                    with open(f"{progress_dir}/{file}", 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    entry = json.loads(line)
+                                    agent_progress.append(entry)
+                                except json.JSONDecodeError:
+                                    continue
+                except:
+                    continue
+
+                # Sort by timestamp and get recent ones
+                agent_progress.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+                progress_by_agent[agent_id] = agent_progress[:max_progress_per_agent]
+
+    # 4. Create work distribution summary
+    work_summary = {
+        "total_agents": len(agents_status),
+        "active_agents": len([a for a in agents_status if a.get("status") in ["working", "running", "blocked"]]),
+        "completed_agents": len([a for a in agents_status if a.get("status") == "completed"]),
+        "blocked_agents": len([a for a in agents_status if a.get("status") == "blocked"]),
+        "total_findings": sum(len(findings) for findings in findings_by_agent.values()),
+        "agents_with_findings": len(findings_by_agent)
+    }
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "work_summary": work_summary,
+        "agents": agents_status,
+        "findings_by_agent": findings_by_agent,
+        "progress_by_agent": progress_by_agent,
+        "coordination_data": {
+            "message": "Full peer visibility enabled for comprehensive coordination",
+            "total_findings_available": sum(len(f) for f in findings_by_agent.values()),
+            "total_progress_available": sum(len(p) for p in progress_by_agent.values())
+        }
     }
 
 def validate_agent_completion(workspace: str, agent_id: str, agent_type: str, message: str, registry: Dict[str, Any]) -> Dict[str, Any]:
@@ -6969,119 +2897,195 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
     with open(progress_file, 'a') as f:
         f.write(json.dumps(progress_entry) + '\n')
     
-    # Update registry
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
-    
-    # Find and update agent
-    agent_found = None
-    previous_status = None
-    for agent in registry['agents']:
-        if agent['id'] == agent_id:
-            previous_status = agent.get('status')
-            agent['last_update'] = datetime.now().isoformat()
-            agent['status'] = status
-            agent['progress'] = progress
-            agent_found = agent
-            break
-
-    # VALIDATION: When agent claims completion, validate the claim
-    if status == 'completed' and agent_found:
-        agent_type = agent_found.get('type', 'unknown')
-
-        # Run 4-layer validation
-        validation = validate_agent_completion(workspace, agent_id, agent_type, message, registry)
-
-        # In WARNING mode: log but don't block completion
-        if not validation['valid'] or validation['warnings']:
-            logger.warning(f"Completion validation for {agent_id}: confidence={validation['confidence']:.2f}, "
-                         f"warnings={len(validation['warnings'])}, blocking_issues={len(validation['blocking_issues'])}")
-            logger.warning(f"Validation warnings: {validation['warnings']}")
-            if validation['blocking_issues']:
-                logger.warning(f"Blocking issues: {validation['blocking_issues']}")
-
-        # Store validation results in agent record for future reference
-        agent_found['completion_validation'] = {
-            'confidence': validation['confidence'],
-            'warnings': validation['warnings'],
-            'blocking_issues': validation['blocking_issues'],
-            'evidence_summary': validation['evidence_summary'],
-            'validated_at': datetime.now().isoformat()
-        }
-
-        logger.info(f"Agent {agent_id} completion validated: confidence={validation['confidence']:.2f}, "
-                   f"{len(validation['warnings'])} warnings, {len(validation['blocking_issues'])} blocking issues")
-
-        # Mark completion timestamp
-        agent_found['completed_at'] = datetime.now().isoformat()
-
-    # UPDATE ACTIVE COUNT: Decrement when transitioning to completed/terminated/error from active status
+    # Define status categories outside the lock for reuse
     active_statuses = ['running', 'working', 'blocked']
     terminal_statuses = ['completed', 'terminated', 'error', 'failed']
-    
-    if previous_status in active_statuses and status in terminal_statuses:
-        # Agent transitioned from active to terminal state
-        registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
-        registry['completed_count'] = registry.get('completed_count', 0) + 1
-        logger.info(f"Agent {agent_id} transitioned from {previous_status} to {status}. Active count: {registry['active_count']}")
+    previous_status = None  # Will be set inside lock
+    pending_review = None  # Will be set if phase auto-completes
 
-        # AUTOMATIC RESOURCE CLEANUP: Free computing resources on terminal status
-        # This ensures tmux sessions are killed, file handles closed, and prompt files cleaned up
-        try:
-            cleanup_result = cleanup_agent_resources(
-                workspace=workspace,
-                agent_id=agent_id,
-                agent_data=agent_found,
-                keep_logs=True  # Archive logs instead of deleting for post-mortem analysis
-            )
-            logger.info(f"Auto-cleanup for {agent_id}: tmux_killed={cleanup_result.get('tmux_session_killed')}, "
-                       f"prompt_deleted={cleanup_result.get('prompt_file_deleted')}, "
-                       f"logs_archived={cleanup_result.get('log_files_archived')}, "
-                       f"no_zombies={cleanup_result.get('verified_no_zombies')}")
+    # CRITICAL: Use LockedRegistryFile to prevent race conditions
+    # Multiple agents can update progress concurrently - without locking, we get:
+    # - Lost updates (agent status overwritten)
+    # - Corrupted counters (active_count decremented multiple times)
+    # - Validation data lost between read and write
+    try:
+        with LockedRegistryFile(registry_path) as (registry, f):
+            # Find and update agent
+            agent_found = None
+            for agent in registry['agents']:
+                if agent['id'] == agent_id:
+                    previous_status = agent.get('status')
+                    agent['last_update'] = datetime.now().isoformat()
+                    agent['status'] = status
+                    agent['progress'] = progress
+                    agent_found = agent
+                    break
 
-            # Store cleanup result in agent record for observability
-            if agent_found:
-                agent_found['auto_cleanup_result'] = cleanup_result
-                agent_found['auto_cleanup_timestamp'] = datetime.now().isoformat()
-        except Exception as e:
-            logger.error(f"Auto-cleanup failed for {agent_id}: {e}")
-            if agent_found:
-                agent_found['auto_cleanup_error'] = str(e)
-                agent_found['auto_cleanup_timestamp'] = datetime.now().isoformat()
+            # VALIDATION: When agent claims completion, validate the claim
+            if status == 'completed' and agent_found:
+                agent_type = agent_found.get('type', 'unknown')
 
-    with open(registry_path, 'w') as f:
-        json.dump(registry, f, indent=2)
+                # Run 4-layer validation
+                validation = validate_agent_completion(workspace, agent_id, agent_type, message, registry)
+
+                # In WARNING mode: log but don't block completion
+                if not validation['valid'] or validation['warnings']:
+                    logger.warning(f"Completion validation for {agent_id}: confidence={validation['confidence']:.2f}, "
+                                 f"warnings={len(validation['warnings'])}, blocking_issues={len(validation['blocking_issues'])}")
+                    logger.warning(f"Validation warnings: {validation['warnings']}")
+                    if validation['blocking_issues']:
+                        logger.warning(f"Blocking issues: {validation['blocking_issues']}")
+
+                # Store validation results in agent record for future reference
+                agent_found['completion_validation'] = {
+                    'confidence': validation['confidence'],
+                    'warnings': validation['warnings'],
+                    'blocking_issues': validation['blocking_issues'],
+                    'evidence_summary': validation['evidence_summary'],
+                    'validated_at': datetime.now().isoformat()
+                }
+
+                logger.info(f"Agent {agent_id} completion validated: confidence={validation['confidence']:.2f}, "
+                           f"{len(validation['warnings'])} warnings, {len(validation['blocking_issues'])} blocking issues")
+
+                # Mark completion timestamp
+                agent_found['completed_at'] = datetime.now().isoformat()
+
+            # UPDATE ACTIVE COUNT: Decrement when transitioning to completed/terminated/error from active status
+            if previous_status in active_statuses and status in terminal_statuses:
+                # Agent transitioned from active to terminal state
+                registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
+                registry['completed_count'] = registry.get('completed_count', 0) + 1
+                logger.info(f"Agent {agent_id} transitioned from {previous_status} to {status}. Active count: {registry['active_count']}")
+
+                # AUTOMATIC RESOURCE CLEANUP: Free computing resources on terminal status
+                # This ensures tmux sessions are killed, file handles closed, and prompt files cleaned up
+                try:
+                    cleanup_result = cleanup_agent_resources(
+                        workspace=workspace,
+                        agent_id=agent_id,
+                        agent_data=agent_found,
+                        keep_logs=True  # Archive logs instead of deleting for post-mortem analysis
+                    )
+                    logger.info(f"Auto-cleanup for {agent_id}: tmux_killed={cleanup_result.get('tmux_session_killed')}, "
+                               f"prompt_deleted={cleanup_result.get('prompt_file_deleted')}, "
+                               f"logs_archived={cleanup_result.get('log_files_archived')}, "
+                               f"no_zombies={cleanup_result.get('verified_no_zombies')}")
+
+                    # Store cleanup result in agent record for observability
+                    if agent_found:
+                        agent_found['auto_cleanup_result'] = cleanup_result
+                        agent_found['auto_cleanup_timestamp'] = datetime.now().isoformat()
+                except Exception as e:
+                    logger.error(f"Auto-cleanup failed for {agent_id}: {e}")
+                    if agent_found:
+                        agent_found['auto_cleanup_error'] = str(e)
+                        agent_found['auto_cleanup_timestamp'] = datetime.now().isoformat()
+
+                # ===== AUTOMATIC PHASE ENFORCEMENT =====
+                # Check if ALL agents in this phase are now in terminal state (completed/failed)
+                # If so, auto-trigger phase review
+                if status in terminal_statuses and agent_found and agent_found.get('phase_index') is not None:
+                    agent_phase = agent_found['phase_index']
+                    phases = registry.get('phases', [])
+                    current_phase_idx = registry.get('current_phase_index', 0)
+
+                    # Only check if this agent belongs to the current phase
+                    if agent_phase == current_phase_idx and current_phase_idx < len(phases):
+                        current_phase = phases[current_phase_idx]
+
+                        # Only auto-trigger if phase is ACTIVE (not already in review)
+                        if current_phase.get('status') == 'ACTIVE':
+                            # Count phase agents: how many belong to this phase, how many completed
+                            phase_agents = [a for a in registry['agents'] if a.get('phase_index') == agent_phase]
+                            completed_phase_agents = [a for a in phase_agents if a.get('status') == 'completed']
+                            failed_phase_agents = [a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']]
+
+                            logger.info(f"Phase {agent_phase} agent completion check: {len(completed_phase_agents)}/{len(phase_agents)} completed, {len(failed_phase_agents)} failed")
+
+                            # All agents completed (and at least one exists)
+                            if len(phase_agents) > 0 and len(completed_phase_agents) + len(failed_phase_agents) == len(phase_agents):
+                                # AUTO-SUBMIT PHASE FOR REVIEW
+                                current_phase['status'] = 'AWAITING_REVIEW'
+                                current_phase['auto_submitted_at'] = datetime.now().isoformat()
+                                current_phase['auto_submitted_reason'] = f"All {len(phase_agents)} agents completed/terminated"
+
+                                # Track that we need to spawn reviewers AFTER the lock is released
+                                registry['_pending_auto_review'] = {
+                                    'phase_index': agent_phase,
+                                    'phase_name': current_phase.get('name', f'Phase {agent_phase + 1}'),
+                                    'task_id': task_id,
+                                    'completed_agents': len(completed_phase_agents),
+                                    'failed_agents': len(failed_phase_agents)
+                                }
+
+                                logger.info(f"AUTO-PHASE-ENFORCEMENT: Phase {agent_phase} ({current_phase.get('name')}) auto-submitted for review. "
+                                           f"All {len(phase_agents)} agents finished ({len(completed_phase_agents)} completed, {len(failed_phase_agents)} failed)")
+
+            # Write back the modified registry atomically
+            f.seek(0)
+            f.write(json.dumps(registry, indent=2))
+            f.truncate()
+
+            # Store pending auto-review info for spawning reviewers after lock release
+            pending_review = registry.get('_pending_auto_review')
+
+    except TimeoutError as e:
+        logger.error(f"Timeout acquiring registry lock for update_agent_progress: {e}")
+        return {
+            "success": False,
+            "error": "Registry locked - too many concurrent updates"
+        }
     
     # UPDATE GLOBAL REGISTRY: Sync the global registry's active agent count
+    # CRITICAL: Use LockedRegistryFile here too to prevent global registry corruption
     try:
         workspace_base = get_workspace_base_from_task_workspace(workspace)
         global_reg_path = get_global_registry_path(workspace_base)
         if os.path.exists(global_reg_path):
-            with open(global_reg_path, 'r') as f:
-                global_reg = json.load(f)
-            
-            # Update agent status in global registry
-            if agent_id in global_reg.get('agents', {}):
-                global_reg['agents'][agent_id]['status'] = status
-                global_reg['agents'][agent_id]['last_update'] = datetime.now().isoformat()
-                
-                # If transitioned to terminal state, update global active count
-                if previous_status in active_statuses and status in terminal_statuses:
-                    global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
-                    if status == 'completed':
-                        global_reg['agents'][agent_id]['completed_at'] = datetime.now().isoformat()
-                    logger.info(f"Global registry updated: Active agents: {global_reg['active_agents']}")
-                
-                with open(global_reg_path, 'w') as f:
-                    json.dump(global_reg, f, indent=2)
+            with LockedRegistryFile(global_reg_path) as (global_reg, gf):
+                # Update agent status in global registry
+                if agent_id in global_reg.get('agents', {}):
+                    global_reg['agents'][agent_id]['status'] = status
+                    global_reg['agents'][agent_id]['last_update'] = datetime.now().isoformat()
+
+                    # If transitioned to terminal state, update global active count
+                    if previous_status in active_statuses and status in terminal_statuses:
+                        global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
+                        if status == 'completed':
+                            global_reg['agents'][agent_id]['completed_at'] = datetime.now().isoformat()
+                        logger.info(f"Global registry updated: Active agents: {global_reg['active_agents']}")
+
+                    # Write back atomically
+                    gf.seek(0)
+                    gf.write(json.dumps(global_reg, indent=2))
+                    gf.truncate()
+    except TimeoutError as e:
+        logger.error(f"Timeout acquiring global registry lock: {e}")
+        # Non-fatal: continue even if global registry update fails
     except Exception as e:
         logger.error(f"Failed to update global registry: {e}")
-    
-    # Get minimal status for coordination (prevents log bloat)
-    minimal_status = get_minimal_coordination_info(task_id)
 
-    # Return own update confirmation plus minimal coordination data
-    return {
+    # ===== AUTO-SPAWN REVIEWERS FOR PHASE ENFORCEMENT =====
+    # If a phase just auto-completed, spawn independent reviewer agents
+    if pending_review:
+        try:
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawning reviewers for phase {pending_review['phase_index']}")
+            auto_review_result = _auto_spawn_phase_reviewers(
+                task_id=pending_review['task_id'],
+                phase_index=pending_review['phase_index'],
+                phase_name=pending_review['phase_name'],
+                completed_agents=pending_review['completed_agents'],
+                failed_agents=pending_review['failed_agents'],
+                workspace=workspace
+            )
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Reviewer spawn result: {auto_review_result}")
+        except Exception as e:
+            logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewers: {e}")
+
+    # LEAN RESPONSE: Only return own update + guidance to fetch peer info explicitly
+    # This prevents O(n²) context bloat from returning all peer data on every call
+    response = {
         "success": True,
         "own_update": {
             "agent_id": agent_id,
@@ -7090,8 +3094,26 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
             "message": message,
             "timestamp": progress_entry["timestamp"]
         },
-        "coordination_info": minimal_status if minimal_status["success"] else None
+        "coordination_guidance": {
+            "message": "To see what other agents are working on and avoid duplicate work, call get_task_findings",
+            "tool": "get_task_findings",
+            "parameters": {
+                "task_id": task_id,
+                "summary_only": True
+            },
+            "tip": "Use 'since' parameter with a timestamp to get only NEW findings since your last check"
+        }
     }
+
+    # Add completion reminder if not yet completed
+    if status != "completed":
+        response["important_reminder"] = (
+            "CRITICAL: You MUST call update_agent_progress with status='completed' when you finish your work. "
+            "If you don't, the phase cannot advance and other agents will be blocked waiting for you. "
+            "Your work is not counted until you report completion."
+        )
+
+    return response
 
 @mcp.tool  
 def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severity: str, message: str, data: dict = None) -> Dict[str, Any]:
@@ -7135,11 +3157,9 @@ def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severit
     
     with open(findings_file, 'a') as f:
         f.write(json.dumps(finding_entry) + '\n')
-    
-    # Get minimal status for coordination (prevents log bloat)
-    minimal_status = get_minimal_coordination_info(task_id)
 
-    # Return own finding confirmation plus minimal coordination data
+    # LEAN RESPONSE: Only return own finding + guidance to fetch peer info explicitly
+    # This prevents O(n²) context bloat from returning all peer data on every call
     return {
         "success": True,
         "own_finding": {
@@ -7150,25 +3170,190 @@ def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severit
             "timestamp": finding_entry["timestamp"],
             "data": data
         },
-        "coordination_info": minimal_status if minimal_status["success"] else None
+        "coordination_guidance": {
+            "message": "To see findings from other agents and coordinate effectively, call get_task_findings",
+            "tool": "get_task_findings",
+            "parameters": {
+                "task_id": task_id,
+                "summary_only": True
+            },
+            "tip": "Use 'since' parameter with a timestamp to get only NEW findings since your last check"
+        },
+        "important_reminder": (
+            "CRITICAL: When you finish your work, you MUST call update_agent_progress with status='completed'. "
+            "If you don't, the phase cannot advance and other agents will be blocked waiting for you. "
+            "Your work is not counted until you report completion."
+        )
     }
 
 @mcp.tool
-def spawn_child_agent(task_id: str, parent_agent_id: str, child_agent_type: str, child_prompt: str) -> Dict[str, Any]:
+def spawn_child_agent(task_id: str, parent_agent_id: str, child_agent_type: str, child_prompt: str, model: str = "opus") -> Dict[str, Any]:
     """
     Spawn a child agent - called by agents to create sub-agents.
-    
+
+    MODEL SELECTION (aim for ~50/50 ratio):
+    - "opus": Complex reasoning, architecture, security, difficult bugs, UI work
+    - "sonnet": Research, searches, docs, simple fixes, validation
+
     Args:
         task_id: Parent task ID
         parent_agent_id: ID of parent agent spawning this child
         child_agent_type: Type of child agent
         child_prompt: Prompt for child agent
-    
+        model: "opus" (default) for hard tasks, "sonnet" for research/simple tasks
+
     Returns:
-        Child agent spawn result  
+        Child agent spawn result
     """
-    # Delegate to existing deployment function
-    return deploy_headless_agent.fn(task_id, child_agent_type, child_prompt, parent_agent_id)
+    # Delegate to existing deployment function with model parameter
+    return deploy_headless_agent.fn(task_id, child_agent_type, child_prompt, parent_agent_id, None, model)
+
+
+@mcp.tool
+def get_task_findings(
+    task_id: str,
+    agent_id: Optional[str] = None,
+    finding_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    since: Optional[str] = None,
+    summary_only: bool = False,
+    limit: int = 50
+) -> Dict[str, Any]:
+    """
+    Get findings from task agents - use this to coordinate with peers.
+
+    IMPORTANT: Call this to see what other agents have discovered.
+    Use the 'since' parameter to get only NEW findings since your last check
+    to avoid re-reading the same data and wasting context.
+
+    Args:
+        task_id: Task ID
+        agent_id: Optional - filter to specific agent's findings
+        finding_type: Optional - filter by type (issue/solution/insight/blocker)
+        severity: Optional - filter by severity (low/medium/high/critical)
+        since: Optional ISO timestamp - only return findings after this time
+        summary_only: If True, return compact summary instead of full findings
+        limit: Max findings to return (default 50)
+
+    Returns:
+        Findings from agents, optionally filtered
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return {"success": False, "error": f"Task {task_id} not found"}
+
+    findings_dir = f"{workspace}/findings"
+    if not os.path.exists(findings_dir):
+        return {
+            "success": True,
+            "findings": [],
+            "summary": {"total": 0, "by_severity": {}, "by_agent": {}},
+            "message": "No findings reported yet"
+        }
+
+    all_findings = []
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+        except ValueError:
+            return {"success": False, "error": f"Invalid 'since' timestamp format: {since}"}
+
+    # Read findings files
+    for file in os.listdir(findings_dir):
+        if not file.endswith('_findings.jsonl'):
+            continue
+
+        file_agent_id = file.replace('_findings.jsonl', '')
+
+        # Filter by agent if specified
+        if agent_id and file_agent_id != agent_id:
+            continue
+
+        try:
+            with open(f"{findings_dir}/{file}", 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+
+                        # Apply since filter
+                        if since_dt:
+                            entry_time = datetime.fromisoformat(entry.get('timestamp', '').replace('Z', '+00:00'))
+                            if entry_time <= since_dt:
+                                continue
+
+                        # Apply type filter
+                        if finding_type and entry.get('finding_type') != finding_type:
+                            continue
+
+                        # Apply severity filter
+                        if severity and entry.get('severity') != severity:
+                            continue
+
+                        all_findings.append(entry)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+        except Exception as e:
+            logger.warning(f"Error reading findings file {file}: {e}")
+            continue
+
+    # Sort by timestamp (newest first) and limit
+    all_findings.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    all_findings = all_findings[:limit]
+
+    # Build summary stats
+    summary = {
+        "total": len(all_findings),
+        "by_severity": {},
+        "by_agent": {},
+        "by_type": {}
+    }
+
+    for f in all_findings:
+        sev = f.get('severity', 'unknown')
+        agt = f.get('agent_id', 'unknown')
+        ftype = f.get('finding_type', 'unknown')
+
+        summary["by_severity"][sev] = summary["by_severity"].get(sev, 0) + 1
+        summary["by_agent"][agt] = summary["by_agent"].get(agt, 0) + 1
+        summary["by_type"][ftype] = summary["by_type"].get(ftype, 0) + 1
+
+    if summary_only:
+        # Return compact summary for quick coordination checks
+        agent_summaries = []
+        for agt, count in summary["by_agent"].items():
+            agent_findings = [f for f in all_findings if f.get('agent_id') == agt]
+            critical_count = len([f for f in agent_findings if f.get('severity') == 'critical'])
+            high_count = len([f for f in agent_findings if f.get('severity') == 'high'])
+
+            agent_summaries.append({
+                "agent_id": agt,
+                "finding_count": count,
+                "critical": critical_count,
+                "high": high_count,
+                "latest_message": agent_findings[0].get('message', '')[:100] if agent_findings else ''
+            })
+
+        return {
+            "success": True,
+            "summary": summary,
+            "agent_summaries": agent_summaries,
+            "since": since,
+            "tip": "Call with summary_only=False to get full finding details"
+        }
+
+    return {
+        "success": True,
+        "findings": all_findings,
+        "summary": summary,
+        "since": since,
+        "current_time": datetime.now().isoformat(),
+        "tip": "Save current_time and pass as 'since' on next call to get only new findings"
+    }
+
 
 @mcp.resource("tasks://list")  
 def list_real_tasks() -> str:
@@ -7320,7 +3505,1832 @@ def startup_registry_validation():
         # Don't crash the server if validation fails
         pass
 
+# ============================================================================
+# PHASE, HANDOVER, AND REVIEW TOOLS (Native Sequential Phase Architecture)
+# ============================================================================
+
+# Import from orchestrator module for new features
+from orchestrator import (
+    # Handover
+    HandoverDocument, HANDOVER_MAX_TOKENS, save_handover, load_handover,
+    format_handover_markdown, auto_generate_handover, collect_phase_findings,
+    # Review
+    ReviewAgent, ReviewFinding, ReviewConfig, ReviewStatus, ReviewVerdict,
+    REVIEW_VERDICTS, REVIEW_FINDING_TYPES,
+    create_review_agent, submit_review_verdict, calculate_aggregate_verdict,
+    trigger_phase_review, create_review_record, get_phase_reviews,
+    # Phase validation
+    PHASE_STATUSES, PhaseValidationError, create_default_phase, validate_phases,
+    ensure_task_has_phases,
+    # Phase completion tracking
+    AGENT_TERMINAL_STATUSES, check_phase_completion,
+)
+
+
+@mcp.tool()
+def get_phase_status(task_id: str) -> str:
+    """
+    Get current phase status for a task.
+
+    Returns the current phase, its status, available transitions, and detailed guidance.
+    IMPORTANT: This is the primary tool for understanding what to do next.
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    if not os.path.exists(registry_path):
+        return json.dumps({"success": False, "error": "Registry not found"})
+
+    with open(registry_path, 'r') as f:
+        registry = json.load(f)
+
+    phases = registry.get('phases', [])
+    current_idx = registry.get('current_phase_index', 0)
+
+    if not phases:
+        return json.dumps({
+            "success": True,
+            "has_phases": False,
+            "message": "Task has no phases defined"
+        })
+
+    current_phase = phases[current_idx] if current_idx < len(phases) else None
+    phase_status = current_phase.get('status', 'UNKNOWN') if current_phase else None
+
+    # Get phase agents
+    phase_agents = [a for a in registry.get('agents', []) if a.get('phase_index') == current_idx]
+    completed_agents = len([a for a in phase_agents if a.get('status') == 'completed'])
+    pending_agents = len([a for a in phase_agents if a.get('status') not in ['completed', 'failed', 'error', 'terminated']])
+    failed_agents = len([a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']])
+
+    # Check for active review
+    reviews = registry.get('reviews', [])
+    active_review = None
+    review_details = None
+    for rev in reviews:
+        if rev.get('review_id') == current_phase.get('active_review_id'):
+            active_review = rev
+            break
+
+    # Build detailed review info
+    if active_review:
+        verdicts = active_review.get('verdicts', [])
+        all_findings = []
+        for v in verdicts:
+            all_findings.extend(v.get('findings', []))
+
+        # Categorize findings by severity
+        critical_findings = [f for f in all_findings if f.get('severity') == 'critical']
+        high_findings = [f for f in all_findings if f.get('severity') == 'high']
+        blockers = [f for f in all_findings if f.get('type') == 'blocker']
+
+        review_details = {
+            "review_id": active_review.get('review_id'),
+            "status": active_review.get('status'),
+            "reviewers_submitted": len(verdicts),
+            "reviewers_expected": active_review.get('num_reviewers', 0),
+            "final_verdict": active_review.get('final_verdict'),
+            "findings_summary": {
+                "total": len(all_findings),
+                "critical": len(critical_findings),
+                "high": len(high_findings),
+                "blockers": len(blockers)
+            },
+            "blocker_messages": [b.get('message', '') for b in blockers[:5]],  # Top 5 blockers
+            "critical_messages": [c.get('message', '') for c in critical_findings[:5]]  # Top 5 critical
+        }
+
+    # Generate actionable guidance based on current state
+    guidance = {"status": phase_status, "action": "", "blocked_reason": None}
+
+    if phase_status == 'ACTIVE':
+        if len(phase_agents) == 0:
+            guidance["action"] = "DEPLOY AGENTS: No agents deployed. Use deploy_headless_agent to start work."
+        elif pending_agents > 0:
+            guidance["action"] = f"WAIT: {pending_agents} agents still working. Monitor with get_agent_output."
+        else:
+            guidance["action"] = "REVIEW PENDING: All agents done. System will auto-trigger review."
+    elif phase_status == 'AWAITING_REVIEW':
+        guidance["action"] = "REVIEWERS SPAWNING: Agentic reviewers being deployed. Wait for UNDER_REVIEW status."
+    elif phase_status == 'UNDER_REVIEW':
+        if review_details:
+            submitted = review_details['reviewers_submitted']
+            expected = review_details['reviewers_expected']
+            guidance["action"] = f"REVIEW IN PROGRESS: {submitted}/{expected} reviewers submitted. Wait for verdicts."
+        else:
+            guidance["action"] = "REVIEW IN PROGRESS: Waiting for reviewer verdicts."
+    elif phase_status == 'APPROVED':
+        if current_idx < len(phases) - 1:
+            next_phase_name = phases[current_idx + 1].get('name', f'Phase {current_idx + 2}')
+            guidance["action"] = f"PROCEED: Phase approved. Use advance_to_next_phase to start '{next_phase_name}'."
+        else:
+            guidance["action"] = "TASK COMPLETE: All phases approved. Task finished successfully."
+    elif phase_status == 'REVISING':
+        if review_details and review_details.get('blocker_messages'):
+            guidance["action"] = "FIX REQUIRED: Address blockers and re-submit for review."
+            guidance["blocked_reason"] = review_details['blocker_messages']
+        else:
+            guidance["action"] = "REVISIONS NEEDED: Reviewers requested changes. Deploy agents to fix issues."
+    elif phase_status == 'REJECTED':
+        guidance["action"] = "PHASE REJECTED: Critical issues found. Review findings and deploy fix agents."
+        if review_details:
+            guidance["blocked_reason"] = review_details.get('critical_messages', [])
+    elif phase_status == 'ESCALATED':
+        # This happens when all reviewers crashed without submitting verdicts
+        escalation_reason = current_phase.get('escalation_reason', 'All reviewers crashed')
+        guidance["action"] = f"ESCALATED - MANUAL INTERVENTION REQUIRED: {escalation_reason}. Options: (1) Use abort_stalled_review and trigger_agentic_review to retry with new reviewers, (2) Use approve_phase_review with force flag if work is actually complete."
+        guidance["blocked_reason"] = escalation_reason
+        guidance["escalated"] = True
+    else:
+        guidance["action"] = f"UNKNOWN STATE: Phase in '{phase_status}'. Check registry manually."
+
+    return json.dumps({
+        "success": True,
+        "has_phases": True,
+        "total_phases": len(phases),
+        "current_phase_index": current_idx,
+        "current_phase": {
+            "name": current_phase.get('name') if current_phase else None,
+            "status": phase_status,
+            "description": current_phase.get('description') if current_phase else None
+        },
+        "agents": {
+            "total": len(phase_agents),
+            "completed": completed_agents,
+            "pending": pending_agents,
+            "failed": failed_agents
+        },
+        "review": review_details,
+        "guidance": guidance,
+        "phases_summary": [
+            {"order": p.get('order'), "name": p.get('name'), "status": p.get('status')}
+            for p in phases
+        ]
+    }, indent=2)
+
+
+@mcp.tool()
+def check_phase_progress(task_id: str) -> str:
+    """
+    Check if current phase is ready for review.
+
+    Returns detailed phase completion status including:
+    - All agents done (ready_for_review)
+    - Pending agents still working
+    - Recommended next action
+
+    This is the primary tool for monitoring phase progress and knowing
+    when to submit for review or advance to next phase.
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if not phases or current_idx >= len(phases):
+            return json.dumps({"success": False, "error": "No current phase"})
+
+        current_phase = phases[current_idx]
+        phase_id = current_phase.get('id')
+        phase_status = current_phase.get('status')
+
+        # Get all agents bound to this phase by phase_index (NOT phase_id)
+        # Agents are tagged with phase_index when deployed
+        phase_agents = [
+            a for a in registry.get('agents', [])
+            if a.get('phase_index') == current_idx
+        ]
+
+        # Categorize by status
+        completed_agents = []
+        pending_agents = []
+        failed_agents = []
+
+        for agent in phase_agents:
+            status = agent.get('status', '')
+            agent_summary = {
+                "id": agent.get('id'),
+                "type": agent.get('type'),
+                "status": status
+            }
+            if status in {'completed', 'phase_completed'}:
+                completed_agents.append(agent_summary)
+            elif status in {'failed', 'error', 'terminated'}:
+                failed_agents.append(agent_summary)
+            else:
+                pending_agents.append(agent_summary)
+
+        all_done = len(pending_agents) == 0 and len(phase_agents) > 0
+        ready_for_review = all_done and phase_status == 'ACTIVE'
+
+        # Determine recommended action
+        if phase_status == 'APPROVED':
+            if current_idx < len(phases) - 1:
+                next_action = "Phase approved. Use advance_to_next_phase to proceed."
+            else:
+                next_action = "All phases complete. Task finished."
+        elif phase_status == 'UNDER_REVIEW':
+            next_action = "Phase under review. Wait for reviewer verdicts."
+        elif phase_status == 'AWAITING_REVIEW':
+            next_action = "Phase awaiting review. Use trigger_agentic_review to spawn reviewers."
+        elif phase_status == 'REVISING':
+            if all_done:
+                next_action = "Revisions complete. Use submit_phase_for_review to re-submit."
+            else:
+                next_action = f"Revisions in progress. {len(pending_agents)} agents still working."
+        elif ready_for_review:
+            next_action = "All agents done. Use submit_phase_for_review to request review."
+        elif len(pending_agents) > 0:
+            next_action = f"Phase in progress. {len(pending_agents)} agents still working."
+        else:
+            next_action = "No agents deployed yet. Use deploy_opus_agent to start."
+
+    return json.dumps({
+        "success": True,
+        "task_id": task_id,
+        "phase": {
+            "name": current_phase.get('name'),
+            "status": phase_status,
+            "index": current_idx,
+            "total_phases": len(phases)
+        },
+        "agents": {
+            "total": len(phase_agents),
+            "completed": len(completed_agents),
+            "pending": len(pending_agents),
+            "failed": len(failed_agents)
+        },
+        "pending_agents": pending_agents,
+        "all_agents_done": all_done,
+        "ready_for_review": ready_for_review,
+        "next_action": next_action
+    }, indent=2)
+
+
+@mcp.tool()
+def advance_to_next_phase(
+    task_id: str,
+    handover_summary: Optional[str] = None,
+    key_findings: Optional[List[str]] = None,
+    blockers: Optional[List[str]] = None,
+    recommendations: Optional[List[str]] = None
+) -> str:
+    """
+    Advance task to the next phase with optional handover document.
+
+    Creates a handover document capturing the current phase's work
+    before transitioning to the next phase.
+
+    Args:
+        task_id: Task to advance
+        handover_summary: Summary of work done in current phase
+        key_findings: Key findings/discoveries
+        blockers: Any blockers encountered
+        recommendations: Recommendations for next phase
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if not phases:
+            return json.dumps({"success": False, "error": "No phases defined"})
+
+        if current_idx >= len(phases) - 1:
+            return json.dumps({"success": False, "error": "Already at final phase"})
+
+        current_phase = phases[current_idx]
+        next_phase = phases[current_idx + 1]
+
+        # CRITICAL ENFORCEMENT: Phase must already be APPROVED before advancing
+        # The orchestrator CANNOT self-approve by calling this function
+        # This prevents bypassing the mandatory agentic review process
+        current_status = current_phase.get('status', 'PENDING')
+        if current_status != 'APPROVED':
+            # Generate contextual guidance for the blocked state
+            if current_status == 'ACTIVE':
+                next_action = "Deploy agents and wait for completion, then auto-submit will trigger"
+                available_actions = [
+                    "deploy_headless_agent - Add agents if needed",
+                    "check_phase_progress - Check if agents are done"
+                ]
+            elif current_status in ['AWAITING_REVIEW', 'UNDER_REVIEW']:
+                next_action = "Wait for reviewers to submit verdicts"
+                available_actions = [
+                    "get_review_status - Check review progress",
+                    "get_phase_status - View current state"
+                ]
+            elif current_status == 'REJECTED':
+                next_action = "Deploy agents to fix issues identified in review"
+                available_actions = [
+                    "get_review_status - View rejection reasons",
+                    "deploy_headless_agent - Deploy fix agents"
+                ]
+            elif current_status == 'ESCALATED':
+                next_action = "Use force approval or retry review"
+                available_actions = [
+                    "approve_phase_review(force_escalated=True) - Force approve",
+                    "trigger_agentic_review - Retry with new reviewers"
+                ]
+            else:
+                next_action = "Check phase status for details"
+                available_actions = ["get_phase_status - View current state"]
+
+            return json.dumps({
+                "success": False,
+                "error": f"PHASE_NOT_APPROVED: Cannot advance phase '{current_phase.get('name')}' with status '{current_status}'",
+                "hint": "Phase must be APPROVED by reviewers before advancement. "
+                        "Flow: deploy agents → agents complete → auto-submit for review → reviewers approve → then advance.",
+                "current_phase": current_phase.get('name'),
+                "current_status": current_status,
+                "required_status": "APPROVED",
+                "valid_statuses_for_advance": ["APPROVED"],
+                "guidance": {
+                    "current_state": f"phase_{current_status.lower()}_blocked",
+                    "next_action": next_action,
+                    "available_actions": available_actions,
+                    "warnings": None,
+                    "blocked_reason": f"Phase status is '{current_status}', must be 'APPROVED' to advance"
+                }
+            }, indent=2)
+
+        # Create handover document
+        handover = HandoverDocument(
+            phase_id=current_phase.get('id', f"phase-{current_idx}"),
+            phase_name=current_phase.get('name', f"Phase {current_idx + 1}"),
+            summary=handover_summary or f"Completed {current_phase.get('name', 'phase')}",
+            key_findings=key_findings or [],
+            blockers=blockers or [],
+            recommendations=recommendations or []
+        )
+
+        # Save handover (save_handover takes task_workspace, handover)
+        save_result = save_handover(workspace, handover)
+        handover_path = save_result.get('path', 'unknown')
+
+        # Phase is already APPROVED (verified above), mark as COMPLETED and advance
+        current_phase['status'] = 'COMPLETED'  # Final state after advancement
+        current_phase['completed_at'] = datetime.now().isoformat()
+        next_phase['status'] = 'ACTIVE'
+        next_phase['started_at'] = datetime.now().isoformat()
+
+        # Advance index
+        registry['current_phase_index'] = current_idx + 1
+
+        # Write back
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    next_phase_name = next_phase.get('name')
+    return json.dumps({
+        "success": True,
+        "previous_phase": current_phase.get('name'),
+        "current_phase": next_phase_name,
+        "phase_index": current_idx + 1,
+        "handover_saved": handover_path,
+        "guidance": {
+            "current_state": "phase_advanced",
+            "next_action": f"Deploy agents for '{next_phase_name}' phase using deploy_headless_agent",
+            "available_actions": [
+                f"deploy_headless_agent - Deploy agents for '{next_phase_name}'",
+                "get_phase_status - View new phase requirements",
+                "get_phase_handover - Review previous phase handover"
+            ],
+            "warnings": None,
+            "blocked_reason": None,
+            "context": {
+                "new_phase": next_phase_name,
+                "phase_index": current_idx + 1
+            }
+        }
+    }, indent=2)
+
+
+@mcp.tool()
+def submit_phase_for_review(task_id: str, phase_summary: Optional[str] = None) -> str:
+    """
+    Submit current phase for review.
+
+    Transitions phase from ACTIVE to AWAITING_REVIEW.
+    This signals that work is complete and ready for review.
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if not phases or current_idx >= len(phases):
+            return json.dumps({"success": False, "error": "No current phase"})
+
+        current_phase = phases[current_idx]
+
+        # Allow submit from ACTIVE (normal flow) or REVISING (after rejection)
+        if current_phase.get('status') not in ['ACTIVE', 'REVISING']:
+            return json.dumps({
+                "success": False,
+                "error": f"Phase must be ACTIVE or REVISING to submit for review. Current: {current_phase.get('status')}"
+            })
+
+        # Count phase agents for reviewer context
+        phase_agents = [a for a in registry.get('agents', []) if a.get('phase_index') == current_idx]
+        completed_agents = len([a for a in phase_agents if a.get('status') == 'completed'])
+        failed_agents = len([a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']])
+        phase_name = current_phase.get('name', f'Phase {current_idx + 1}')
+
+        # Transition to AWAITING_REVIEW
+        current_phase['status'] = 'AWAITING_REVIEW'
+        current_phase['submitted_for_review_at'] = datetime.now().isoformat()
+        current_phase['manual_submit'] = True  # Mark as manual submission
+        if phase_summary:
+            current_phase['review_summary'] = phase_summary
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    # MANDATORY: Auto-spawn reviewers to prevent manual approval bypass
+    # This ensures the orchestrator CANNOT submit and then manually approve
+    logger.info(f"PHASE ENFORCEMENT: Manual submit_phase_for_review - auto-spawning reviewers")
+    try:
+        auto_review_result = _auto_spawn_phase_reviewers(
+            task_id=task_id,
+            phase_index=current_idx,
+            phase_name=phase_name,
+            completed_agents=completed_agents,
+            failed_agents=failed_agents,
+            workspace=workspace
+        )
+        logger.info(f"PHASE ENFORCEMENT: Auto-review triggered: {auto_review_result}")
+    except Exception as e:
+        logger.error(f"PHASE ENFORCEMENT: Failed to auto-spawn reviewers: {e}")
+        # Even if reviewer spawning fails, phase is in AWAITING_REVIEW with auto_review=False
+        # This will be caught by approve_phase_review which requires review completion
+
+    return json.dumps({
+        "success": True,
+        "phase": phase_name,
+        "status": "UNDER_REVIEW",  # Will be UNDER_REVIEW after reviewers spawn
+        "message": "Phase submitted for review - agentic reviewers auto-spawned",
+        "enforcement": "Reviewers will independently verify phase work. Manual approval blocked."
+    }, indent=2)
+
+
+@mcp.tool()
+def approve_phase_review(
+    task_id: str,
+    reviewer_notes: Optional[str] = None,
+    auto_advance: bool = True,
+    force_escalated: bool = False
+) -> str:
+    """
+    Approve the current phase review and optionally advance to next phase.
+
+    IMPORTANT: This is BLOCKED when an auto-review is in progress.
+    The system enforces agentic review - manual approval is not allowed
+    once reviewers have been spawned automatically.
+
+    EXCEPTION: If force_escalated=True AND phase is ESCALATED (all reviewers crashed),
+    manual approval is allowed as an escape hatch.
+
+    Args:
+        task_id: Task ID
+        reviewer_notes: Optional notes from reviewer
+        auto_advance: If True, automatically advance to next phase
+        force_escalated: If True, allows approval of ESCALATED phases only
+    """
+    # ===== CHECK FOR ESCALATED PHASE OVERRIDE =====
+    if force_escalated:
+        workspace = find_task_workspace(task_id)
+        if not workspace:
+            return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+        registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+        with LockedRegistryFile(registry_path) as (registry, f):
+            phases = registry.get('phases', [])
+            current_idx = registry.get('current_phase_index', 0)
+
+            if not phases or current_idx >= len(phases):
+                return json.dumps({"success": False, "error": "No current phase"})
+
+            current_phase = phases[current_idx]
+
+            # Only allow force approval for ESCALATED phases
+            if current_phase.get('status') != 'ESCALATED':
+                return json.dumps({
+                    "success": False,
+                    "error": f"force_escalated only works for ESCALATED phases. Current status: {current_phase.get('status')}",
+                    "hint": "This escape hatch is only for phases where all reviewers crashed."
+                })
+
+            # Perform forced approval
+            current_phase['status'] = 'APPROVED'
+            current_phase['approved_at'] = datetime.now().isoformat()
+            current_phase['forced_approval'] = True
+            current_phase['force_reason'] = 'ESCALATED phase - all reviewers crashed'
+            if reviewer_notes:
+                current_phase['reviewer_notes'] = reviewer_notes
+
+            logger.warning(f"FORCE APPROVAL: Phase {current_idx} approved via force_escalated (all reviewers crashed)")
+
+            # Auto-advance if requested
+            advanced = False
+            if auto_advance and current_idx < len(phases) - 1:
+                next_phase = phases[current_idx + 1]
+                next_phase['status'] = 'ACTIVE'
+                next_phase['started_at'] = datetime.now().isoformat()
+                registry['current_phase_index'] = current_idx + 1
+                advanced = True
+
+            f.seek(0)
+            f.write(json.dumps(registry, indent=2))
+            f.truncate()
+
+        return json.dumps({
+            "success": True,
+            "phase_index": current_idx,
+            "phase_name": current_phase.get('name'),
+            "status": "APPROVED",
+            "forced": True,
+            "advanced_to_next": advanced,
+            "next_phase_index": current_idx + 1 if advanced else None
+        })
+
+    # ===== CRITICAL PHASE ENFORCEMENT: Manual approval ALWAYS blocked =====
+    # Per CLAUDE.md: "The orchestrator CANNOT: Self-approve, Skip phases, Bypass review"
+    # ALL approvals must go through submit_review_verdict from reviewer agents
+    return json.dumps({
+        "success": False,
+        "error": "BLOCKED: Manual approval is not allowed. All approvals must come from reviewer agents.",
+        "enforcement": "mandatory_agentic_review",
+        "hint": "Phase approvals are handled automatically by the system. "
+                "Flow: agents complete → auto-submit → auto-spawn reviewers → reviewers submit verdicts → auto-approve/reject. "
+                "Use get_phase_status to check current state and guidance. "
+                "EXCEPTION: If phase is ESCALATED (all reviewers crashed), use force_escalated=True.",
+        "next_action": "Wait for reviewer agents to complete their review and submit verdicts via submit_review_verdict."
+    })
+
+    # NOTE: The code below is unreachable but kept for reference
+    # If we ever need to allow manual approval in special cases, uncomment this
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if not phases or current_idx >= len(phases):
+            return json.dumps({"success": False, "error": "No current phase"})
+
+        current_phase = phases[current_idx]
+
+        # ===== PHASE ENFORCEMENT: Block manual approval when auto-review active =====
+        if current_phase.get('auto_review'):
+            return json.dumps({
+                "success": False,
+                "error": "BLOCKED: This phase has an auto-review in progress. "
+                         "Manual approval is not allowed. Wait for reviewer agents to submit verdicts.",
+                "enforcement": "automatic_phase_control",
+                "active_review_id": current_phase.get('active_review_id'),
+                "hint": "Reviewer agents will automatically approve/reject this phase. "
+                        "Check get_review_status for progress."
+            })
+
+        if current_phase.get('status') not in ['AWAITING_REVIEW', 'UNDER_REVIEW']:
+            return json.dumps({
+                "success": False,
+                "error": f"Phase must be awaiting/under review. Current: {current_phase.get('status')}"
+            })
+
+        # Approve (only if not auto-review)
+        current_phase['status'] = 'APPROVED'
+        current_phase['approved_at'] = datetime.now().isoformat()
+        current_phase['manual_approval'] = True  # Mark as manual
+        if reviewer_notes:
+            current_phase['reviewer_notes'] = reviewer_notes
+
+        # Auto-advance if requested and there's a next phase
+        advanced = False
+        if auto_advance and current_idx < len(phases) - 1:
+            next_phase = phases[current_idx + 1]
+            next_phase['status'] = 'ACTIVE'
+            next_phase['started_at'] = datetime.now().isoformat()
+            registry['current_phase_index'] = current_idx + 1
+            advanced = True
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    return json.dumps({
+        "success": True,
+        "phase": current_phase.get('name'),
+        "status": "APPROVED",
+        "advanced_to_next": advanced,
+        "new_phase_index": registry.get('current_phase_index'),
+        "note": "Manual approval - consider using agentic review for better quality control"
+    }, indent=2)
+    """
+
+
+@mcp.tool()
+def reject_phase_review(
+    task_id: str,
+    rejection_reason: str,
+    required_changes: Optional[List[str]] = None
+) -> str:
+    """
+    Reject the current phase review, requiring revisions.
+
+    IMPORTANT: This is BLOCKED when an auto-review is in progress.
+    The system enforces agentic review - manual rejection is not allowed
+    once reviewers have been spawned automatically.
+
+    Transitions phase to REVISING status.
+    """
+    # ===== CRITICAL PHASE ENFORCEMENT: Manual rejection ALWAYS blocked =====
+    # Per CLAUDE.md: "The orchestrator CANNOT: Self-approve, Skip phases, Bypass review"
+    # ALL rejections must go through submit_review_verdict from reviewer agents
+    return json.dumps({
+        "success": False,
+        "error": "BLOCKED: Manual rejection is not allowed. All phase decisions must come from reviewer agents.",
+        "enforcement": "mandatory_agentic_review",
+        "hint": "Phase rejections are handled automatically by the system. "
+                "Flow: agents complete → auto-submit → auto-spawn reviewers → reviewers submit verdicts → auto-approve/reject. "
+                "Use get_phase_status to check current state and guidance.",
+        "next_action": "Wait for reviewer agents to complete their review and submit verdicts via submit_review_verdict."
+    })
+
+    # NOTE: The code below is unreachable but kept for reference
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if not phases or current_idx >= len(phases):
+            return json.dumps({"success": False, "error": "No current phase"})
+
+        current_phase = phases[current_idx]
+
+        # ===== PHASE ENFORCEMENT: Block manual rejection when auto-review active =====
+        if current_phase.get('auto_review'):
+            return json.dumps({
+                "success": False,
+                "error": "BLOCKED: This phase has an auto-review in progress. "
+                         "Manual rejection is not allowed. Wait for reviewer agents to submit verdicts.",
+                "enforcement": "automatic_phase_control",
+                "active_review_id": current_phase.get('active_review_id'),
+                "hint": "Reviewer agents will automatically approve/reject this phase. "
+                        "Check get_review_status for progress."
+            })
+
+        if current_phase.get('status') not in ['AWAITING_REVIEW', 'UNDER_REVIEW']:
+            return json.dumps({
+                "success": False,
+                "error": f"Phase must be awaiting/under review. Current: {current_phase.get('status')}"
+            })
+
+        # Reject - move to REVISING (only if not auto-review)
+        current_phase['status'] = 'REVISING'
+        current_phase['rejected_at'] = datetime.now().isoformat()
+        current_phase['rejection_reason'] = rejection_reason
+        current_phase['required_changes'] = required_changes or []
+        current_phase['revision_count'] = current_phase.get('revision_count', 0) + 1
+        current_phase['manual_rejection'] = True  # Mark as manual
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    return json.dumps({
+        "success": True,
+        "phase": current_phase.get('name'),
+        "status": "REVISING",
+        "rejection_reason": rejection_reason,
+        "required_changes": required_changes or [],
+        "revision_count": current_phase.get('revision_count'),
+        "note": "Manual rejection - consider using agentic review for better quality control"
+    }, indent=2)
+    """
+
+
+# ============================================================================
+# AGENTIC REVIEW TOOLS - Automated multi-agent review system
+# ============================================================================
+
+
+def _auto_spawn_phase_reviewers(
+    task_id: str,
+    phase_index: int,
+    phase_name: str,
+    completed_agents: int,
+    failed_agents: int,
+    workspace: str,
+    num_reviewers: int = 3
+) -> Dict[str, Any]:
+    """
+    INTERNAL: Auto-spawn reviewer agents when a phase completes.
+
+    This is called automatically by update_agent_progress when all phase agents finish.
+    It creates a review record and spawns reviewer agents without orchestrator involvement.
+
+    Args:
+        task_id: Task ID
+        phase_index: Index of the phase that just completed
+        phase_name: Name of the phase
+        completed_agents: Number of agents that completed successfully
+        failed_agents: Number of agents that failed
+        workspace: Task workspace path
+        num_reviewers: Number of reviewer agents to spawn (default 3)
+
+    Returns:
+        Dict with review_id, spawned agents, and status
+    """
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    # Create review record
+    review_id = f"auto-review-{uuid.uuid4().hex[:12]}"
+    review_focus = ["completeness", "correctness", "quality"]
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        if phase_index >= len(phases):
+            return {"success": False, "error": "Invalid phase_index"}
+
+        current_phase = phases[phase_index]
+
+        # Only proceed if phase is in AWAITING_REVIEW (set by update_agent_progress)
+        if current_phase.get('status') != 'AWAITING_REVIEW':
+            return {"success": False, "error": f"Phase not awaiting review: {current_phase.get('status')}"}
+
+        # Create review record
+        review_record = {
+            "review_id": review_id,
+            "phase_id": current_phase.get('id', f"phase-{phase_index}"),
+            "phase_name": phase_name,
+            "status": "in_progress",
+            "num_reviewers": num_reviewers,
+            "reviewers": [],
+            "verdicts": [],
+            "created_at": datetime.now().isoformat(),
+            "review_focus": review_focus,
+            "auto_triggered": True,  # Mark as auto-triggered
+            "trigger_reason": f"All {completed_agents + failed_agents} phase agents finished ({completed_agents} completed, {failed_agents} failed)"
+        }
+
+        if 'reviews' not in registry:
+            registry['reviews'] = []
+        registry['reviews'].append(review_record)
+
+        # Transition phase to UNDER_REVIEW
+        current_phase['status'] = 'UNDER_REVIEW'
+        current_phase['review_started_at'] = datetime.now().isoformat()
+        current_phase['active_review_id'] = review_id
+        current_phase['auto_review'] = True
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    # Build review prompt for agents
+    review_prompt = f"""You are an INDEPENDENT REVIEWER AGENT for phase "{phase_name}" (Task: {task_id}).
+
+THIS IS AN AUTOMATED REVIEW - The orchestrator CANNOT bypass this review. Your verdict is binding.
+
+PHASE SUMMARY:
+- Phase: {phase_name} (index {phase_index})
+- Agents completed: {completed_agents}
+- Agents failed: {failed_agents}
+
+YOUR MISSION: Review the ACTUAL DELIVERABLES produced in this phase and submit a verdict.
+
+REVIEW FOCUS AREAS: {', '.join(review_focus)}
+
+STEP 1 - GET TASK CONTEXT (use MCP tools):
+```
+mcp__claude-orchestrator__get_real_task_status(task_id="{task_id}")
+```
+This shows: task description, expected deliverables, success criteria, agent statuses.
+
+STEP 2 - GET AGENT FINDINGS (what agents discovered/created):
+```
+mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={phase_index})
+```
+This shows: findings, key discoveries, deliverables from this phase.
+
+STEP 3 - CHECK AGENT OUTPUTS (if needed):
+```
+mcp__claude-orchestrator__get_agent_output(task_id="{task_id}", agent_id="<agent_id>", response_format="recent")
+```
+Use this to see what specific agents did.
+
+STEP 4 - VERIFY ACTUAL DELIVERABLES:
+- If files were created, use Read tool to check them
+- If code was written, verify it exists and looks correct
+- If a server was implemented, test the endpoints with curl/fetch
+- Workspace location: {workspace}
+
+CRITICAL EVALUATION RULES:
+1. IGNORE registry progress percentages - they are unreliable
+2. FOCUS ON: Do the deliverables exist and work?
+3. Check success_criteria from task status - are they met?
+
+AFTER REVIEWING, SUBMIT YOUR VERDICT:
+```
+mcp__claude-orchestrator__submit_review_verdict(
+    task_id="{task_id}",
+    review_id="{review_id}",
+    verdict="approved" | "rejected" | "needs_revision",
+    findings=[{{"type": "issue|suggestion|blocker|praise", "severity": "critical|high|medium|low", "message": "..."}}],
+    reviewer_notes="Summary of what you verified"
+)
+```
+
+VERDICT GUIDE:
+- "approved": Deliverables exist and meet success criteria
+- "needs_revision": Deliverables exist but have minor issues
+- "rejected": Critical deliverables missing or fundamentally broken
+
+IMPORTANT: Use MCP tools to gather information. Your review is INDEPENDENT.
+
+═══════════════════════════════════════════════════════════════════════════════
+⚡ MANDATORY: YOU MUST SUBMIT YOUR VERDICT - REVIEW IS NOT COMPLETE WITHOUT IT ⚡
+═══════════════════════════════════════════════════════════════════════════════
+
+Your job is ONLY COMPLETE when you call submit_review_verdict.
+
+IF YOU DO NOT SUBMIT YOUR VERDICT:
+- The phase will be STUCK waiting for your review
+- The orchestrator cannot proceed
+- Your review is WASTED
+- The system will eventually mark you as failed
+
+REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+    # Spawn reviewer agents
+    spawned_agents = []
+    for i in range(num_reviewers):
+        # CRITICAL FIX (v2): Agent types must be unique per-REVIEW, not just per-phase
+        # The find_existing_agent check blocks spawning if same agent_type exists with status 'working'
+        # When a phase needs re-review, old reviewers may still have status 'working' (before the status fix)
+        # Include review_id prefix to guarantee uniqueness across multiple reviews of the same phase
+        review_prefix = review_id.split('-')[-1][:8]  # e.g., "auto-review-abc123..." -> "abc123"
+        agent_type = f"reviewer-{review_prefix}-{i+1}"
+        try:
+            # Use the internal deployment function with a special phase_index (-1 = reviewer)
+            # Reviewers don't belong to any phase - they review phases
+            result = deploy_claude_tmux_agent(
+                task_id=task_id,
+                agent_type=agent_type,
+                prompt=review_prompt,
+                parent="orchestrator",
+                phase_index=-1  # -1 indicates reviewer agent (not part of any phase)
+            )
+            if result.get('success'):
+                agent_id = result.get('agent_id')
+                spawned_agents.append(agent_id)
+
+                # Update review record with reviewer info
+                with LockedRegistryFile(registry_path) as (reg, f2):
+                    for rev in reg.get('reviews', []):
+                        if rev.get('review_id') == review_id:
+                            rev['reviewers'].append({
+                                "agent_id": agent_id,
+                                "agent_type": agent_type,
+                                "spawned_at": datetime.now().isoformat(),
+                                "status": "reviewing"
+                            })
+                            break
+                    f2.seek(0)
+                    json.dump(reg, f2, indent=2)
+                    f2.truncate()
+
+                logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned reviewer {agent_id}")
+            else:
+                # CRITICAL: Log when deployment fails (was silently ignored before, causing 0-reviewer mystery)
+                logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewer {i+1}: {result.get('error', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewer {i+1}: {e}")
+
+    return {
+        "success": True,
+        "review_id": review_id,
+        "phase": phase_name,
+        "phase_index": phase_index,
+        "status": "UNDER_REVIEW",
+        "num_reviewers": num_reviewers,
+        "spawned_agents": spawned_agents,
+        "auto_triggered": True,
+        "message": f"Auto-spawned {len(spawned_agents)} reviewer agents"
+    }
+
+
+@mcp.tool()
+def trigger_agentic_review(
+    task_id: str,
+    num_reviewers: int = 2,
+    review_focus: Optional[List[str]] = None
+) -> str:
+    """
+    Trigger automated agentic review by spawning reviewer agents.
+
+    This deploys specialized reviewer agents that independently examine
+    the phase work and submit verdicts. Use this instead of manual
+    approve/reject for automated quality gates.
+
+    Flow:
+        1. Phase must be in AWAITING_REVIEW state
+        2. Spawns num_reviewers agents with review prompts
+        3. Each agent reviews and calls submit_review_verdict
+        4. System aggregates verdicts and auto-transitions phase
+
+    Args:
+        task_id: Task ID containing the phase to review
+        num_reviewers: Number of reviewer agents to spawn (1-5, default 2)
+        review_focus: Optional focus areas like ["security", "performance", "code_quality"]
+
+    Returns:
+        Dict with review_id, spawned agent IDs, and phase status
+    """
+    from orchestrator.review import create_review_record, ReviewConfig
+
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    # Clamp num_reviewers
+    num_reviewers = max(1, min(5, num_reviewers))
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if not phases or current_idx >= len(phases):
+            return json.dumps({"success": False, "error": "No current phase"})
+
+        current_phase = phases[current_idx]
+        phase_id = current_phase.get('id', f"phase-{current_idx}")
+        phase_name = current_phase.get('name', 'Unknown')
+
+        phase_status = current_phase.get('status')
+        if phase_status not in ['AWAITING_REVIEW', 'ESCALATED']:
+            return json.dumps({
+                "success": False,
+                "error": f"Phase must be AWAITING_REVIEW or ESCALATED to trigger review. Current: {phase_status}"
+            })
+
+        # If phase was ESCALATED, log the retry
+        if phase_status == 'ESCALATED':
+            logger.info(f"Retrying review for ESCALATED phase {current_idx} in task {task_id}")
+            current_phase['escalation_retry_at'] = datetime.now().isoformat()
+            current_phase['escalation_retry_reason'] = 'Manual retry via trigger_agentic_review'
+
+        # Create review record
+        review_id = f"review-{uuid.uuid4().hex[:12]}"
+        review_record = {
+            "review_id": review_id,
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "status": "in_progress",
+            "num_reviewers": num_reviewers,
+            "reviewers": [],
+            "verdicts": [],
+            "created_at": datetime.now().isoformat(),
+            "review_focus": review_focus or ["completeness", "correctness", "quality"]
+        }
+
+        # Initialize reviews list if not exists
+        if 'reviews' not in registry:
+            registry['reviews'] = []
+        registry['reviews'].append(review_record)
+
+        # Transition phase to UNDER_REVIEW
+        current_phase['status'] = 'UNDER_REVIEW'
+        current_phase['review_started_at'] = datetime.now().isoformat()
+        current_phase['active_review_id'] = review_id
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    # Build review prompt for agents
+    focus_areas = review_focus or ["completeness", "correctness", "quality"]
+    current_phase_idx = registry.get('current_phase_index', 0)
+    review_prompt = f"""You are a REVIEWER AGENT for phase "{phase_name}" (Task: {task_id}).
+
+YOUR MISSION: Review the ACTUAL DELIVERABLES produced in this phase and submit a verdict.
+
+REVIEW FOCUS AREAS: {', '.join(focus_areas)}
+
+STEP 1 - GET TASK CONTEXT (use MCP tools):
+```
+mcp__claude-orchestrator__get_real_task_status(task_id="{task_id}")
+```
+This shows: task description, expected deliverables, success criteria, agent statuses.
+
+STEP 2 - GET AGENT FINDINGS (what agents discovered/created):
+```
+mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={current_phase_idx})
+```
+This shows: findings, key discoveries, deliverables from this phase.
+
+STEP 3 - CHECK AGENT OUTPUTS (if needed):
+```
+mcp__claude-orchestrator__get_agent_output(task_id="{task_id}", agent_id="<agent_id>", response_format="recent")
+```
+Use this to see what specific agents did.
+
+STEP 4 - VERIFY ACTUAL DELIVERABLES:
+- If files were created, use Read tool to check them
+- If code was written, verify it exists and looks correct
+- If a server was implemented, test the endpoints with curl/fetch
+- Workspace location: {workspace}
+
+CRITICAL EVALUATION RULES:
+1. IGNORE registry progress percentages - they are unreliable
+2. FOCUS ON: Do the deliverables exist and work?
+3. Check success_criteria from task status - are they met?
+
+AFTER REVIEWING, SUBMIT YOUR VERDICT:
+```
+mcp__claude-orchestrator__submit_review_verdict(
+    task_id="{task_id}",
+    review_id="{review_id}",
+    verdict="approved" | "rejected" | "needs_revision",
+    findings=[{{"type": "issue|suggestion|blocker|praise", "severity": "critical|high|medium|low", "message": "..."}}],
+    reviewer_notes="Summary of what you verified"
+)
+```
+
+VERDICT GUIDE:
+- "approved": Deliverables exist and meet success criteria
+- "needs_revision": Deliverables exist but have minor issues
+- "rejected": Critical deliverables missing or fundamentally broken
+
+═══════════════════════════════════════════════════════════════════════════════
+⚡ MANDATORY: YOU MUST SUBMIT YOUR VERDICT - REVIEW IS NOT COMPLETE WITHOUT IT ⚡
+═══════════════════════════════════════════════════════════════════════════════
+
+Your job is ONLY COMPLETE when you call submit_review_verdict.
+
+IF YOU DO NOT SUBMIT YOUR VERDICT:
+- The phase will be STUCK waiting for your review
+- The orchestrator cannot proceed
+- Your review is WASTED
+- The system will eventually mark you as failed
+
+REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+    # Spawn reviewer agents
+    spawned_agents = []
+    for i in range(num_reviewers):
+        # CRITICAL FIX (v2): Agent types must be unique per-REVIEW, not just per-phase
+        # Include review_id prefix to guarantee uniqueness across multiple reviews
+        review_prefix = review_id.split('-')[-1][:8]  # e.g., "review-abc123..." -> "abc123"
+        agent_type = f"reviewer-{review_prefix}-{i+1}"
+        try:
+            # Use the internal deployment function (not MCP-decorated)
+            result = deploy_claude_tmux_agent(
+                task_id=task_id,
+                agent_type=agent_type,
+                prompt=review_prompt,
+                parent="orchestrator"
+            )
+            if result.get('success'):
+                agent_id = result.get('agent_id')
+                spawned_agents.append(agent_id)
+
+                # Update review record with reviewer info
+                with LockedRegistryFile(registry_path) as (reg, f2):
+                    for rev in reg.get('reviews', []):
+                        if rev.get('review_id') == review_id:
+                            rev['reviewers'].append({
+                                "agent_id": agent_id,
+                                "agent_type": agent_type,
+                                "spawned_at": datetime.now().isoformat(),
+                                "status": "reviewing"
+                            })
+                            break
+                    f2.seek(0)
+                    json.dump(reg, f2, indent=2)
+                    f2.truncate()
+            else:
+                # Log when deployment fails (was silently ignored before)
+                logger.error(f"Failed to spawn reviewer {i+1}: {result.get('error', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Failed to spawn reviewer {i+1}: {e}")
+
+    return json.dumps({
+        "success": True,
+        "review_id": review_id,
+        "phase": phase_name,
+        "status": "UNDER_REVIEW",
+        "num_reviewers": num_reviewers,
+        "spawned_agents": spawned_agents,
+        "message": f"Spawned {len(spawned_agents)} reviewer agents"
+    }, indent=2)
+
+
+@mcp.tool()
+def submit_review_verdict(
+    task_id: str,
+    review_id: str,
+    verdict: str,
+    findings: List[Dict[str, Any]],
+    reviewer_notes: Optional[str] = None
+) -> str:
+    """
+    Submit a review verdict (called by reviewer agents).
+
+    After examining the phase work, reviewer agents call this to submit
+    their verdict. When all reviewers have submitted, the system
+    automatically aggregates and finalizes the review.
+
+    Args:
+        task_id: Task ID
+        review_id: Review ID from trigger_agentic_review
+        verdict: "approved", "rejected", or "needs_revision"
+        findings: List of findings, each with:
+            - type: "issue", "suggestion", "blocker", or "praise"
+            - severity: "critical", "high", "medium", or "low"
+            - message: Description of the finding
+        reviewer_notes: Optional summary notes
+
+    Returns:
+        Dict with submission status and review progress
+    """
+    from orchestrator.review import REVIEW_VERDICTS, calculate_aggregate_verdict
+
+    # Validate verdict
+    if verdict not in REVIEW_VERDICTS:
+        return json.dumps({
+            "success": False,
+            "error": f"Invalid verdict '{verdict}'. Must be: approved, rejected, needs_revision"
+        })
+
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        # Find the review record
+        reviews = registry.get('reviews', [])
+        review_record = None
+        for rev in reviews:
+            if rev.get('review_id') == review_id:
+                review_record = rev
+                break
+
+        if not review_record:
+            return json.dumps({
+                "success": False,
+                "error": f"Review {review_id} not found"
+            })
+
+        # Record the verdict
+        review_record['verdicts'].append({
+            "verdict": verdict,
+            "findings": findings,
+            "reviewer_notes": reviewer_notes or "",
+            "submitted_at": datetime.now().isoformat()
+        })
+
+        # CRITICAL FIX: Update reviewer agent status to "completed"
+        # Without this, old reviewers stay "working" and block new reviewer spawns
+        # due to find_existing_agent deduplication check
+        for agent in registry.get('agents', []):
+            # Find reviewer agents for this review (check if type starts with review prefix pattern)
+            # Also match old-style phase-based reviewers
+            if agent.get('status') in ['working', 'running']:
+                agent_type = agent.get('type', '')
+                # Match both old format (phase0-reviewer-1) and new format (review-xxx-reviewer-1)
+                is_reviewer = 'reviewer' in agent_type.lower()
+                if is_reviewer:
+                    # Check if this agent is assigned to this review
+                    for reviewer in review_record.get('reviewers', []):
+                        if reviewer.get('agent_id') == agent.get('id'):
+                            # CRITICAL FIX: Decrement active_count when marking reviewer as completed
+                            # Agent is transitioning from active status (working/running) to terminal (completed)
+                            registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
+                            registry['completed_count'] = registry.get('completed_count', 0) + 1
+
+                            agent['status'] = 'completed'
+                            agent['completed_at'] = datetime.now().isoformat()
+                            agent['final_verdict'] = verdict
+                            logger.info(f"REVIEWER STATUS UPDATE: {agent.get('id')} marked completed after verdict submission. Active count: {registry['active_count']}")
+                            break
+
+        # Check if all reviewers have submitted
+        num_expected = review_record.get('num_reviewers', 1)
+        num_submitted = len(review_record['verdicts'])
+        all_submitted = num_submitted >= num_expected
+
+        result_info = {
+            "success": True,
+            "review_id": review_id,
+            "verdict_submitted": verdict,
+            "findings_count": len(findings),
+            "reviewers_submitted": num_submitted,
+            "reviewers_expected": num_expected,
+            "all_submitted": all_submitted
+        }
+
+        # Check for dead/failed reviewers - if some are dead, we can proceed with partial verdicts
+        should_finalize = all_submitted
+        dead_reviewers = []
+        if not all_submitted and num_submitted > 0:
+            # Check if remaining reviewers are dead
+            reviewer_agent_ids = [r.get('agent_id') for r in review_record.get('reviewers', [])]
+            submitted_reviewer_ids = [v.get('reviewer_agent_id') for v in review_record.get('verdicts', [])]
+
+            for agent in registry.get('agents', []):
+                agent_id = agent.get('id')
+                if agent_id in reviewer_agent_ids and agent_id not in submitted_reviewer_ids:
+                    # This reviewer hasn't submitted yet
+                    if agent.get('status') in ['failed', 'error', 'terminated', 'killed']:
+                        dead_reviewers.append(agent_id)
+
+            # If all non-submitted reviewers are dead, proceed with partial verdicts
+            remaining_alive = num_expected - num_submitted - len(dead_reviewers)
+            if remaining_alive == 0 and num_submitted > 0:
+                logger.warning(f"Proceeding with partial verdicts: {num_submitted}/{num_expected} submitted, {len(dead_reviewers)} reviewers dead")
+                should_finalize = True
+                result_info['partial_verdict'] = True
+                result_info['dead_reviewers'] = dead_reviewers
+
+        # If all reviewers submitted (or dead), aggregate and finalize
+        if should_finalize:
+            # Aggregate verdicts
+            all_verdicts = [v['verdict'] for v in review_record['verdicts']]
+            all_findings = []
+            for v in review_record['verdicts']:
+                all_findings.extend(v.get('findings', []))
+
+            # Simple aggregation: any rejection = rejected, any needs_revision = needs_revision
+            if 'rejected' in all_verdicts:
+                final_verdict = 'rejected'
+            elif 'needs_revision' in all_verdicts:
+                final_verdict = 'needs_revision'
+            else:
+                final_verdict = 'approved'
+
+            review_record['status'] = 'completed'
+            review_record['final_verdict'] = final_verdict
+            review_record['completed_at'] = datetime.now().isoformat()
+
+            # Apply verdict to phase
+            phases = registry.get('phases', [])
+            current_idx = registry.get('current_phase_index', 0)
+            if current_idx < len(phases):
+                current_phase = phases[current_idx]
+
+                if final_verdict == 'approved':
+                    current_phase['status'] = 'APPROVED'
+                    current_phase['approved_at'] = datetime.now().isoformat()
+
+                    # Auto-advance to next phase if not final
+                    if current_idx < len(phases) - 1:
+                        next_phase = phases[current_idx + 1]
+                        next_phase['status'] = 'ACTIVE'
+                        next_phase['started_at'] = datetime.now().isoformat()
+                        registry['current_phase_index'] = current_idx + 1
+                        result_info['advanced_to_phase'] = next_phase.get('name')
+                else:
+                    current_phase['status'] = 'REVISING'
+                    current_phase['revision_required_at'] = datetime.now().isoformat()
+                    current_phase['revision_count'] = current_phase.get('revision_count', 0) + 1
+
+            result_info['final_verdict'] = final_verdict
+            result_info['review_completed'] = True
+            result_info['phase_status'] = current_phase.get('status') if current_idx < len(phases) else None
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    return json.dumps(result_info, indent=2)
+
+
+@mcp.tool()
+def get_review_status(task_id: str, review_id: Optional[str] = None) -> str:
+    """
+    Get status of agentic review(s) for a task.
+
+    Args:
+        task_id: Task ID
+        review_id: Optional specific review ID. If None, returns all reviews.
+
+    Returns:
+        Dict with review status, verdicts submitted, and final outcome
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    with open(registry_path, 'r') as f:
+        registry = json.load(f)
+
+    reviews = registry.get('reviews', [])
+
+    if review_id:
+        # Find specific review
+        for rev in reviews:
+            if rev.get('review_id') == review_id:
+                return json.dumps({
+                    "success": True,
+                    "review": rev
+                }, indent=2)
+        return json.dumps({"success": False, "error": f"Review {review_id} not found"})
+
+    # Return all reviews
+    return json.dumps({
+        "success": True,
+        "total_reviews": len(reviews),
+        "reviews": reviews
+    }, indent=2)
+
+
+@mcp.tool()
+def abort_stalled_review(
+    task_id: str,
+    review_id: str,
+    reason: str = "Reviewer(s) crashed or stalled"
+) -> str:
+    """
+    Abort a stalled review when reviewer(s) crash or fail to submit verdicts.
+
+    Use this when:
+    - A reviewer agent crashes without submitting a verdict
+    - Review is stuck in "in_progress" state for too long
+    - Need to re-spawn reviewers or proceed differently
+
+    This will:
+    1. Mark the review as "aborted"
+    2. Return the phase to ACTIVE or REVISING state (can re-submit for review)
+    3. Kill any still-running reviewer agents
+
+    Args:
+        task_id: Task ID
+        review_id: The review ID to abort
+        reason: Reason for aborting the review
+
+    Returns:
+        Status of the abort operation
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    killed_agents = []
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        reviews = registry.get('reviews', [])
+
+        # Find the review
+        target_review = None
+        for rev in reviews:
+            if rev.get('review_id') == review_id:
+                target_review = rev
+                break
+
+        if not target_review:
+            return json.dumps({"success": False, "error": f"Review {review_id} not found"})
+
+        if target_review.get('status') == 'completed':
+            return json.dumps({
+                "success": False,
+                "error": "Cannot abort a completed review",
+                "hint": "Use submit_phase_for_review to start a new review cycle"
+            })
+
+        # Mark review as aborted
+        target_review['status'] = 'aborted'
+        target_review['aborted_at'] = datetime.now().isoformat()
+        target_review['abort_reason'] = reason
+        target_review['verdicts_received'] = len(target_review.get('verdicts', []))
+
+        # Find and return phase to appropriate state
+        phases = registry.get('phases', [])
+        current_idx = registry.get('current_phase_index', 0)
+
+        if current_idx < len(phases):
+            current_phase = phases[current_idx]
+            if current_phase.get('active_review_id') == review_id or current_phase.get('status') == 'ESCALATED':
+                # Determine target state based on current phase status
+                current_status = current_phase.get('status')
+
+                if current_status == 'ESCALATED':
+                    # ESCALATED phases go to AWAITING_REVIEW so they can be retried
+                    current_phase['status'] = 'AWAITING_REVIEW'
+                    logger.info(f"Phase {current_idx} reset from ESCALATED to AWAITING_REVIEW")
+                elif current_phase.get('revision_count', 0) > 0:
+                    # Re-reviews go to REVISING
+                    current_phase['status'] = 'REVISING'
+                else:
+                    # Normal abort goes to ACTIVE
+                    current_phase['status'] = 'ACTIVE'
+
+                current_phase['review_aborted_at'] = datetime.now().isoformat()
+                current_phase['last_abort_reason'] = reason
+
+        # Kill any running reviewer agents from this review
+        reviewer_agent_ids = [r.get('agent_id') for r in target_review.get('reviewers', [])]
+        for agent in registry.get('agents', []):
+            if agent.get('id') in reviewer_agent_ids and agent.get('status') in ['running', 'working']:
+                tmux_session = agent.get('tmux_session')
+                if tmux_session:
+                    try:
+                        subprocess.run(
+                            ['tmux', 'kill-session', '-t', tmux_session],
+                            capture_output=True, timeout=5
+                        )
+                        killed_agents.append(agent.get('id'))
+                        agent['status'] = 'terminated'
+                        agent['terminated_reason'] = f"Review aborted: {reason}"
+                        if registry.get('active_count', 0) > 0:
+                            registry['active_count'] -= 1
+                    except Exception as e:
+                        logger.warning(f"Failed to kill reviewer {agent.get('id')}: {e}")
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    return json.dumps({
+        "success": True,
+        "review_id": review_id,
+        "status": "aborted",
+        "reason": reason,
+        "verdicts_received_before_abort": target_review.get('verdicts_received', 0),
+        "killed_reviewers": killed_agents,
+        "phase_returned_to": "REVISING" if phases[current_idx].get('revision_count', 0) > 0 else "ACTIVE",
+        "next_action": "Use submit_phase_for_review to spawn new reviewers, or deploy fix agents first"
+    }, indent=2)
+
+
+@mcp.tool()
+def get_phase_handover(task_id: str, phase_index: Optional[int] = None) -> str:
+    """
+    Get handover document for a phase.
+
+    Args:
+        task_id: Task ID
+        phase_index: Phase index (defaults to previous phase)
+    """
+    from orchestrator.handover import get_handover_path
+
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    with open(registry_path, 'r') as f:
+        registry = json.load(f)
+
+    phases = registry.get('phases', [])
+    current_idx = registry.get('current_phase_index', 0)
+    target_idx = phase_index if phase_index is not None else current_idx - 1
+
+    if target_idx < 0:
+        return json.dumps({"success": False, "error": "No previous phase handover exists"})
+
+    if target_idx >= len(phases):
+        return json.dumps({"success": False, "error": f"Phase index {target_idx} out of range"})
+
+    # Get phase_id from phases list
+    phase_id = phases[target_idx].get('id', f"phase-{target_idx}")
+    handover_path = get_handover_path(workspace, phase_id)
+
+    if not os.path.exists(handover_path):
+        return json.dumps({
+            "success": False,
+            "error": f"No handover found for phase {target_idx} ({phase_id})"
+        })
+
+    # load_handover takes (task_workspace, phase_id)
+    handover = load_handover(workspace, phase_id)
+    if not handover:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to parse handover for phase {target_idx}"
+        })
+    markdown = format_handover_markdown(handover)
+
+    return json.dumps({
+        "success": True,
+        "phase_index": target_idx,
+        "handover": {
+            "phase_id": handover.phase_id,
+            "phase_name": handover.phase_name,
+            "summary": handover.summary,
+            "key_findings": handover.key_findings,
+            "blockers": handover.blockers,
+            "recommendations": handover.recommendations
+        },
+        "markdown": markdown
+    }, indent=2)
+
+
+@mcp.tool()
+def get_health_status(task_id: Optional[str] = None) -> str:
+    """
+    Get health monitoring status for a task or all tasks.
+
+    Args:
+        task_id: Optional task ID. If None, returns overall daemon status.
+
+    Returns:
+        Health status information including daemon status and agent health.
+    """
+    workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
+    daemon = get_health_daemon(workspace_base)
+
+    if task_id:
+        # Get specific task health status
+        workspace = find_task_workspace(task_id)
+        if not workspace:
+            return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+        registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+        if not os.path.exists(registry_path):
+            return json.dumps({"success": False, "error": f"Registry not found for task {task_id}"})
+
+        try:
+            with open(registry_path, 'r') as f:
+                registry = json.load(f)
+
+            agents = registry.get('agents', [])
+            health_info = {
+                "success": True,
+                "task_id": task_id,
+                "agents": [],
+                "daemon_monitoring": task_id in daemon.monitored_tasks
+            }
+
+            for agent in agents:
+                agent_health = {
+                    "id": agent['id'],
+                    "status": agent['status'],
+                    "healthy": agent['status'] not in ['failed', 'error', 'terminated']
+                }
+
+                if 'health_check_failure' in agent:
+                    agent_health['health_issue'] = agent['health_check_failure']
+
+                if 'failed_at' in agent:
+                    agent_health['failed_at'] = agent['failed_at']
+                    agent_health['failure_reason'] = agent.get('failure_reason', 'Unknown')
+
+                health_info['agents'].append(agent_health)
+
+            # Add daemon stats
+            health_info['daemon_status'] = daemon.get_status() if daemon else {"running": False}
+
+            return json.dumps(health_info, indent=2)
+
+        except Exception as e:
+            return json.dumps({"success": False, "error": f"Failed to get health status: {str(e)}"})
+
+    else:
+        # Return overall daemon status
+        daemon_status = daemon.get_status() if daemon else {"running": False}
+        return json.dumps({
+            "success": True,
+            "daemon_status": daemon_status,
+            "monitored_tasks": list(daemon.monitored_tasks) if daemon else []
+        }, indent=2)
+
+
+@mcp.tool()
+def trigger_health_scan(task_id: Optional[str] = None) -> str:
+    """
+    Trigger an immediate health scan.
+
+    Args:
+        task_id: Optional task ID to scan. If None, scans all tasks.
+
+    Returns:
+        Status of the scan trigger request.
+    """
+    workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
+    daemon = get_health_daemon(workspace_base)
+
+    if not daemon or not daemon.is_running:
+        # Start daemon if not running
+        if not daemon:
+            daemon = get_health_daemon(workspace_base)
+        if not daemon.is_running:
+            daemon.start()
+
+        return json.dumps({
+            "success": True,
+            "message": "Health daemon was not running, started it and triggered scan",
+            "daemon_status": daemon.get_status()
+        }, indent=2)
+
+    # Trigger scan
+    success = daemon.trigger_scan()
+
+    return json.dumps({
+        "success": success,
+        "message": "Health scan triggered" if success else "Failed to trigger scan",
+        "daemon_status": daemon.get_status()
+    }, indent=2)
+
+
+def cleanup_dead_agents_from_global_registry() -> Dict[str, Any]:
+    """
+    Scan the global registry and clean up agents with dead tmux sessions.
+
+    This function:
+    1. Reads all agents from the global registry
+    2. Checks if their tmux sessions are still running
+    3. Marks agents with dead tmux sessions as 'failed'
+    4. Decrements active_agents counter for each dead agent found
+
+    Returns:
+        Dict with cleanup statistics
+    """
+    workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
+    global_reg_path = get_global_registry_path(workspace_base)
+
+    if not os.path.exists(global_reg_path):
+        return {"success": False, "error": "Global registry not found"}
+
+    # Get list of running tmux sessions
+    try:
+        result = subprocess.run(
+            ['tmux', 'list-sessions', '-F', '#{session_name}'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        running_sessions = set(result.stdout.strip().split('\n')) if result.returncode == 0 else set()
+    except Exception as e:
+        logger.warning(f"Failed to list tmux sessions: {e}")
+        running_sessions = set()
+
+    dead_agents = []
+    cleaned_count = 0
+    already_terminal_count = 0
+    still_running_count = 0
+    missing_tmux_field = 0
+
+    active_statuses = {'running', 'working', 'blocked'}
+    terminal_statuses = {'completed', 'failed', 'error', 'terminated', 'killed'}
+
+    try:
+        with LockedRegistryFile(global_reg_path) as (global_reg, f):
+            agents = global_reg.get('agents', {})
+
+            for agent_id, agent_data in agents.items():
+                status = agent_data.get('status')
+                tmux_session = agent_data.get('tmux_session')
+
+                # Skip if already in terminal state
+                if status in terminal_statuses:
+                    already_terminal_count += 1
+                    continue
+
+                # No tmux session field - legacy agent without status tracking
+                if not tmux_session:
+                    # Mark as failed if it has no status or active status but no tmux session
+                    if status is None or status in active_statuses:
+                        agent_data['status'] = 'failed'
+                        agent_data['failed_at'] = datetime.now().isoformat()
+                        agent_data['failure_reason'] = 'Global registry cleanup: no tmux session tracked'
+                        dead_agents.append(agent_id)
+                        cleaned_count += 1
+                    missing_tmux_field += 1
+                    continue
+
+                # Check if tmux session is running
+                if tmux_session in running_sessions:
+                    still_running_count += 1
+                    continue
+
+                # Tmux session is dead - mark agent as failed
+                previous_status = agent_data.get('status')
+                agent_data['status'] = 'failed'
+                agent_data['failed_at'] = datetime.now().isoformat()
+                agent_data['failure_reason'] = f'Global registry cleanup: tmux session dead ({tmux_session})'
+
+                # Decrement active_agents if was in active status or had no status (was counted as active)
+                if previous_status is None or previous_status in active_statuses:
+                    global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
+
+                dead_agents.append(agent_id)
+                cleaned_count += 1
+                logger.info(f"Cleaned up dead agent: {agent_id} (tmux: {tmux_session}, prev_status: {previous_status})")
+
+            # Recalculate active_agents to fix any counter drift
+            actual_active = sum(1 for a in agents.values() if a.get('status') in active_statuses)
+            counter_drift = global_reg.get('active_agents', 0) - actual_active
+            if counter_drift != 0:
+                logger.warning(f"Active agents counter drift detected: counter={global_reg.get('active_agents', 0)}, actual={actual_active}, drift={counter_drift}")
+                global_reg['active_agents'] = actual_active
+
+            # Write back if any changes
+            if cleaned_count > 0 or counter_drift != 0:
+                f.seek(0)
+                f.write(json.dumps(global_reg, indent=2))
+                f.truncate()
+                logger.info(f"Global registry cleanup: {cleaned_count} dead agents marked as failed, active_agents corrected to: {global_reg.get('active_agents', 0)}")
+
+        return {
+            "success": True,
+            "cleaned_count": cleaned_count,
+            "counter_drift_fixed": counter_drift if counter_drift != 0 else None,
+            "active_agents_after": actual_active,
+            "still_running": still_running_count,
+            "already_terminal": already_terminal_count,
+            "missing_tmux_field": missing_tmux_field,
+            "dead_agents": dead_agents[:20],  # Limit to first 20 for readability
+            "running_sessions_detected": len(running_sessions),
+            "message": f"Cleaned up {cleaned_count} dead agents from global registry" + (f", fixed counter drift of {counter_drift}" if counter_drift != 0 else "")
+        }
+
+    except Exception as e:
+        logger.error(f"Global registry cleanup failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def startup_global_registry_cleanup():
+    """
+    Run global registry cleanup on MCP server startup.
+    This ensures stale agents from previous sessions are properly marked.
+    """
+    logger.info("Running startup global registry cleanup...")
+    result = cleanup_dead_agents_from_global_registry()
+    if result.get('success'):
+        logger.info(f"Startup cleanup complete: {result.get('cleaned_count', 0)} dead agents cleaned up")
+    else:
+        logger.warning(f"Startup cleanup had issues: {result.get('error', 'unknown')}")
+    return result
+
+
 if __name__ == "__main__":
     # Run startup validation before serving
     startup_registry_validation()
-    mcp.run()
+
+    # Run global registry cleanup to mark dead agents from previous sessions
+    startup_global_registry_cleanup()
+
+    # Start health monitoring daemon
+    try:
+        workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
+        daemon = get_health_daemon(workspace_base)
+        daemon.start()
+        logger.info("Health monitoring daemon started during server initialization")
+    except Exception as e:
+        logger.error(f"Failed to start health daemon: {e}")
+        # Non-fatal - server can still run without health monitoring
+
+    try:
+        mcp.run()
+    finally:
+        # Clean shutdown of health daemon
+        try:
+            stop_health_daemon()
+            logger.info("Health monitoring daemon stopped cleanly")
+        except Exception as e:
+            logger.error(f"Error stopping health daemon: {e}")

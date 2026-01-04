@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-20260102-185715-507602c0",
+  "task_description": "Fix use_case_factory.dart unused import warnings and verify clean compilation",
+  "created_at": "2026-01-02T18:57:15.065576",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185715-507602c0",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P1",
+  "agents": [],
+  "agent_hierarchy": {
+    "orchestrator": []
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 0,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-02T18:57:15.065601",
+    "violations": 0
+  },
+  "task_context": {
+    "background_context": "The use_case_factory.dart file has no actual errors but has ~20 unused import warnings. Need to clean up unused imports and verify the file compiles cleanly. This is a simple cleanup task.",
+    "expected_deliverables": [
+      "use_case_factory.dart with 0 errors and minimal warnings",
+      "Verified flutter analyze passes"
+    ],
+    "success_criteria": [
+      "flutter analyze lib/core/use_case_factory.dart shows 0 errors",
+      "All unused imports removed or commented out"
+    ],
+    "relevant_files": [
+      "lib/core/use_case_factory.dart"
+    ]
+  }
+}

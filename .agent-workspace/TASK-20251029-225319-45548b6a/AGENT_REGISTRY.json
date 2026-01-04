@@ -189,11 +189,13 @@
       "tmux_session": "agent_update_agent_progress_enhancer-232251-3fdf62",
       "parent": "orchestrator",
       "depth": 1,
-      "status": "working",
+      "status": "terminated",
       "started_at": "2025-10-29T23:22:53.963441",
       "progress": 30,
-      "last_update": "2025-10-29T23:23:38.075838",
-      "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nENHANCE update_agent_progress to trigger automatic cleanup:\n\n1. Read output/RESOURCE_LIFECYCLE_ANALYSIS.md for the exact integration point\n2. R..."
+      "last_update": "2026-01-02T17:11:36.704453",
+      "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nENHANCE update_agent_progress to trigger automatic cleanup:\n\n1. Read output/RESOURCE_LIFECYCLE_ANALYSIS.md for the exact integration point\n2. R...",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.704445"
     },
     {
       "id": "kill_real_agent_enhancer-232254-7c3bc6",
@@ -324,11 +326,13 @@
       "tmux_session": "agent_integration_tester-232302-b08b55",
       "parent": "orchestrator",
       "depth": 1,
-      "status": "working",
+      "status": "terminated",
       "started_at": "2025-10-29T23:23:04.952673",
       "progress": 25,
-      "last_update": "2025-10-29T23:24:53.994851",
-      "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nTEST the resource cleanup implementation:\n\n1. Wait 60 seconds for other agents to complete their implementations\n2. Read output/RESOURCE_LIFECY..."
+      "last_update": "2026-01-02T17:11:36.704457",
+      "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nTEST the resource cleanup implementation:\n\n1. Wait 60 seconds for other agents to complete their implementations\n2. Read output/RESOURCE_LIFECY...",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.704456"
     },
     {
       "id": "code_quality_reviewer-233824-475513",
@@ -460,11 +464,13 @@
       "tmux_session": "agent_test_coverage_reviewer-233831-80774f",
       "parent": "orchestrator",
       "depth": 1,
-      "status": "working",
+      "status": "terminated",
       "started_at": "2025-10-29T23:38:33.383265",
       "progress": 75,
-      "last_update": "2025-10-29T23:43:48.331537",
-      "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nREVIEW test coverage and create missing tests:\n\n1. Read output/RESOURCE_LIFECYCLE_ANALYSIS.md testing recommendations (Section 8)\n2. Check if t..."
+      "last_update": "2026-01-02T17:11:36.704459",
+      "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nREVIEW test coverage and create missing tests:\n\n1. Read output/RESOURCE_LIFECYCLE_ANALYSIS.md testing recommendations (Section 8)\n2. Check if t...",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.704458"
     },
     {
       "id": "documentation_reviewer-233833-9ae161",
@@ -672,7 +678,8 @@
         },
         "validated_at": "2025-10-30T00:04:50.619899"
       },
-      "completed_at": "2025-10-30T00:04:50.620494"
+      "completed_at": "2025-10-30T00:04:50.620494",
+      "cursor_session_id": "97f8677f-034f-48ff-81d7-3b25d0c2c2d0"
     },
     {
       "id": "thread_safety_fixer-234939-d49b42",
@@ -764,10 +771,10 @@
       "tmux_session": "agent_timeout_wrapper_builder-235239-6caa68",
       "parent": "daemon_timeout_fixer-234945-0fe917",
       "depth": 2,
-      "status": "running",
+      "status": "terminated",
       "started_at": "2025-10-29T23:52:41.760053",
       "progress": 0,
-      "last_update": "2025-10-29T23:52:41.760160",
+      "last_update": "2026-01-02T17:11:36.704461",
       "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nBUILD TIMEOUT WRAPPER FUNCTION for resource_cleanup_daemon.sh\n\nOBJECTIVE: Add robust timeout wrapper function at top of script (after line 29)\n...",
       "tracked_files": {
         "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-225319-45548b6a/agent_prompt_timeout_wrapper_builder-235239-6caa68.txt",
@@ -775,7 +782,9 @@
         "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-225319-45548b6a/progress/timeout_wrapper_builder-235239-6caa68_progress.jsonl",
         "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-225319-45548b6a/findings/timeout_wrapper_builder-235239-6caa68_findings.jsonl",
         "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-225319-45548b6a/logs/deploy_timeout_wrapper_builder-235239-6caa68.json"
-      }
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.704460"
     },
     {
       "id": "vulnerable_command_fixer-235315-cc2262",
@@ -906,7 +915,7 @@
   "max_depth": 5,
   "max_concurrent": 20,
   "total_spawned": 24,
-  "active_count": 4,
+  "active_count": 0,
   "completed_count": 20,
   "orchestration_guidance": {
     "min_specialization_depth": 2,

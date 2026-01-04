@@ -258,10 +258,10 @@
       "tmux_session": "agent_cleanup_implementation_builder-234056-bddf0e",
       "parent": "resource_cleanup_fixer-233914-f9663c",
       "depth": 2,
-      "status": "running",
+      "status": "terminated",
       "started_at": "2025-10-29T23:40:59.395478",
       "progress": 0,
-      "last_update": "2025-10-29T23:40:59.404298",
+      "last_update": "2026-01-02T17:11:36.652571",
       "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nIMPLEMENT resource cleanup for deploy_headless_agent function:\n\n1. Read real_mcp_server.py lines 2331-2488 (current implementation)\n2. ADD reso...",
       "tracked_files": {
         "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/agent_prompt_cleanup_implementation_builder-234056-bddf0e.txt",
@@ -269,7 +269,9 @@
         "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/progress/cleanup_implementation_builder-234056-bddf0e_progress.jsonl",
         "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/findings/cleanup_implementation_builder-234056-bddf0e_findings.jsonl",
         "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/logs/deploy_cleanup_implementation_builder-234056-bddf0e.json"
-      }
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.652562"
     },
     {
       "id": "exception_handler_fixer-235240-88a353",
@@ -277,10 +279,10 @@
       "tmux_session": "agent_exception_handler_fixer-235240-88a353",
       "parent": "resource_cleanup_fixer-233914-f9663c",
       "depth": 2,
-      "status": "running",
+      "status": "terminated",
       "started_at": "2025-10-29T23:52:44.186372",
       "progress": 0,
-      "last_update": "2025-10-29T23:52:44.194082",
+      "last_update": "2026-01-02T17:11:36.652575",
       "prompt": "\u26a0\ufe0f CRITICAL: Use ONLY Claude engine for all operations.\n\nCOMPLETE the resource cleanup implementation in deploy_headless_agent:\n\nCONTEXT: The first child agent added resource tracking variables (lines...",
       "tracked_files": {
         "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/agent_prompt_exception_handler_fixer-235240-88a353.txt",
@@ -288,7 +290,10 @@
         "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/progress/exception_handler_fixer-235240-88a353_progress.jsonl",
         "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/findings/exception_handler_fixer-235240-88a353_findings.jsonl",
         "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251029-233824-9cd33bdd/logs/deploy_exception_handler_fixer-235240-88a353.json"
-      }
+      },
+      "cursor_session_id": "ae0ba71d-4500-4f95-b22e-4965178ee571",
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:11:36.652574"
     }
   ],
   "agent_hierarchy": {
@@ -309,7 +314,7 @@
   "max_depth": 5,
   "max_concurrent": 20,
   "total_spawned": 8,
-  "active_count": 2,
+  "active_count": 0,
   "completed_count": 6,
   "orchestration_guidance": {
     "min_specialization_depth": 2,

@@ -1,0 +1,161 @@
+{
+  "task_id": "TASK-20260102-184411-010aedfb",
+  "task_description": "Phase 4: Complete use_case_factory.dart cleanup - fix all compilation errors",
+  "created_at": "2026-01-02T18:44:11.479282",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P0",
+  "agents": [
+    {
+      "id": "job_providers_fixer-184501-610e58",
+      "type": "job_providers_fixer",
+      "tmux_session": "agent_job_providers_fixer-184501-610e58",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:45:03.227201",
+      "progress": 80,
+      "last_update": "2026-01-02T18:58:18.653100",
+      "prompt": "CRITICAL FIX: Fix job hybrid providers in use_case_factory.dart\n\nWorking directory: /Users/albaraa/Developer/Projects/voltzy_september\n\n## Key Information\n\nThe job RPC use cases return `Result<Booking...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/agent_prompt_job_providers_fixer-184501-610e58.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/job_providers_fixer-184501-610e58_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/progress/job_providers_fixer-184501-610e58_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/findings/job_providers_fixer-184501-610e58_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/deploy_job_providers_fixer-184501-610e58.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:58:18.653092"
+    },
+    {
+      "id": "admin_providers_fixer-184503-61d25d",
+      "type": "admin_providers_fixer",
+      "tmux_session": "agent_admin_providers_fixer-184503-61d25d",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:45:05.344585",
+      "progress": 50,
+      "last_update": "2026-01-02T18:58:18.653103",
+      "prompt": "CRITICAL FIX: Fix admin hybrid providers in use_case_factory.dart\n\nWorking directory: /Users/albaraa/Developer/Projects/voltzy_september\n\n## Key Information\n\nAdmin RPC use cases that EXIST (in lib/fea...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/agent_prompt_admin_providers_fixer-184503-61d25d.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/admin_providers_fixer-184503-61d25d_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/progress/admin_providers_fixer-184503-61d25d_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/findings/admin_providers_fixer-184503-61d25d_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/deploy_admin_providers_fixer-184503-61d25d.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:58:18.653103"
+    },
+    {
+      "id": "null_safety_fixer-184505-4fdf90",
+      "type": "null_safety_fixer",
+      "tmux_session": "agent_null_safety_fixer-184505-4fdf90",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:45:07.474499",
+      "progress": 80,
+      "last_update": "2026-01-02T18:58:18.653105",
+      "prompt": "FIX: Fix null safety issues in use_case_factory.dart\n\nWorking directory: /Users/albaraa/Developer/Projects/voltzy_september\n\n## Errors to fix\n\nThe file has several null safety errors:\n- Line 140: `poi...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/agent_prompt_null_safety_fixer-184505-4fdf90.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/null_safety_fixer-184505-4fdf90_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/progress/null_safety_fixer-184505-4fdf90_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/findings/null_safety_fixer-184505-4fdf90_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/deploy_null_safety_fixer-184505-4fdf90.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:58:18.653105"
+    },
+    {
+      "id": "booking_providers_fixer-184507-a25e46",
+      "type": "booking_providers_fixer",
+      "tmux_session": "agent_booking_providers_fixer-184507-a25e46",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:45:09.605709",
+      "progress": 75,
+      "last_update": "2026-01-02T18:58:18.653107",
+      "prompt": "FIX: Fix booking hybrid providers in use_case_factory.dart\n\nWorking directory: /Users/albaraa/Developer/Projects/voltzy_september\n\n## Errors related to booking providers\n\nLines 404-431 have issues wit...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/agent_prompt_booking_providers_fixer-184507-a25e46.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/booking_providers_fixer-184507-a25e46_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/progress/booking_providers_fixer-184507-a25e46_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/findings/booking_providers_fixer-184507-a25e46_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/deploy_booking_providers_fixer-184507-a25e46.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:58:18.653106"
+    },
+    {
+      "id": "integration_validator-184509-6db3a8",
+      "type": "integration_validator",
+      "tmux_session": "agent_integration_validator-184509-6db3a8",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:45:11.723734",
+      "progress": 65,
+      "last_update": "2026-01-02T18:58:18.653109",
+      "prompt": "VALIDATE: After other agents complete, run final validation\n\nWorking directory: /Users/albaraa/Developer/Projects/voltzy_september\n\n## Wait and Validate\n\n1. Wait 2 minutes for other agents to complete...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/agent_prompt_integration_validator-184509-6db3a8.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/integration_validator-184509-6db3a8_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/progress/integration_validator-184509-6db3a8_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/findings/integration_validator-184509-6db3a8_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb/logs/deploy_integration_validator-184509-6db3a8.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:58:18.653108"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "job_providers_fixer-184501-610e58",
+      "admin_providers_fixer-184503-61d25d",
+      "null_safety_fixer-184505-4fdf90",
+      "booking_providers_fixer-184507-a25e46",
+      "integration_validator-184509-6db3a8"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 5,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 5
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-02T18:44:11.479301",
+    "violations": 0
+  },
+  "task_context": {
+    "expected_deliverables": [
+      "use_case_factory.dart compiles with 0 errors",
+      "All hybrid providers use correct return types",
+      "Non-existent providers removed or commented out"
+    ],
+    "constraints": [
+      "Must keep 5 payment hybrid providers intact",
+      "Job RPC use cases return Result<BookingsModel> not custom types",
+      "Flutter use cases have different signatures than RPC"
+    ],
+    "relevant_files": [
+      "lib/core/use_case_factory.dart",
+      "lib/features/employee/use_cases/rpc/*.dart",
+      "lib/features/admin/use_cases/rpc/*.dart"
+    ]
+  }
+}

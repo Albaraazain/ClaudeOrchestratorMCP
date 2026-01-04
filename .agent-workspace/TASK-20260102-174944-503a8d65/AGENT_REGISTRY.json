@@ -1,0 +1,171 @@
+{
+  "task_id": "TASK-20260102-174944-503a8d65",
+  "description": "Test agentic review v2",
+  "priority": "P2",
+  "status": "INITIALIZED",
+  "phases": [
+    {
+      "id": "phase-361c28ad",
+      "order": 1,
+      "name": "Build",
+      "description": "Build feature",
+      "status": "REVISING",
+      "created_at": "2026-01-02T17:49:44.531566",
+      "started_at": "2026-01-02T17:49:44.531569",
+      "submitted_for_review_at": "2026-01-02T17:49:49.211387",
+      "review_started_at": "2026-01-02T17:49:54.041276",
+      "active_review_id": "review-44a27d32649a",
+      "approved_at": "2026-01-02T17:50:16.331358",
+      "revision_required_at": "2026-01-02T17:51:08.491246",
+      "revision_count": 1
+    }
+  ],
+  "current_phase_index": 0,
+  "created_at": "2026-01-02T17:49:44.531845",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65",
+  "agents": [
+    {
+      "id": "reviewer-1-174954-8393f2",
+      "type": "reviewer-1",
+      "tmux_session": "agent_reviewer-1-174954-8393f2",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T17:49:56.072275",
+      "progress": 50,
+      "last_update": "2026-01-02T17:57:36.256359",
+      "prompt": "You are a REVIEWER AGENT for phase \"Build\" (Task: TASK-20260102-174944-503a8d65).\n\nYOUR MISSION: Review the work done in this phase and submit a verdict.\n\nREVIEW FOCUS AREAS: completeness, correctness...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/agent_prompt_reviewer-1-174954-8393f2.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/logs/reviewer-1-174954-8393f2_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/progress/reviewer-1-174954-8393f2_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/findings/reviewer-1-174954-8393f2_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/logs/deploy_reviewer-1-174954-8393f2.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:57:36.256336"
+    },
+    {
+      "id": "reviewer-2-174956-674be1",
+      "type": "reviewer-2",
+      "tmux_session": "agent_reviewer-2-174956-674be1",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T17:49:58.098771",
+      "progress": 50,
+      "last_update": "2026-01-02T17:57:36.256367",
+      "prompt": "You are a REVIEWER AGENT for phase \"Build\" (Task: TASK-20260102-174944-503a8d65).\n\nYOUR MISSION: Review the work done in this phase and submit a verdict.\n\nREVIEW FOCUS AREAS: completeness, correctness...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/agent_prompt_reviewer-2-174956-674be1.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/logs/reviewer-2-174956-674be1_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/progress/reviewer-2-174956-674be1_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/findings/reviewer-2-174956-674be1_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-174944-503a8d65/logs/deploy_reviewer-2-174956-674be1.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:57:36.256365"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "reviewer-1-174954-8393f2",
+      "reviewer-2-174956-674be1"
+    ]
+  },
+  "total_spawned": 2,
+  "active_count": 0,
+  "completed_count": 0,
+  "max_agents": 45,
+  "max_concurrent": 20,
+  "max_depth": 5,
+  "reviews": [
+    {
+      "review_id": "review-44a27d32649a",
+      "phase_id": "phase-361c28ad",
+      "phase_name": "Build",
+      "status": "completed",
+      "num_reviewers": 2,
+      "reviewers": [
+        {
+          "agent_id": "reviewer-1-174954-8393f2",
+          "agent_type": "reviewer-1",
+          "spawned_at": "2026-01-02T17:49:56.074084",
+          "status": "reviewing"
+        },
+        {
+          "agent_id": "reviewer-2-174956-674be1",
+          "agent_type": "reviewer-2",
+          "spawned_at": "2026-01-02T17:49:58.101712",
+          "status": "reviewing"
+        }
+      ],
+      "verdicts": [
+        {
+          "verdict": "approved",
+          "findings": [
+            {
+              "type": "praise",
+              "severity": "low",
+              "message": "Good code structure"
+            }
+          ],
+          "reviewer_notes": "Looks good",
+          "submitted_at": "2026-01-02T17:50:09.034021"
+        },
+        {
+          "verdict": "approved",
+          "findings": [
+            {
+              "type": "suggestion",
+              "severity": "low",
+              "message": "Consider adding more tests"
+            }
+          ],
+          "reviewer_notes": "",
+          "submitted_at": "2026-01-02T17:50:16.331346"
+        },
+        {
+          "verdict": "rejected",
+          "findings": [
+            {
+              "type": "blocker",
+              "severity": "critical",
+              "message": "No feature implementation found. The Build phase description states 'Build feature' but zero code artifacts exist in the workspace."
+            },
+            {
+              "type": "blocker",
+              "severity": "critical",
+              "message": "Empty deliverables directories. Both findings/ and output/ directories are completely empty, indicating no work was performed."
+            },
+            {
+              "type": "issue",
+              "severity": "critical",
+              "message": "Invalid phase duration. Phase was submitted for review only 5 seconds after creation (17:49:44 to 17:49:49), impossible for meaningful build work."
+            },
+            {
+              "type": "issue",
+              "severity": "high",
+              "message": "No testing evidence. A build phase should include test results, integration verification, or at minimum a build success confirmation. None present."
+            },
+            {
+              "type": "issue",
+              "severity": "high",
+              "message": "No documentation. Build phases should document what was built, how to use it, and any relevant technical decisions. None provided."
+            }
+          ],
+          "reviewer_notes": "REJECTION VERDICT: This Build phase contains zero implementation work and cannot be approved. The workspace shows no code artifacts, no test results, no documentation, and no findings from any build agents. The 5-second duration between phase creation and review submission confirms no meaningful work occurred. This appears to be a test of the agentic review system itself rather than an actual build phase. A legitimate Build phase would require: (1) implemented code in project files, (2) test results confirming functionality, (3) build/compilation success evidence, (4) documentation of changes made, and (5) agent findings documenting the work performed. None of these are present. RECOMMENDATION: Either perform actual build work with proper deliverables, or close this as a test task.",
+          "submitted_at": "2026-01-02T17:51:08.491235"
+        }
+      ],
+      "created_at": "2026-01-02T17:49:54.041267",
+      "review_focus": [
+        "completeness",
+        "correctness",
+        "quality"
+      ],
+      "final_verdict": "rejected",
+      "completed_at": "2026-01-02T17:51:08.491243"
+    }
+  ]
+}

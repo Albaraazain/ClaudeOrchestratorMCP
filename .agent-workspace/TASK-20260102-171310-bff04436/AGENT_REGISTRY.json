@@ -1,0 +1,56 @@
+{
+  "task_id": "TASK-20260102-171310-bff04436",
+  "task_description": "Quick verification after restart",
+  "created_at": "2026-01-02T17:13:10.786166",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "agents": [
+    {
+      "id": "quick_test-171320-c8c99e",
+      "type": "quick_test",
+      "tmux_session": "agent_quick_test-171320-c8c99e",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T17:13:22.334001",
+      "progress": 0,
+      "last_update": "2026-01-02T17:49:59.985054",
+      "prompt": "Say hello, report 100% complete.",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436/agent_prompt_quick_test-171320-c8c99e.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436/logs/quick_test-171320-c8c99e_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436/progress/quick_test-171320-c8c99e_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436/findings/quick_test-171320-c8c99e_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436/logs/deploy_quick_test-171320-c8c99e.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T17:49:59.985044"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "quick_test-171320-c8c99e"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 1,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-02T17:13:10.786181",
+    "violations": 0
+  }
+}

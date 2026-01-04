@@ -1,0 +1,160 @@
+{
+  "task_id": "TASK-20260104-150952-c16ef668",
+  "task_description": "Audit MCP tools and add guidance to all responses",
+  "created_at": "2026-01-04T15:09:52.116605",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP",
+  "status": "INITIALIZED",
+  "priority": "P1",
+  "phases": [
+    {
+      "id": "phase-e3dd6714",
+      "order": 1,
+      "name": "Investigation",
+      "description": "Audit all MCP tools to identify which lack guidance in responses",
+      "status": "ACTIVE",
+      "created_at": "2026-01-04T15:09:52.116583",
+      "started_at": "2026-01-04T15:09:52.116586"
+    },
+    {
+      "id": "phase-5c23f7dc",
+      "order": 2,
+      "name": "Implementation",
+      "description": "Add consistent guidance fields to all tool responses",
+      "status": "PENDING",
+      "created_at": "2026-01-04T15:09:52.116596",
+      "started_at": null
+    },
+    {
+      "id": "phase-02a47e3b",
+      "order": 3,
+      "name": "Verification",
+      "description": "Verify all tools return proper guidance",
+      "status": "PENDING",
+      "created_at": "2026-01-04T15:09:52.116603",
+      "started_at": null
+    }
+  ],
+  "current_phase_index": 0,
+  "agents": [
+    {
+      "id": "mcp_tool_auditor-151011-b02803",
+      "type": "mcp_tool_auditor",
+      "tmux_session": "agent_mcp_tool_auditor-151011-b02803",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "working",
+      "started_at": "2026-01-04T15:10:13.752333",
+      "progress": 70,
+      "last_update": "2026-01-04T15:12:23.438856",
+      "prompt": "Your mission: Audit ALL MCP tools in real_mcp_server.py and identify which tools lack proper guidance in their responses.\n\nTASK: Find every @mcp.tool() decorated function and check if it returns guida...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/agent_prompt_mcp_tool_auditor-151011-b02803.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/mcp_tool_auditor-151011-b02803_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/progress/mcp_tool_auditor-151011-b02803_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/findings/mcp_tool_auditor-151011-b02803_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/deploy_mcp_tool_auditor-151011-b02803.json"
+      }
+    },
+    {
+      "id": "guidance_pattern_designer-151013-46dc31",
+      "type": "guidance_pattern_designer",
+      "tmux_session": "agent_guidance_pattern_designer-151013-46dc31",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "working",
+      "started_at": "2026-01-04T15:10:15.864636",
+      "progress": 75,
+      "last_update": "2026-01-04T15:13:49.776841",
+      "prompt": "Your mission: Design a consistent guidance pattern for all MCP tool responses.\n\nANALYZE existing tools that have good guidance (like get_phase_status) and design a standard pattern.\n\nThe guidance patt...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/agent_prompt_guidance_pattern_designer-151013-46dc31.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/guidance_pattern_designer-151013-46dc31_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/progress/guidance_pattern_designer-151013-46dc31_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/findings/guidance_pattern_designer-151013-46dc31_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/deploy_guidance_pattern_designer-151013-46dc31.json"
+      }
+    },
+    {
+      "id": "state_machine_analyzer-151031-f6969a",
+      "type": "state_machine_analyzer",
+      "tmux_session": "agent_state_machine_analyzer-151031-f6969a",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "working",
+      "started_at": "2026-01-04T15:10:33.855417",
+      "progress": 60,
+      "last_update": "2026-01-04T15:12:11.714680",
+      "prompt": "Your mission: Map out the complete phase state machine and identify what guidance should be returned at each state.\n\nANALYZE real_mcp_server.py and document:\n\n1. All phase states: PENDING, ACTIVE, AWA...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/agent_prompt_state_machine_analyzer-151031-f6969a.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/state_machine_analyzer-151031-f6969a_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/progress/state_machine_analyzer-151031-f6969a_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/findings/state_machine_analyzer-151031-f6969a_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/deploy_state_machine_analyzer-151031-f6969a.json"
+      }
+    },
+    {
+      "id": "orchestrator_confusion_analyzer-151033-5b16da",
+      "type": "orchestrator_confusion_analyzer",
+      "tmux_session": "agent_orchestrator_confusion_analyzer-151033-5b16da",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "working",
+      "started_at": "2026-01-04T15:10:35.950881",
+      "progress": 60,
+      "last_update": "2026-01-04T15:11:44.279265",
+      "prompt": "Your mission: Identify scenarios where orchestrators get confused or go off-track.\n\nANALYZE the codebase and think about what causes orchestrator confusion:\n\n1. Tool responses that don't tell orchestr...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/agent_prompt_orchestrator_confusion_analyzer-151033-5b16da.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/orchestrator_confusion_analyzer-151033-5b16da_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/progress/orchestrator_confusion_analyzer-151033-5b16da_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/findings/orchestrator_confusion_analyzer-151033-5b16da_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668/logs/deploy_orchestrator_confusion_analyzer-151033-5b16da.json"
+      }
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "mcp_tool_auditor-151011-b02803",
+      "guidance_pattern_designer-151013-46dc31",
+      "state_machine_analyzer-151031-f6969a",
+      "orchestrator_confusion_analyzer-151033-5b16da"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 4,
+  "active_count": 4,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-04T15:09:52.116634",
+    "violations": 0
+  },
+  "task_context": {
+    "expected_deliverables": [
+      "List of all MCP tools with guidance status",
+      "Updated tool responses with guidance fields",
+      "Consistent guidance format across all tools"
+    ],
+    "success_criteria": [
+      "Every MCP tool response includes 'guidance' or 'next_action' field",
+      "Guidance is contextual based on current state",
+      "Orchestrator can follow guidance without external knowledge"
+    ]
+  }
+}

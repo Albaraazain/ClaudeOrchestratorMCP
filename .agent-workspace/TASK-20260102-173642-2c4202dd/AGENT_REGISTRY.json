@@ -1,0 +1,41 @@
+{
+  "task_id": "TASK-20260102-173642-2c4202dd",
+  "description": "Revision loop test",
+  "priority": "P2",
+  "status": "INITIALIZED",
+  "phases": [
+    {
+      "id": "phase-acc9ee09",
+      "order": 1,
+      "name": "Phase1",
+      "description": "",
+      "status": "REVISING",
+      "created_at": "2026-01-02T17:36:42.561315",
+      "started_at": "2026-01-02T17:36:42.561318",
+      "submitted_for_review_at": "2026-01-02T17:36:50.372180",
+      "rejected_at": "2026-01-02T17:37:00.112613",
+      "rejection_reason": "First rejection",
+      "required_changes": [],
+      "revision_count": 1
+    },
+    {
+      "id": "phase-e06e45e7",
+      "order": 2,
+      "name": "Phase2",
+      "description": "",
+      "status": "PENDING",
+      "created_at": "2026-01-02T17:36:42.561323",
+      "started_at": null
+    }
+  ],
+  "current_phase_index": 0,
+  "created_at": "2026-01-02T17:36:42.561598",
+  "agents": [],
+  "total_spawned": 0,
+  "reviews": {},
+  "limits": {
+    "max_agents": 45,
+    "max_concurrent": 20,
+    "max_depth": 5
+  }
+}

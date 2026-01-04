@@ -1,9 +1,9 @@
 {
   "created_at": "2025-10-15T18:39:58.107729",
-  "total_tasks": 25,
-  "active_tasks": 25,
-  "total_agents_spawned": 117,
-  "active_agents": 10,
+  "total_tasks": 40,
+  "active_tasks": 40,
+  "total_agents_spawned": 206,
+  "active_agents": 88,
   "max_concurrent_agents": 20,
   "tasks": {
     "TASK-20251015-183958-67a80cd3": {
@@ -153,6 +153,156 @@
       "has_enhanced_context": true,
       "deliverables_count": 2,
       "success_criteria_count": 2
+    },
+    "TASK-20251031-204547-6fb50e7a": {
+      "description": "Test cross-project workspace discovery",
+      "created_at": "2025-10-31T20:45:47.329820",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/var/folders/v6/nt_93wk54f9brsrjjpfy5ztr0000gn/T/tmp739pj6pg/.agent-workspace/TASK-20251031-204547-6fb50e7a",
+      "workspace_base": "/var/folders/v6/nt_93wk54f9brsrjjpfy5ztr0000gn/T/tmp739pj6pg/.agent-workspace",
+      "client_cwd": "/var/folders/v6/nt_93wk54f9brsrjjpfy5ztr0000gn/T/tmp739pj6pg",
+      "cross_project_reference": true
+    },
+    "TASK-20251031-205114-af1b2d4d": {
+      "description": "Test task: Analyze the MCP server implementation in real_mcp_server.py and provide a summary of its key features and capabilities",
+      "created_at": "2025-10-31T20:51:14.631279",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 3,
+      "success_criteria_count": 3,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20251031-205114-af1b2d4d",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-170349-186284e7": {
+      "description": "Verify Python orchestrator MCP is working",
+      "created_at": "2026-01-02T17:03:49.040206",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170349-186284e7",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-170937-c1da3527": {
+      "description": "Test Python orchestrator is working",
+      "created_at": "2026-01-02T17:09:37.444934",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-170937-c1da3527",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-171310-bff04436": {
+      "description": "Quick verification after restart",
+      "created_at": "2026-01-02T17:13:10.786745",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-171310-bff04436",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-175635-d6cf0a3b": {
+      "description": "Phase 1: Investigate missing implementations and incomplete features in Voltzy app",
+      "created_at": "2026-01-02T17:56:35.467838",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 6,
+      "success_criteria_count": 4,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-175635-d6cf0a3b",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-180518-edde4497": {
+      "description": "Phase 2: Implement critical missing features - Payment hybrid providers, notification integration, and database migrations",
+      "created_at": "2026-01-02T18:05:18.819747",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 5,
+      "success_criteria_count": 4,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-182244-ce58d160": {
+      "description": "Phase 3: Complete missing implementations - payment providers, notification integration",
+      "created_at": "2026-01-02T18:22:44.013977",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 5,
+      "success_criteria_count": 3,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-182244-ce58d160",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-184411-010aedfb": {
+      "description": "Phase 4: Complete use_case_factory.dart cleanup - fix all compilation errors",
+      "created_at": "2026-01-02T18:44:11.479797",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 3,
+      "success_criteria_count": 0,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-184411-010aedfb",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-185715-507602c0": {
+      "description": "Fix use_case_factory.dart unused import warnings and verify clean compilation",
+      "created_at": "2026-01-02T18:57:15.066189",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 2,
+      "success_criteria_count": 2,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185715-507602c0",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-185803-1cb2da42": {
+      "description": "Phase 1: Analyze use_case_factory.dart and identify all unused imports and warnings",
+      "created_at": "2026-01-02T18:58:03.359393",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 2,
+      "success_criteria_count": 2,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-185803-1cb2da42",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-210308-5bd2a5fb": {
+      "description": "Fix race conditions and enhance agent coordination in orchestrator MCP",
+      "created_at": "2026-01-02T21:03:08.320975",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 0,
+      "success_criteria_count": 0,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-210308-5bd2a5fb",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260102-222340-60d77c1f": {
+      "description": "Test task to verify health monitoring integration",
+      "created_at": "2026-01-02T22:23:40.927951",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-222340-60d77c1f",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260104-141158-50c60706": {
+      "description": "Build Web Dashboard UI for Claude Orchestrator - Real-time visualization of tasks, phases, agents, and logs",
+      "created_at": "2026-01-04T14:11:58.386750",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 5,
+      "success_criteria_count": 5,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-141158-50c60706",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260104-150952-c16ef668": {
+      "description": "Audit MCP tools and add guidance to all responses",
+      "created_at": "2026-01-04T15:09:52.117310",
+      "status": "INITIALIZED",
+      "has_enhanced_context": true,
+      "deliverables_count": 3,
+      "success_criteria_count": 3,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-150952-c16ef668",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260104-152013-509ec204": {
+      "description": "Test guidance fields in MCP responses",
+      "created_at": "2026-01-04T15:20:13.890192",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-152013-509ec204",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
     }
   },
   "agents": {
@@ -1263,6 +1413,819 @@
       "status": "completed",
       "last_update": "2025-10-30T00:11:35.970281",
       "completed_at": "2025-10-30T00:11:35.970306"
+    },
+    "investigator-205120-0d69e6": {
+      "task_id": "TASK-20251031-205114-af1b2d4d",
+      "type": "investigator",
+      "backend": "cursor",
+      "parent": "orchestrator",
+      "started_at": "2025-10-31T20:51:22.851481",
+      "cursor_pid": 30481,
+      "status": "completed",
+      "last_update": "2025-10-31T20:55:26.315748",
+      "completed_at": "2025-10-31T20:55:26.315753"
+    },
+    "test_agent-171131-917870": {
+      "task_id": "TASK-20260102-170937-c1da3527",
+      "type": "test_agent",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:11:33.523574",
+      "tmux_session": "agent_test_agent-171131-917870",
+      "status": "working",
+      "last_update": "2026-01-02T17:11:49.873333"
+    },
+    "quick_test-171320-c8c99e": {
+      "task_id": "TASK-20260102-171310-bff04436",
+      "type": "quick_test",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:13:22.334705",
+      "tmux_session": "agent_quick_test-171320-c8c99e",
+      "status": "working",
+      "last_update": "2026-01-02T17:13:39.146074"
+    },
+    "reviewer-1-174954-8393f2": {
+      "task_id": "TASK-20260102-174944-503a8d65",
+      "type": "reviewer-1",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:49:56.072808",
+      "tmux_session": "agent_reviewer-1-174954-8393f2",
+      "status": "working",
+      "last_update": "2026-01-02T17:50:34.841436"
+    },
+    "reviewer-2-174956-674be1": {
+      "task_id": "TASK-20260102-174944-503a8d65",
+      "type": "reviewer-2",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:49:58.099907",
+      "tmux_session": "agent_reviewer-2-174956-674be1",
+      "status": "working",
+      "last_update": "2026-01-02T17:50:43.051958"
+    },
+    "rpc_integration_investigator-175729-f69c16": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "rpc_integration_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:31.354957",
+      "tmux_session": "agent_rpc_integration_investigator-175729-f69c16",
+      "status": "working",
+      "last_update": "2026-01-02T18:02:07.786968"
+    },
+    "employee_feature_investigator-175731-de850a": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "employee_feature_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:33.476973",
+      "tmux_session": "agent_employee_feature_investigator-175731-de850a",
+      "status": "working",
+      "last_update": "2026-01-02T18:01:40.786718"
+    },
+    "admin_feature_investigator-175733-455716": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "admin_feature_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:35.717878",
+      "tmux_session": "agent_admin_feature_investigator-175733-455716",
+      "status": "working",
+      "last_update": "2026-01-02T17:59:46.886493"
+    },
+    "notification_system_investigator-175735-6df3ee": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "notification_system_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:37.813952",
+      "tmux_session": "agent_notification_system_investigator-175735-6df3ee",
+      "status": "working",
+      "last_update": "2026-01-02T17:59:17.507494"
+    },
+    "customer_feature_investigator-175737-f48b8e": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "customer_feature_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:39.939769",
+      "tmux_session": "agent_customer_feature_investigator-175737-f48b8e",
+      "status": "working",
+      "last_update": "2026-01-02T18:01:51.188741"
+    },
+    "database_migration_investigator-175740-eac1cd": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "database_migration_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:42.079818",
+      "tmux_session": "agent_database_migration_investigator-175740-eac1cd",
+      "status": "working",
+      "last_update": "2026-01-02T18:01:49.187265"
+    },
+    "provider_state_investigator-175742-5b86c3": {
+      "task_id": "TASK-20260102-175635-d6cf0a3b",
+      "type": "provider_state_investigator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T17:57:44.254903",
+      "tmux_session": "agent_provider_state_investigator-175742-5b86c3",
+      "status": "working",
+      "last_update": "2026-01-02T18:02:24.537128"
+    },
+    "payment_hybrid_provider_implementer-180619-7b2f70": {
+      "task_id": "TASK-20260102-180518-edde4497",
+      "type": "payment_hybrid_provider_implementer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:06:21.250356",
+      "tmux_session": "agent_payment_hybrid_provider_implementer-180619-7b2f70",
+      "status": "working",
+      "last_update": "2026-01-02T18:08:59.144987"
+    },
+    "notification_shell_integrator-180621-727b0c": {
+      "task_id": "TASK-20260102-180518-edde4497",
+      "type": "notification_shell_integrator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:06:23.330278",
+      "tmux_session": "agent_notification_shell_integrator-180621-727b0c",
+      "status": "working",
+      "last_update": "2026-01-02T18:09:18.163506"
+    },
+    "database_migration_verifier-180623-d96091": {
+      "task_id": "TASK-20260102-180518-edde4497",
+      "type": "database_migration_verifier",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:06:25.446787",
+      "tmux_session": "agent_database_migration_verifier-180623-d96091",
+      "status": "working",
+      "last_update": "2026-01-02T18:07:48.083003"
+    },
+    "ui_hybrid_provider_refactorer-180625-fd57a2": {
+      "task_id": "TASK-20260102-180518-edde4497",
+      "type": "ui_hybrid_provider_refactorer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:06:27.588175",
+      "tmux_session": "agent_ui_hybrid_provider_refactorer-180625-fd57a2",
+      "status": "working",
+      "last_update": "2026-01-02T18:08:03.994765"
+    },
+    "customer_shell_integrator-180627-daaa6f": {
+      "task_id": "TASK-20260102-180518-edde4497",
+      "type": "customer_shell_integrator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:06:29.894214",
+      "tmux_session": "agent_customer_shell_integrator-180627-daaa6f",
+      "status": "working",
+      "last_update": "2026-01-02T18:08:57.414635"
+    },
+    "payment_hybrid_provider_implementer-182319-b1f85b": {
+      "task_id": "TASK-20260102-182244-ce58d160",
+      "type": "payment_hybrid_provider_implementer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:23:21.380250",
+      "tmux_session": "agent_payment_hybrid_provider_implementer-182319-b1f85b",
+      "status": "working",
+      "last_update": "2026-01-02T18:28:22.457741"
+    },
+    "employee_shell_notification_integrator-182321-9c899d": {
+      "task_id": "TASK-20260102-182244-ce58d160",
+      "type": "employee_shell_notification_integrator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:23:23.475072",
+      "tmux_session": "agent_employee_shell_notification_integrator-182321-9c899d",
+      "status": "working",
+      "last_update": "2026-01-02T18:24:18.286447"
+    },
+    "admin_shell_notification_integrator-182323-6cf4b0": {
+      "task_id": "TASK-20260102-182244-ce58d160",
+      "type": "admin_shell_notification_integrator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:23:25.560437",
+      "tmux_session": "agent_admin_shell_notification_integrator-182323-6cf4b0",
+      "status": "working",
+      "last_update": "2026-01-02T18:25:48.350290"
+    },
+    "code_validator-182325-0cc15c": {
+      "task_id": "TASK-20260102-182244-ce58d160",
+      "type": "code_validator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:23:27.663128",
+      "tmux_session": "agent_code_validator-182325-0cc15c",
+      "status": "working",
+      "last_update": "2026-01-02T18:34:08.408822"
+    },
+    "use_case_factory_fixer-183225-6ba759": {
+      "task_id": "TASK-20260102-182244-ce58d160",
+      "type": "use_case_factory_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:32:27.729431",
+      "tmux_session": "agent_use_case_factory_fixer-183225-6ba759",
+      "status": "working",
+      "last_update": "2026-01-02T18:42:27.293708"
+    },
+    "job_providers_fixer-184501-610e58": {
+      "task_id": "TASK-20260102-184411-010aedfb",
+      "type": "job_providers_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:45:03.227879",
+      "tmux_session": "agent_job_providers_fixer-184501-610e58",
+      "status": "working",
+      "last_update": "2026-01-02T18:50:35.293198"
+    },
+    "admin_providers_fixer-184503-61d25d": {
+      "task_id": "TASK-20260102-184411-010aedfb",
+      "type": "admin_providers_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:45:05.345443",
+      "tmux_session": "agent_admin_providers_fixer-184503-61d25d",
+      "status": "working",
+      "last_update": "2026-01-02T18:48:06.135008"
+    },
+    "null_safety_fixer-184505-4fdf90": {
+      "task_id": "TASK-20260102-184411-010aedfb",
+      "type": "null_safety_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:45:07.475659",
+      "tmux_session": "agent_null_safety_fixer-184505-4fdf90",
+      "status": "working",
+      "last_update": "2026-01-02T18:50:19.710455"
+    },
+    "booking_providers_fixer-184507-a25e46": {
+      "task_id": "TASK-20260102-184411-010aedfb",
+      "type": "booking_providers_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:45:09.607062",
+      "tmux_session": "agent_booking_providers_fixer-184507-a25e46",
+      "status": "working",
+      "last_update": "2026-01-02T18:50:09.500911"
+    },
+    "integration_validator-184509-6db3a8": {
+      "task_id": "TASK-20260102-184411-010aedfb",
+      "type": "integration_validator",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:45:11.725527",
+      "tmux_session": "agent_integration_validator-184509-6db3a8",
+      "status": "working",
+      "last_update": "2026-01-02T18:51:01.510005"
+    },
+    "import_analyzer-185812-8680cc": {
+      "task_id": "TASK-20260102-185803-1cb2da42",
+      "type": "import_analyzer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T18:58:14.994755",
+      "tmux_session": "agent_import_analyzer-185812-8680cc",
+      "status": "working",
+      "last_update": "2026-01-02T18:59:47.310606"
+    },
+    "import_analyzer-190107-57f496": {
+      "task_id": "TASK-20260102-190054-7a61e82c",
+      "type": "import_analyzer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T19:01:09.591686",
+      "tmux_session": "agent_import_analyzer-190107-57f496",
+      "status": "working",
+      "last_update": "2026-01-02T19:02:25.501114"
+    },
+    "import_fixer-190518-26bd63": {
+      "task_id": "TASK-20260102-190054-7a61e82c",
+      "type": "import_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T19:05:20.743278",
+      "tmux_session": "agent_import_fixer-190518-26bd63",
+      "status": "working",
+      "last_update": "2026-01-02T19:08:03.186574"
+    },
+    "verifier-191053-66891a": {
+      "task_id": "TASK-20260102-190054-7a61e82c",
+      "type": "verifier",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T19:10:55.282610",
+      "tmux_session": "agent_verifier-191053-66891a",
+      "status": "working",
+      "last_update": "2026-01-02T19:13:38.848192"
+    },
+    "race_condition_fixer-210331-d55823": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "race_condition_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:03:33.788210",
+      "tmux_session": "agent_race_condition_fixer-210331-d55823",
+      "status": "working",
+      "last_update": "2026-01-02T21:08:25.716172"
+    },
+    "code_reviewer-210333-71309e": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "code_reviewer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:03:35.874373",
+      "tmux_session": "agent_code_reviewer-210333-71309e",
+      "status": "working",
+      "last_update": "2026-01-02T21:08:26.812321"
+    },
+    "deploy_fixer-210907-5ecc07": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "deploy_fixer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:09:09.508427",
+      "tmux_session": "agent_deploy_fixer-210907-5ecc07",
+      "status": "working",
+      "last_update": "2026-01-02T21:11:13.747649"
+    },
+    "coordination_enhancer-211503-c75e5b": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "coordination_enhancer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:15:05.673082",
+      "tmux_session": "agent_coordination_enhancer-211503-c75e5b",
+      "status": "working",
+      "last_update": "2026-01-02T21:19:57.550330"
+    },
+    "response_designer-211505-6d4754": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "response_designer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:15:07.780710",
+      "tmux_session": "agent_response_designer-211505-6d4754",
+      "status": "working",
+      "last_update": "2026-01-02T21:21:14.319292"
+    },
+    "reviewer-1-212252-2f2294": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "reviewer-1",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:22:54.731558",
+      "tmux_session": "agent_reviewer-1-212252-2f2294",
+      "status": "working",
+      "last_update": "2026-01-02T21:24:34.351604"
+    },
+    "reviewer-2-212254-1125cd": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "reviewer-2",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:22:56.764741",
+      "tmux_session": "agent_reviewer-2-212254-1125cd",
+      "status": "working",
+      "last_update": "2026-01-02T21:24:41.681698"
+    },
+    "health_monitor_designer-212633-fe8f89": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "health_monitor_designer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:26:35.315625",
+      "tmux_session": "agent_health_monitor_designer-212633-fe8f89",
+      "status": "working",
+      "last_update": "2026-01-02T21:31:20.687211"
+    },
+    "integration_specialist-212635-1d7fe8": {
+      "task_id": "TASK-20260102-210308-5bd2a5fb",
+      "type": "integration_specialist",
+      "parent": "orchestrator",
+      "started_at": "2026-01-02T21:26:37.372372",
+      "tmux_session": "agent_integration_specialist-212635-1d7fe8",
+      "status": "working",
+      "last_update": "2026-01-02T21:33:57.989292"
+    },
+    "data_structure_analyzer-141232-a35bb6": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "data_structure_analyzer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:12:34.650442",
+      "tmux_session": "agent_data_structure_analyzer-141232-a35bb6",
+      "status": "working",
+      "last_update": "2026-01-04T14:14:37.774858"
+    },
+    "architecture_designer-141234-ddf6af": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "architecture_designer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:12:36.765645",
+      "tmux_session": "agent_architecture_designer-141234-ddf6af",
+      "status": "working",
+      "last_update": "2026-01-04T14:14:12.018502"
+    },
+    "tmux_integration_researcher-141236-db527e": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "tmux_integration_researcher",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:12:38.970922",
+      "tmux_session": "agent_tmux_integration_researcher-141236-db527e",
+      "status": "working",
+      "last_update": "2026-01-04T14:15:10.450701"
+    },
+    "ui_ux_designer-141239-2b6fd7": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "ui_ux_designer",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:12:41.278336",
+      "tmux_session": "agent_ui_ux_designer-141239-2b6fd7",
+      "status": "working",
+      "last_update": "2026-01-04T14:13:48.313298"
+    },
+    "existing_code_auditor-141241-b859d5": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "existing_code_auditor",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:12:43.532905",
+      "tmux_session": "agent_existing_code_auditor-141241-b859d5",
+      "status": "working",
+      "last_update": "2026-01-04T14:14:55.002742"
+    },
+    "reviewer-e69b9f9c-1-141739-21c4a8": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-e69b9f9c-1",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:17:41.315873",
+      "tmux_session": "agent_reviewer-e69b9f9c-1-141739-21c4a8",
+      "status": "completed",
+      "last_update": "2026-01-04T14:19:33.311702"
+    },
+    "reviewer-e69b9f9c-2-141741-c64462": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-e69b9f9c-2",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:17:43.357034",
+      "tmux_session": "agent_reviewer-e69b9f9c-2-141741-c64462",
+      "status": "completed",
+      "last_update": "2026-01-04T14:19:31.020847"
+    },
+    "reviewer-e69b9f9c-3-141743-af8b12": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-e69b9f9c-3",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:17:45.433159",
+      "tmux_session": "agent_reviewer-e69b9f9c-3-141743-af8b12",
+      "status": "completed",
+      "last_update": "2026-01-04T14:19:38.887033"
+    },
+    "fastapi_core_builder-142100-78183b": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "fastapi_core_builder",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:21:02.785472",
+      "tmux_session": "agent_fastapi_core_builder-142100-78183b",
+      "status": "completed",
+      "last_update": "2026-01-04T14:58:23.617023",
+      "completed_at": "2026-01-04T14:58:23.617030"
+    },
+    "websocket_builder-142102-9cb335": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "websocket_builder",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:21:04.910386",
+      "tmux_session": "agent_websocket_builder-142102-9cb335",
+      "status": "completed",
+      "last_update": "2026-01-04T14:58:24.170043",
+      "completed_at": "2026-01-04T14:58:24.170050"
+    },
+    "file_watcher_builder-142105-ee8ee6": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "file_watcher_builder",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:21:07.130866",
+      "tmux_session": "agent_file_watcher_builder-142105-ee8ee6",
+      "status": "completed",
+      "last_update": "2026-01-04T14:58:24.715606",
+      "completed_at": "2026-01-04T14:58:24.715612"
+    },
+    "tmux_service_builder-142107-923def": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "tmux_service_builder",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:21:09.818286",
+      "tmux_session": "agent_tmux_service_builder-142107-923def",
+      "status": "completed",
+      "last_update": "2026-01-04T14:58:25.260898",
+      "completed_at": "2026-01-04T14:58:25.260904"
+    },
+    "workspace_service_builder-142112-adcdab": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "workspace_service_builder",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:21:14.844615",
+      "tmux_session": "agent_workspace_service_builder-142112-adcdab",
+      "status": "completed",
+      "last_update": "2026-01-04T14:58:25.818421",
+      "completed_at": "2026-01-04T14:58:25.818429"
+    },
+    "reviewer-78f1091f-1-142820-b3f9c7": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-78f1091f-1",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:28:22.138807",
+      "tmux_session": "agent_reviewer-78f1091f-1-142820-b3f9c7",
+      "status": "completed",
+      "last_update": "2026-01-04T14:30:45.490626"
+    },
+    "reviewer-78f1091f-2-142822-078118": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-78f1091f-2",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:28:24.182094",
+      "tmux_session": "agent_reviewer-78f1091f-2-142822-078118",
+      "status": "completed",
+      "last_update": "2026-01-04T14:30:53.945649"
+    },
+    "reviewer-78f1091f-3-142824-027911": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-78f1091f-3",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:28:26.252166",
+      "tmux_session": "agent_reviewer-78f1091f-3-142824-027911",
+      "status": "completed",
+      "last_update": "2026-01-04T14:30:33.624283"
+    },
+    "reviewer-727ccfdf-1-143606-6e5083": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-727ccfdf-1",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:36:08.150323",
+      "tmux_session": "agent_reviewer-727ccfdf-1-143606-6e5083",
+      "status": "completed",
+      "last_update": "2026-01-04T14:38:10.471517"
+    },
+    "reviewer-727ccfdf-2-143608-d1c848": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-727ccfdf-2",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:36:10.197173",
+      "tmux_session": "agent_reviewer-727ccfdf-2-143608-d1c848",
+      "status": "completed",
+      "last_update": "2026-01-04T14:38:20.104253"
+    },
+    "reviewer-727ccfdf-3-143610-a82c88": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-727ccfdf-3",
+      "parent": "orchestrator",
+      "started_at": "2026-01-04T14:36:12.254412",
+      "tmux_session": "agent_reviewer-727ccfdf-3-143610-a82c88",
+      "status": "completed",
+      "last_update": "2026-01-04T14:38:21.246108"
+    },
+    "reviewer-c9b3e011-1-145421-9e416c": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-c9b3e011-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T14:54:23.813306",
+      "tmux_session": "agent_reviewer-c9b3e011-1-145421-9e416c",
+      "last_update": "2026-01-04T14:56:53.841935"
+    },
+    "reviewer-e7a8b929-1-145848-c0e25f": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-e7a8b929-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T14:58:50.089395",
+      "tmux_session": "agent_reviewer-e7a8b929-1-145848-c0e25f",
+      "last_update": "2026-01-04T15:01:22.469437"
+    },
+    "reviewer-e7a8b929-2-145850-110578": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-e7a8b929-2",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T14:58:52.139809",
+      "tmux_session": "agent_reviewer-e7a8b929-2-145850-110578",
+      "last_update": "2026-01-04T15:00:43.638145"
+    },
+    "reviewer-e7a8b929-3-145852-6ed826": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-e7a8b929-3",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T14:58:54.244071",
+      "tmux_session": "agent_reviewer-e7a8b929-3-145852-6ed826",
+      "last_update": "2026-01-04T15:01:42.190020"
+    },
+    "reviewer-da7777a9-1-150430-c84924": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-da7777a9-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:04:32.213993",
+      "tmux_session": "agent_reviewer-da7777a9-1-150430-c84924",
+      "last_update": "2026-01-04T15:06:40.599809"
+    },
+    "reviewer-da7777a9-2-150432-766d47": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-da7777a9-2",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:04:34.258848",
+      "tmux_session": "agent_reviewer-da7777a9-2-150432-766d47",
+      "last_update": "2026-01-04T15:06:49.433305"
+    },
+    "reviewer-222f2f6e-1-150942-33e63f": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-222f2f6e-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:09:44.286170",
+      "tmux_session": "agent_reviewer-222f2f6e-1-150942-33e63f",
+      "last_update": "2026-01-04T15:11:50.026519"
+    },
+    "mcp_tool_auditor-151011-b02803": {
+      "task_id": "TASK-20260104-150952-c16ef668",
+      "type": "mcp_tool_auditor",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:10:13.753715",
+      "tmux_session": "agent_mcp_tool_auditor-151011-b02803",
+      "last_update": "2026-01-04T15:12:23.439594"
+    },
+    "guidance_pattern_designer-151013-46dc31": {
+      "task_id": "TASK-20260104-150952-c16ef668",
+      "type": "guidance_pattern_designer",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:10:15.866379",
+      "tmux_session": "agent_guidance_pattern_designer-151013-46dc31",
+      "last_update": "2026-01-04T15:13:49.777692"
+    },
+    "state_machine_analyzer-151031-f6969a": {
+      "task_id": "TASK-20260104-150952-c16ef668",
+      "type": "state_machine_analyzer",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:10:33.856700",
+      "tmux_session": "agent_state_machine_analyzer-151031-f6969a",
+      "last_update": "2026-01-04T15:12:11.715438"
+    },
+    "orchestrator_confusion_analyzer-151033-5b16da": {
+      "task_id": "TASK-20260104-150952-c16ef668",
+      "type": "orchestrator_confusion_analyzer",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:10:35.953024",
+      "tmux_session": "agent_orchestrator_confusion_analyzer-151033-5b16da",
+      "last_update": "2026-01-04T15:11:44.279908"
+    },
+    "test_agent-152026-17b454": {
+      "task_id": "TASK-20260104-152013-509ec204",
+      "type": "test_agent",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:20:28.557171",
+      "tmux_session": "agent_test_agent-152026-17b454",
+      "last_update": "2026-01-04T15:20:38.415484"
+    },
+    "reviewer-ee68a09d-1-153010-6afc50": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-ee68a09d-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:30:12.930904",
+      "tmux_session": "agent_reviewer-ee68a09d-1-153010-6afc50",
+      "last_update": "2026-01-04T15:32:49.486193"
+    },
+    "reviewer-ee68a09d-2-153012-cba3f2": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-ee68a09d-2",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:30:14.980536",
+      "tmux_session": "agent_reviewer-ee68a09d-2-153012-cba3f2",
+      "last_update": "2026-01-04T15:32:56.706864"
+    },
+    "react_core_builder-153501-6f4fc9": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "react_core_builder",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:35:03.955627",
+      "tmux_session": "agent_react_core_builder-153501-6f4fc9",
+      "last_update": "2026-01-04T15:48:25.474414",
+      "completed_at": "2026-01-04T15:48:25.474421"
+    },
+    "task_dashboard_builder-153504-cdc4a4": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "task_dashboard_builder",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:35:06.111133",
+      "tmux_session": "agent_task_dashboard_builder-153504-cdc4a4",
+      "last_update": "2026-01-04T15:48:26.018459",
+      "completed_at": "2026-01-04T15:48:26.018466"
+    },
+    "task_detail_builder-153506-56b6cf": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "task_detail_builder",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:35:08.372357",
+      "tmux_session": "agent_task_detail_builder-153506-56b6cf",
+      "last_update": "2026-01-04T15:48:26.584977",
+      "completed_at": "2026-01-04T15:48:26.584988"
+    },
+    "agent_detail_builder-153508-7056e0": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "agent_detail_builder",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:35:10.584259",
+      "tmux_session": "agent_agent_detail_builder-153508-7056e0",
+      "last_update": "2026-01-04T15:48:27.180828",
+      "completed_at": "2026-01-04T15:48:27.180834"
+    },
+    "websocket_integration_builder-153510-9ba320": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "websocket_integration_builder",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:35:12.934868",
+      "tmux_session": "agent_websocket_integration_builder-153510-9ba320",
+      "last_update": "2026-01-04T15:48:27.775640",
+      "completed_at": "2026-01-04T15:48:27.775645"
+    },
+    "reviewer-9d2703d8-1-154827-75ad32": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-9d2703d8-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:48:29.832789",
+      "tmux_session": "agent_reviewer-9d2703d8-1-154827-75ad32",
+      "last_update": "2026-01-04T15:51:47.885758"
+    },
+    "reviewer-9d2703d8-2-154829-a134fe": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-9d2703d8-2",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:48:31.885339",
+      "tmux_session": "agent_reviewer-9d2703d8-2-154829-a134fe",
+      "last_update": "2026-01-04T15:51:34.305125"
+    },
+    "reviewer-9d2703d8-3-154831-4f176b": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-9d2703d8-3",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:48:33.994010",
+      "tmux_session": "agent_reviewer-9d2703d8-3-154831-4f176b",
+      "last_update": "2026-01-04T15:51:05.773392"
+    },
+    "reviewer-6f6e7707-1-155432-b05706": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-6f6e7707-1",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:54:34.154418",
+      "tmux_session": "agent_reviewer-6f6e7707-1-155432-b05706",
+      "last_update": "2026-01-04T15:58:24.487901"
+    },
+    "reviewer-6f6e7707-2-155434-fba0c9": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-6f6e7707-2",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:54:36.204653",
+      "tmux_session": "agent_reviewer-6f6e7707-2-155434-fba0c9",
+      "last_update": "2026-01-04T15:57:31.722892"
+    },
+    "reviewer-6f6e7707-3-155436-8a410b": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "reviewer-6f6e7707-3",
+      "parent": "orchestrator",
+      "status": "completed",
+      "started_at": "2026-01-04T15:54:38.312104",
+      "tmux_session": "agent_reviewer-6f6e7707-3-155436-8a410b",
+      "last_update": "2026-01-04T15:58:11.231660"
+    },
+    "websocket-tester-155933-694ab0": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "websocket-tester",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:59:35.171215",
+      "tmux_session": "agent_websocket-tester-155933-694ab0",
+      "last_update": "2026-01-04T16:00:51.222643"
+    },
+    "api-integration-tester-155935-75e66d": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "api-integration-tester",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:59:37.498769",
+      "tmux_session": "agent_api-integration-tester-155935-75e66d",
+      "last_update": "2026-01-04T16:01:52.673815"
+    },
+    "ui-functionality-tester-155937-ffc1e6": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "ui-functionality-tester",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:59:39.792315",
+      "tmux_session": "agent_ui-functionality-tester-155937-ffc1e6",
+      "last_update": "2026-01-04T16:02:46.962217"
+    },
+    "tmux-integration-tester-155940-50a28d": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "tmux-integration-tester",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:59:42.068595",
+      "tmux_session": "agent_tmux-integration-tester-155940-50a28d",
+      "last_update": "2026-01-04T16:02:49.883503"
+    },
+    "end-to-end-tester-155942-2b20f7": {
+      "task_id": "TASK-20260104-141158-50c60706",
+      "type": "end-to-end-tester",
+      "parent": "orchestrator",
+      "status": "working",
+      "started_at": "2026-01-04T15:59:44.551048",
+      "tmux_session": "agent_end-to-end-tester-155942-2b20f7",
+      "last_update": "2026-01-04T16:02:18.112762"
     }
   }
 }

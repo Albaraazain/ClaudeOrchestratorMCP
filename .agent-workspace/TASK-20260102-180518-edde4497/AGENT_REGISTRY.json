@@ -1,0 +1,172 @@
+{
+  "task_id": "TASK-20260102-180518-edde4497",
+  "task_description": "Phase 2: Implement critical missing features - Payment hybrid providers, notification integration, and database migrations",
+  "created_at": "2026-01-02T18:05:18.819395",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": null,
+  "status": "INITIALIZED",
+  "priority": "P0",
+  "agents": [
+    {
+      "id": "payment_hybrid_provider_implementer-180619-7b2f70",
+      "type": "payment_hybrid_provider_implementer",
+      "tmux_session": "agent_payment_hybrid_provider_implementer-180619-7b2f70",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:06:21.249787",
+      "progress": 20,
+      "last_update": "2026-01-02T18:23:26.145213",
+      "prompt": "CRITICAL FIX: Add 5 missing payment hybrid providers to use_case_factory.dart\n\nCONTEXT:\nThe Voltzy app uses a hybrid execution pattern where providers check feature flags and route to either RPC or Fl...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/agent_prompt_payment_hybrid_provider_implementer-180619-7b2f70.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/payment_hybrid_provider_implementer-180619-7b2f70_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/progress/payment_hybrid_provider_implementer-180619-7b2f70_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/findings/payment_hybrid_provider_implementer-180619-7b2f70_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/deploy_payment_hybrid_provider_implementer-180619-7b2f70.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:23:26.145202"
+    },
+    {
+      "id": "notification_shell_integrator-180621-727b0c",
+      "type": "notification_shell_integrator",
+      "tmux_session": "agent_notification_shell_integrator-180621-727b0c",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:06:23.328283",
+      "progress": 30,
+      "last_update": "2026-01-02T18:23:26.145217",
+      "prompt": "CRITICAL FIX: Integrate RealtimeNotificationListener and NotificationBadge into shell screens\n\nCONTEXT:\nThe notification system components exist but are NOT integrated into the app shells:\n- lib/featu...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/agent_prompt_notification_shell_integrator-180621-727b0c.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/notification_shell_integrator-180621-727b0c_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/progress/notification_shell_integrator-180621-727b0c_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/findings/notification_shell_integrator-180621-727b0c_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/deploy_notification_shell_integrator-180621-727b0c.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:23:26.145216"
+    },
+    {
+      "id": "database_migration_verifier-180623-d96091",
+      "type": "database_migration_verifier",
+      "tmux_session": "agent_database_migration_verifier-180623-d96091",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:06:25.446036",
+      "progress": 35,
+      "last_update": "2026-01-02T18:23:26.145222",
+      "prompt": "CRITICAL: Verify and apply database migrations for RPC functions\n\nCONTEXT:\nThe Voltzy app has RPC migrations in supabase/migrations/ that may not be applied to the database. Without these, ALL RPC cal...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/agent_prompt_database_migration_verifier-180623-d96091.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/database_migration_verifier-180623-d96091_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/progress/database_migration_verifier-180623-d96091_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/findings/database_migration_verifier-180623-d96091_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/deploy_database_migration_verifier-180623-d96091.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:23:26.145221"
+    },
+    {
+      "id": "ui_hybrid_provider_refactorer-180625-fd57a2",
+      "type": "ui_hybrid_provider_refactorer",
+      "tmux_session": "agent_ui_hybrid_provider_refactorer-180625-fd57a2",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:06:27.587160",
+      "progress": 20,
+      "last_update": "2026-01-02T18:23:26.145224",
+      "prompt": "HIGH PRIORITY: Refactor UI screens to use hybrid providers instead of direct RPC calls\n\nCONTEXT:\nInvestigation found that UI screens bypass hybrid providers and call RPC use cases directly:\n- job_deta...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/agent_prompt_ui_hybrid_provider_refactorer-180625-fd57a2.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/ui_hybrid_provider_refactorer-180625-fd57a2_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/progress/ui_hybrid_provider_refactorer-180625-fd57a2_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/findings/ui_hybrid_provider_refactorer-180625-fd57a2_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/deploy_ui_hybrid_provider_refactorer-180625-fd57a2.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:23:26.145223"
+    },
+    {
+      "id": "customer_shell_integrator-180627-daaa6f",
+      "type": "customer_shell_integrator",
+      "tmux_session": "agent_customer_shell_integrator-180627-daaa6f",
+      "parent": "orchestrator",
+      "depth": 1,
+      "status": "terminated",
+      "started_at": "2026-01-02T18:06:29.892577",
+      "progress": 60,
+      "last_update": "2026-01-02T18:23:26.145226",
+      "prompt": "MEDIUM PRIORITY: Integrate NotificationBadge into customer shell screen\n\nCONTEXT:\nEmployee and admin shells will get notification integration. Customer shell also needs it for consistency.\n\nTARGET FIL...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/agent_prompt_customer_shell_integrator-180627-daaa6f.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/customer_shell_integrator-180627-daaa6f_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/progress/customer_shell_integrator-180627-daaa6f_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/findings/customer_shell_integrator-180627-daaa6f_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260102-180518-edde4497/logs/deploy_customer_shell_integrator-180627-daaa6f.json"
+      },
+      "termination_reason": "session_not_found",
+      "terminated_at": "2026-01-02T18:23:26.145225"
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "payment_hybrid_provider_implementer-180619-7b2f70",
+      "notification_shell_integrator-180621-727b0c",
+      "database_migration_verifier-180623-d96091",
+      "ui_hybrid_provider_refactorer-180625-fd57a2",
+      "customer_shell_integrator-180627-daaa6f"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 5,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 5
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-02T18:05:18.819415",
+    "violations": 0
+  },
+  "task_context": {
+    "background_context": "Investigation complete. Found 13 issues across the Voltzy Flutter app. Most critical: 5 payment hybrid providers missing from use_case_factory.dart, RealtimeNotificationListener not integrated in shell screens, and database migrations may not be applied.",
+    "expected_deliverables": [
+      "5 payment hybrid providers added to use_case_factory.dart",
+      "RealtimeNotificationListener integrated in employee_main_shell.dart",
+      "NotificationBadge integrated in shell AppBars",
+      "Database migrations verified/applied",
+      "UI screens refactored to use hybrid providers"
+    ],
+    "success_criteria": [
+      "Payment RPC functions can be invoked from UI",
+      "Realtime notifications appear as snackbars",
+      "Unread badge shows in app bars",
+      "All RPC functions exist in Supabase database"
+    ],
+    "relevant_files": [
+      "lib/core/use_case_factory.dart",
+      "lib/features/payments/use_cases/rpc/process_payment_rpc_use_case.dart",
+      "lib/features/payments/use_cases/rpc/complete_payment_rpc_use_case.dart",
+      "lib/features/payments/use_cases/rpc/verify_payment_rpc_use_case.dart",
+      "lib/features/payments/use_cases/rpc/handle_payment_failure_rpc_use_case.dart",
+      "lib/features/payments/use_cases/rpc/process_refund_rpc_use_case.dart",
+      "lib/features/employee/screens/employee_main_shell.dart",
+      "lib/features/notifications/services/realtime_notification_listener.dart",
+      "lib/features/notifications/widgets/notification_badge.dart",
+      "supabase/migrations/"
+    ]
+  }
+}

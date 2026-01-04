@@ -1,0 +1,59 @@
+{
+  "task_id": "TASK-20260102-172615-ce2b48ac",
+  "description": "Test native phase architecture",
+  "priority": "P2",
+  "status": "INITIALIZED",
+  "phases": [
+    {
+      "id": "phase-5190fbf3",
+      "order": 1,
+      "name": "Investigation",
+      "description": "Research the codebase",
+      "status": "APPROVED",
+      "created_at": "2026-01-02T17:26:15.286732",
+      "started_at": "2026-01-02T17:26:15.286736",
+      "submitted_for_review_at": "2026-01-02T17:26:27.466094",
+      "review_summary": "Completed investigation of the codebase architecture",
+      "approved_at": "2026-01-02T17:26:34.386105",
+      "reviewer_notes": "Investigation complete, proceed to implementation"
+    },
+    {
+      "id": "phase-e087eb60",
+      "order": 2,
+      "name": "Implementation",
+      "description": "Write the code",
+      "status": "APPROVED",
+      "created_at": "2026-01-02T17:26:15.286743",
+      "started_at": "2026-01-02T17:26:34.386109",
+      "submitted_for_review_at": "2026-01-02T17:26:47.177185",
+      "review_summary": "Implementation draft complete",
+      "rejected_at": "2026-01-02T17:26:53.108216",
+      "rejection_reason": "Missing error handling",
+      "required_changes": [
+        "Add try-catch blocks",
+        "Add input validation"
+      ],
+      "revision_count": 1,
+      "completed_at": "2026-01-02T17:26:59.996749"
+    },
+    {
+      "id": "phase-28994cbe",
+      "order": 3,
+      "name": "Testing",
+      "description": "Verify everything works",
+      "status": "ACTIVE",
+      "created_at": "2026-01-02T17:26:15.286747",
+      "started_at": "2026-01-02T17:26:59.996750"
+    }
+  ],
+  "current_phase_index": 2,
+  "created_at": "2026-01-02T17:26:15.287027",
+  "agents": [],
+  "total_spawned": 0,
+  "reviews": {},
+  "limits": {
+    "max_agents": 45,
+    "max_concurrent": 20,
+    "max_depth": 5
+  }
+}
