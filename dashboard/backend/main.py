@@ -16,10 +16,28 @@ sys.path.insert(0, str(orchestrator_path))
 
 # Import routers (conditionally to avoid errors if not all created yet)
 try:
-    from api.routes import tasks, agents, phases, tmux
+    from api.routes import tasks
 except ImportError as e:
-    print(f"[Warning] Some route modules not found yet: {e}")
-    tasks = agents = phases = tmux = None
+    print(f"[Warning] tasks module not found: {e}")
+    tasks = None
+
+try:
+    from api.routes import agents
+except ImportError as e:
+    print(f"[Warning] agents module not found: {e}")
+    agents = None
+
+try:
+    from api.routes import phases
+except ImportError as e:
+    print(f"[Warning] phases module not found: {e}")
+    phases = None
+
+try:
+    from api.routes import tmux
+except ImportError as e:
+    print(f"[Warning] tmux module not found: {e}")
+    tmux = None
 
 # Import WebSocket components
 from api.websocket import connection_manager, websocket_route
@@ -64,7 +82,16 @@ app = FastAPI(
 # Configure CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Vite dev server
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],  # Vite dev server (multiple ports in case of conflicts)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

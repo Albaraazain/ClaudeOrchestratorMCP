@@ -479,6 +479,27 @@ def get_minimal_coordination_info(
     except:
         return {"success": False, "error": "Failed to read registry"}
 
+    def _read_last_jsonl_entry(filepath: str) -> Optional[Dict[str, Any]]:
+        try:
+            if not os.path.exists(filepath):
+                return None
+            from collections import deque
+
+            tail = deque(maxlen=20)
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        tail.append(line)
+            for line in reversed(tail):
+                try:
+                    return json.loads(line)
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
+
     # Read only recent findings (last 3)
     recent_findings = []
     findings_dir = f"{workspace}/findings"
@@ -502,13 +523,30 @@ def get_minimal_coordination_info(
         all_findings.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         recent_findings = all_findings[:3]  # Only last 3
 
+    # JSONL is the source of truth for agent status/progress.
+    active_statuses = {"running", "working", "blocked", "reviewing"}
+    total_agents = len(registry.get("agents", []))
+    active = 0
+    completed = 0
+    for agent in registry.get("agents", []):
+        agent_id = agent.get("id", "")
+        status = agent.get("status")
+        if agent_id:
+            last = _read_last_jsonl_entry(f"{workspace}/progress/{agent_id}_progress.jsonl")
+            if last and last.get("status"):
+                status = last["status"]
+        if status == "completed":
+            completed += 1
+        if status in active_statuses:
+            active += 1
+
     return {
         "success": True,
         "task_id": task_id,
         "agent_counts": {
-            "total_spawned": registry.get('total_spawned', 0),
-            "active": registry.get('active_count', 0),
-            "completed": registry.get('completed_count', 0)
+            "total_spawned": max(registry.get("total_spawned", 0), total_agents),
+            "active": active,
+            "completed": completed
         },
         "recent_findings": recent_findings
     }

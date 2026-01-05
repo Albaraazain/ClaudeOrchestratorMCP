@@ -14,7 +14,6 @@ from services.tmux_service import get_tmux_service, TmuxSession
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/api/tmux",
     tags=["tmux"],
     responses={
         404: {"description": "Session not found"},

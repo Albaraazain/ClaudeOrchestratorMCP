@@ -1,7 +1,7 @@
 // Zustand store for task and agent state management
 
 import { create } from 'zustand';
-import { Task, Agent, Finding, LogMessage } from '../types';
+import type { Task, Agent, Finding, LogMessage } from '../types';
 import { apiService } from '../services/api';
 
 interface TaskStore {

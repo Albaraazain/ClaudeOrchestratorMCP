@@ -1,6 +1,6 @@
 // API service for communicating with the FastAPI backend
 
-import { Task, Agent, Finding, LogMessage } from '../types';
+import type { Task, Agent, Finding, LogMessage } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';

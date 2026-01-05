@@ -54,6 +54,8 @@ __all__ = [
     'check_disk_space',
     'test_write_access',
     'resolve_workspace_variables',
+    'register_workspace_globally',
+    'register_task_globally',
 ]
 
 
@@ -65,13 +67,23 @@ def find_task_workspace(task_id: str) -> str:
     """
     Find the workspace directory for a given task ID.
     Searches in multiple locations:
-    1. Server's default WORKSPACE_BASE
-    2. Global registries to find the stored workspace location
-    3. Common project locations (fallback for tasks created with client_cwd)
+    1. Global SQLite registry (fastest, most reliable)
+    2. Server's default WORKSPACE_BASE
+    3. Legacy JSON registries (backwards compatibility)
+    4. Common project locations (fallback)
 
     Returns the workspace path or None if not found.
     """
-    # Check server's default workspace first (fastest path)
+    # Try global SQLite registry first (source of truth for cross-project discovery)
+    try:
+        from . import global_registry
+        task_workspace = global_registry.find_task_workspace(task_id)
+        if task_workspace and os.path.exists(f"{task_workspace}/AGENT_REGISTRY.json"):
+            return task_workspace
+    except Exception as e:
+        logger.debug(f"Global registry lookup failed: {e}")
+
+    # Check server's default workspace (fast local check)
     workspace = f"{WORKSPACE_BASE}/{task_id}"
     if os.path.exists(f"{workspace}/AGENT_REGISTRY.json"):
         return workspace
@@ -87,6 +99,11 @@ def find_task_workspace(task_id: str) -> str:
     global_workspace = os.path.join(home, '.claude-orchestrator', 'workspaces')
     if global_workspace not in potential_registry_locations and os.path.isdir(global_workspace):
         potential_registry_locations.append(global_workspace)
+
+    # Backwards compatibility: some installations used ~/.agent-workspace as the workspace base.
+    legacy_agent_workspace = os.path.join(home, '.agent-workspace')
+    if legacy_agent_workspace not in potential_registry_locations and os.path.isdir(legacy_agent_workspace):
+        potential_registry_locations.append(legacy_agent_workspace)
 
     # Also check common project locations for backwards compatibility
     # with tasks created using client_cwd or old default behavior
@@ -421,3 +438,73 @@ def resolve_workspace_variables(path: str) -> str:
         logger.debug(f"Resolved workspace variable: {path} -> {resolved}")
 
     return resolved
+
+
+# ============================================================================
+# GLOBAL REGISTRY INTEGRATION
+# ============================================================================
+
+def register_workspace_globally(
+    workspace_base: str,
+    client_cwd: Optional[str] = None,
+    project_name: Optional[str] = None
+) -> bool:
+    """
+    Register a workspace in the global SQLite registry.
+
+    Called automatically when tasks are created with client_cwd.
+
+    Args:
+        workspace_base: Path to .agent-workspace directory
+        client_cwd: Client's working directory (project root)
+        project_name: Friendly name for the project
+
+    Returns:
+        True if registration succeeded
+    """
+    try:
+        from . import global_registry
+        return global_registry.register_workspace(
+            workspace_base=workspace_base,
+            client_cwd=client_cwd,
+            project_name=project_name
+        )
+    except Exception as e:
+        logger.warning(f"Failed to register workspace globally: {e}")
+        return False
+
+
+def register_task_globally(
+    task_id: str,
+    workspace_base: str,
+    description: str = "",
+    status: str = "INITIALIZED",
+    priority: str = "P2"
+) -> bool:
+    """
+    Register a task in the global SQLite registry.
+
+    Called when tasks are created to enable cross-project discovery.
+
+    Args:
+        task_id: Task ID (e.g., TASK-20260105-...)
+        workspace_base: Path to .agent-workspace directory
+        description: Task description
+        status: Task status
+        priority: Task priority
+
+    Returns:
+        True if registration succeeded
+    """
+    try:
+        from . import global_registry
+        return global_registry.register_task(
+            task_id=task_id,
+            workspace_base=workspace_base,
+            description=description,
+            status=status,
+            priority=priority
+        )
+    except Exception as e:
+        logger.warning(f"Failed to register task globally: {e}")
+        return False

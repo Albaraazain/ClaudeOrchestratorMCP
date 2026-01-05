@@ -72,3 +72,5 @@ The orchestrator CANNOT:
 - Skip phases ❌
 - Bypass review ❌
 - Manually advance before review ❌
+- but be carefull we are using sqlite as registery now instead of json file
+- can the global registery be sqlite aswell, since the json file has locking problems, and very buggy

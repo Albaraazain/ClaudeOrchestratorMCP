@@ -15,11 +15,15 @@ import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
+from collections import deque
 
 from .registry import LockedRegistryFile
 from .workspace import find_task_workspace, get_workspace_base_from_task_workspace, get_global_registry_path
 
 logger = logging.getLogger(__name__)
+
+# SQLite materialized state (JSONL remains source of truth)
+import orchestrator.state_db as state_db
 
 # Agent statuses
 AGENT_TERMINAL_STATUSES = {'completed', 'failed', 'error', 'terminated', 'killed'}
@@ -201,30 +205,171 @@ class HealthDaemon:
         agents_to_fail = []
 
         try:
-            # Read registry to get active agents
+            # Read registry to get active agents (snapshot for reconciliation + health checks)
             with LockedRegistryFile(registry_path) as (registry, f):
-                for agent in registry.get('agents', []):
-                    if agent['status'] not in AGENT_ACTIVE_STATUSES:
-                        continue
-
-                    agent_id = agent['id']
-                    health_status = self._check_agent_health(agent, workspace)
-
-                    if not health_status['healthy']:
-                        logger.warning(f"Agent {agent_id} unhealthy: {health_status['reason']}")
-                        agents_to_fail.append({
-                            'agent': agent,
-                            'reason': health_status['reason'],
-                            'details': health_status.get('details', {})
-                        })
+                active_agents = [
+                    {
+                        "id": a.get("id"),
+                        "status": a.get("status"),
+                        "last_update": a.get("last_update"),
+                        "progress": a.get("progress", 0),
+                    }
+                    for a in registry.get("agents", [])
+                    if a.get("status") in AGENT_ACTIVE_STATUSES
+                ]
 
         except Exception as e:
             logger.error(f"Error reading registry for task {task_id}: {e}")
             return
 
+        # Reconcile terminal progress updates that may not have been written to the registry
+        # (e.g., tool call killed agent or cleanup blocked registry write).
+        reconciled_ids = self._reconcile_agents_from_progress(task_id, workspace, registry_path, active_agents)
+
+        # Run health checks on remaining active agents only
+        for agent_snapshot in active_agents:
+            agent_id = agent_snapshot.get("id")
+            if not agent_id or agent_id in reconciled_ids:
+                continue
+
+            # Reload the full agent record (best-effort) for health check details
+            try:
+                with LockedRegistryFile(registry_path) as (registry, f):
+                    agent = next((a for a in registry.get("agents", []) if a.get("id") == agent_id), None)
+            except Exception:
+                agent = None
+
+            if not agent:
+                continue
+
+            health_status = self._check_agent_health(agent, workspace)
+            if not health_status.get("healthy"):
+                logger.warning(f"Agent {agent_id} unhealthy: {health_status['reason']}")
+                agents_to_fail.append({
+                    'agent': agent,
+                    'reason': health_status['reason'],
+                    'details': health_status.get('details', {})
+                })
+
         # Mark unhealthy agents as failed
         if agents_to_fail:
             self._mark_agents_failed(task_id, workspace, agents_to_fail)
+
+    def _read_last_jsonl_entry(self, path: str) -> Optional[Dict[str, Any]]:
+        """Read the last valid JSON object from a JSONL file."""
+        try:
+            if not os.path.exists(path):
+                return None
+
+            tail = deque(maxlen=10)
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        tail.append(line)
+
+            for line in reversed(tail):
+                try:
+                    return json.loads(line)
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
+
+    def _reconcile_agents_from_progress(
+        self,
+        task_id: str,
+        workspace: str,
+        registry_path: str,
+        active_agents: List[Dict[str, Any]],
+    ) -> set:
+        """
+        If an agent has a terminal progress entry newer than its registry last_update,
+        update the registry to match and avoid false 'failed' transitions.
+
+        Returns:
+            Set of agent_ids that were reconciled to a terminal state.
+        """
+        updates: List[Dict[str, Any]] = []
+        for a in active_agents:
+            agent_id = a.get("id")
+            if not agent_id:
+                continue
+
+            progress_path = os.path.join(workspace, "progress", f"{agent_id}_progress.jsonl")
+            last = self._read_last_jsonl_entry(progress_path)
+            if not last:
+                continue
+
+            new_status = last.get("status")
+            new_progress = last.get("progress")
+            new_ts = last.get("timestamp")
+            if not new_status or not new_ts:
+                continue
+
+            if new_status not in AGENT_TERMINAL_STATUSES:
+                continue
+
+            # Compare timestamps if possible
+            try:
+                new_dt = datetime.fromisoformat(new_ts)
+            except Exception:
+                new_dt = None
+
+            old_ts = a.get("last_update")
+            try:
+                old_dt = datetime.fromisoformat(old_ts) if old_ts else None
+            except Exception:
+                old_dt = None
+
+            if old_dt and new_dt and new_dt <= old_dt:
+                continue
+
+            updates.append({
+                "agent_id": agent_id,
+                "status": new_status,
+                "progress": int(new_progress) if isinstance(new_progress, int) else 0,
+                "timestamp": new_ts,
+            })
+
+        if not updates:
+            return set()
+
+        reconciled: set[str] = set()
+        try:
+            with LockedRegistryFile(registry_path) as (registry, f):
+                active_statuses = AGENT_ACTIVE_STATUSES
+                for upd in updates:
+                    agent_id = upd["agent_id"]
+                    agent = next((x for x in registry.get("agents", []) if x.get("id") == agent_id), None)
+                    if not agent:
+                        continue
+
+                    prev_status = agent.get("status")
+                    agent["status"] = upd["status"]
+                    agent["progress"] = upd["progress"]
+                    agent["last_update"] = upd["timestamp"]
+                    if upd["status"] == "completed":
+                        agent.setdefault("completed_at", upd["timestamp"])
+
+                    if prev_status in active_statuses and upd["status"] in AGENT_TERMINAL_STATUSES:
+                        registry["active_count"] = max(0, registry.get("active_count", 0) - 1)
+                        if upd["status"] == "completed":
+                            registry["completed_count"] = registry.get("completed_count", 0) + 1
+                        elif upd["status"] in {"failed", "error", "terminated", "killed"}:
+                            registry["failed_count"] = registry.get("failed_count", 0) + 1
+
+                    reconciled.add(agent_id)
+                    logger.info(f"Reconciled agent {agent_id} from progress: {prev_status} -> {upd['status']}")
+
+                f.seek(0)
+                f.write(json.dumps(registry, indent=2))
+                f.truncate()
+        except Exception as e:
+            logger.warning(f"Failed to reconcile agents from progress for task {task_id}: {e}")
+
+        return reconciled
 
     def _check_agent_health(self, agent_info: Dict[str, Any], workspace: str) -> Dict[str, Any]:
         """
@@ -366,14 +511,63 @@ class HealthDaemon:
                     # Find and update agent in registry
                     for reg_agent in registry.get('agents', []):
                         if reg_agent['id'] == agent_id:
+                            previous_status = reg_agent.get('status')
+
+                            # If progress already indicates completion, don't override it as failed.
+                            progress_path = os.path.join(workspace, "progress", f"{agent_id}_progress.jsonl")
+                            last = self._read_last_jsonl_entry(progress_path)
+                            if last and last.get("status") == "completed":
+                                reg_agent["status"] = "completed"
+                                reg_agent["progress"] = int(last.get("progress") or 100)
+                                reg_agent["last_update"] = last.get("timestamp") or datetime.now().isoformat()
+                                reg_agent.setdefault("completed_at", reg_agent["last_update"])
+                                if previous_status in AGENT_ACTIVE_STATUSES:
+                                    registry["active_count"] = max(0, registry.get("active_count", 0) - 1)
+                                    registry["completed_count"] = registry.get("completed_count", 0) + 1
+                                logger.info(f"Health daemon: preserved completion for {agent_id} based on progress file")
+                                break
+
                             # Mark as failed
                             reg_agent['status'] = 'failed'
                             reg_agent['failed_at'] = datetime.now().isoformat()
                             reg_agent['failure_reason'] = f"Health check failed: {failed_info['reason']}"
                             reg_agent['failure_details'] = failed_info.get('details', {})
 
+                            # JSONL is the source of truth: append a terminal progress entry.
+                            try:
+                                progress_path = os.path.join(workspace, "progress", f"{agent_id}_progress.jsonl")
+                                os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+                                progress_entry = {
+                                    "timestamp": datetime.now().isoformat(),
+                                    "agent_id": agent_id,
+                                    "status": "failed",
+                                    "message": f"Health check failed: {failed_info['reason']}",
+                                    "progress": int(reg_agent.get("progress", 0) or 0),
+                                }
+                                with open(progress_path, "a", encoding="utf-8") as pf:
+                                    pf.write(json.dumps(progress_entry) + "\n")
+                                # Materialize terminal status into SQLite for consistent reads.
+                                try:
+                                    workspace_base = get_workspace_base_from_task_workspace(workspace)
+                                    state_db.reconcile_task_workspace(workspace)
+                                    state_db.record_progress(
+                                        workspace_base=workspace_base,
+                                        task_id=task_id,
+                                        agent_id=agent_id,
+                                        timestamp=progress_entry["timestamp"],
+                                        status=progress_entry["status"],
+                                        message=progress_entry["message"],
+                                        progress=progress_entry["progress"],
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Health daemon: state DB update failed for {task_id}/{agent_id}: {e}"
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Health daemon: failed to append progress entry for {agent_id}: {e}")
+
                             # Update counters
-                            if reg_agent.get('status') in AGENT_ACTIVE_STATUSES:
+                            if previous_status in AGENT_ACTIVE_STATUSES:
                                 registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
                                 registry['failed_count'] = registry.get('failed_count', 0) + 1
 
@@ -391,27 +585,36 @@ class HealthDaemon:
 
                     # Only auto-trigger if phase is ACTIVE (not already in review)
                     if current_phase.get('status') == 'ACTIVE':
-                        terminal_statuses = {'completed', 'failed', 'error', 'terminated', 'killed'}
+                        # JSONL/SQLite truth: determine phase completion from materialized agent state.
+                        try:
+                            workspace_base = get_workspace_base_from_task_workspace(workspace)
+                            state_db.reconcile_task_workspace(workspace)
+                            phase_state = state_db.load_phase_snapshot(
+                                workspace_base=workspace_base, task_id=task_id, phase_index=current_phase_idx
+                            )
+                        except Exception as e:
+                            logger.warning(f"Health daemon: phase state read failed for {task_id}: {e}")
+                            phase_state = {
+                                "counts": {"total": 0, "completed": 0, "failed": 0, "pending": 0, "all_done": False}
+                            }
 
-                        # Count phase agents
-                        phase_agents = [a for a in registry.get('agents', [])
-                                        if a.get('phase_index') == current_phase_idx]
-                        completed_phase_agents = [a for a in phase_agents
-                                                  if a.get('status') == 'completed']
-                        failed_phase_agents = [a for a in phase_agents
-                                              if a.get('status') in terminal_statuses - {'completed'}]
+                        counts = phase_state.get("counts", {}) or {}
+                        total_agents = int(counts.get("total", 0))
+                        completed_count = int(counts.get("completed", 0))
+                        failed_count = int(counts.get("failed", 0))
 
-                        logger.info(f"Phase {current_phase_idx} health check: "
-                                   f"{len(completed_phase_agents)}/{len(phase_agents)} completed, "
-                                   f"{len(failed_phase_agents)} failed")
+                        logger.info(
+                            f"Phase {current_phase_idx} health check (SQLite): "
+                            f"{completed_count}/{total_agents} completed, {failed_count} failed"
+                        )
 
                         # All agents in terminal state?
-                        if len(phase_agents) > 0 and len(completed_phase_agents) + len(failed_phase_agents) == len(phase_agents):
+                        if total_agents > 0 and bool(counts.get("all_done")):
                             # AUTO-SUBMIT PHASE FOR REVIEW
                             current_phase['status'] = 'AWAITING_REVIEW'
                             current_phase['auto_submitted_at'] = datetime.now().isoformat()
                             current_phase['auto_submitted_reason'] = (
-                                f"All {len(phase_agents)} agents completed/terminated "
+                                f"All {total_agents} agents terminal (health daemon / SQLite truth) "
                                 f"(health daemon detected)"
                             )
 
@@ -420,13 +623,15 @@ class HealthDaemon:
                                 'task_id': task_id,
                                 'phase_index': current_phase_idx,
                                 'phase_name': current_phase.get('name', f'Phase {current_phase_idx + 1}'),
-                                'completed_agents': len(completed_phase_agents),
-                                'failed_agents': len(failed_phase_agents),
+                                'completed_agents': completed_count,
+                                'failed_agents': failed_count,
                                 'workspace': workspace
                             }
 
-                            logger.info(f"PHASE-ENFORCEMENT (health daemon): Phase {current_phase_idx} "
-                                       f"({current_phase.get('name')}) auto-submitted for review")
+                            logger.info(
+                                f"PHASE-ENFORCEMENT (health daemon): Phase {current_phase_idx} "
+                                f"({current_phase.get('name')}) auto-submitted for review"
+                            )
 
                 # Write back atomically
                 f.seek(0)
