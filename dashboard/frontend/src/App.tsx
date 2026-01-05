@@ -1,14 +1,15 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import TaskDetail from './pages/TaskDetail';
-import { Dashboard } from './pages/Dashboard';
+import Dashboard from './pages/Dashboard';
 import { AgentDetail } from './pages/AgentDetail';
+import Layout from './components/Layout';
 import './index.css';
 
 function App() {
   return (
-    <Router>
-      <div className="min-h-screen bg-gray-50">
+    <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <Layout>
         <Routes>
           {/* Main Dashboard - Task List */}
           <Route path="/" element={<Dashboard />} />
@@ -25,7 +26,7 @@ function App() {
           {/* Default redirect */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </div>
+      </Layout>
     </Router>
   );
 }

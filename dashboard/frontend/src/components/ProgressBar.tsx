@@ -6,7 +6,7 @@ interface ProgressBarProps {
   className?: string;
   height?: string;
   animated?: boolean;
-  color?: 'blue' | 'green' | 'orange' | 'red' | 'purple';
+  color?: 'blue' | 'green' | 'orange' | 'red' | 'sky';
 }
 
 export const ProgressBar: React.FC<ProgressBarProps> = ({
@@ -22,7 +22,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
     green: 'bg-green-500',
     orange: 'bg-orange-500',
     red: 'bg-red-500',
-    purple: 'bg-purple-500'
+    sky: 'bg-sky-500'
   };
 
   const progressColor = colorMap[color];

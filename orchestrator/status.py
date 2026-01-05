@@ -926,6 +926,10 @@ def format_line_compact(line: str) -> str:
 
     msg_type = obj.get('type', 'unknown')
 
+    # Skip truncation_error entries entirely - they're noise
+    if msg_type == 'truncation_error':
+        return ""  # Will be filtered out
+
     # Handle tool_use (from assistant)
     if msg_type == 'assistant' and 'message' in obj:
         message = obj.get('message', {})
@@ -939,17 +943,19 @@ def format_line_compact(line: str) -> str:
 
                 # Extract brief description based on tool type
                 if tool_name == 'Bash':
-                    cmd = tool_input.get('command', '')[:60]
+                    cmd = tool_input.get('command', '')[:120]
                     return f"[TOOL] Bash: {cmd}"
                 elif tool_name in ('Read', 'Write', 'Edit'):
                     path = tool_input.get('file_path', '')
-                    filename = path.split('/')[-1] if path else 'unknown'
-                    return f"[TOOL] {tool_name}: {filename}"
+                    # Show last 2 path components for context
+                    parts = path.split('/') if path else ['unknown']
+                    short_path = '/'.join(parts[-2:]) if len(parts) > 1 else parts[-1]
+                    return f"[TOOL] {tool_name}: {short_path}"
                 elif 'mcp__claude-orchestrator__' in tool_name:
                     short_name = tool_name.replace('mcp__claude-orchestrator__', '')
                     # Extract key param
                     if 'status' in tool_input:
-                        return f"[MCP] {short_name}: {tool_input.get('status')} - {tool_input.get('message', '')[:50]}"
+                        return f"[MCP] {short_name}: {tool_input.get('status')} - {tool_input.get('message', '')[:100]}"
                     return f"[MCP] {short_name}"
                 else:
                     return f"[TOOL] {tool_name}"
@@ -957,7 +963,7 @@ def format_line_compact(line: str) -> str:
         # No tool_use, check for text
         for item in content if isinstance(content, list) else []:
             if isinstance(item, dict) and item.get('type') == 'text':
-                text = item.get('text', '')[:100]
+                text = item.get('text', '')[:150]
                 return f"[ASST] {text}"
 
     # Handle tool_result (from user)
@@ -970,13 +976,21 @@ def format_line_compact(line: str) -> str:
                 result = item.get('content', '')
                 is_error = item.get('is_error', False)
 
+                # Skip results that are just truncation markers
+                if isinstance(result, str) and '[... TRUNCATED' in result:
+                    return ""  # Filter out
+
                 if is_error:
-                    # Show full error
-                    return f"[ERROR] {result[:150]}"
+                    # Show error (first line, more generous limit)
+                    first_line = result.split('\n')[0] if isinstance(result, str) else str(result)
+                    return f"[ERROR] {first_line[:150]}"
                 else:
-                    # Show brief result
-                    result_preview = result[:80] if isinstance(result, str) else str(result)[:80]
-                    return f"[RESULT] {result_preview}"
+                    # Show result (first line)
+                    if isinstance(result, str):
+                        first_line = result.split('\n')[0][:120]
+                    else:
+                        first_line = str(result)[:120]
+                    return f"[RESULT] {first_line}"
 
     # Handle progress updates (MCP responses)
     if 'progress' in str(obj) and 'status' in str(obj):

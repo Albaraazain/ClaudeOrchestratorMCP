@@ -88,11 +88,13 @@ def get_tmux_session_output(session_name: str) -> str:
     try:
         result = subprocess.run([
             'tmux', 'capture-pane', '-t', session_name, '-p'
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, timeout=5)
 
         if result.returncode == 0:
             return result.stdout
         return f"Error capturing output: {result.stderr}"
+    except subprocess.TimeoutExpired:
+        return "Error capturing output: tmux capture-pane timed out"
     except Exception as e:
         return f"Exception capturing output: {str(e)}"
 
@@ -102,9 +104,9 @@ def check_tmux_session_exists(session_name: str) -> bool:
     try:
         result = subprocess.run([
             'tmux', 'has-session', '-t', session_name
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, timeout=2)
         return result.returncode == 0
-    except Exception:
+    except (subprocess.TimeoutExpired, Exception):
         return False
 
 
@@ -113,9 +115,9 @@ def kill_tmux_session(session_name: str) -> bool:
     try:
         result = subprocess.run([
             'tmux', 'kill-session', '-t', session_name
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, timeout=5)
         return result.returncode == 0
-    except Exception:
+    except (subprocess.TimeoutExpired, Exception):
         return False
 
 

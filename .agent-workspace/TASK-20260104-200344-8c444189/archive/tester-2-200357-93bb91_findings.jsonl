@@ -1,0 +1,4 @@
+{"timestamp": "2026-01-04T20:04:37.994213", "agent_id": "tester-2-200357-93bb91", "finding_type": "insight", "severity": "low", "message": "Test agent 2 checkpoint reached", "data": {"checkpoint": "25%", "timestamp": "2026-01-04T20:04:24"}}
+{"timestamp": "2026-01-04T20:04:58.706287", "agent_id": "tester-2-200357-93bb91", "finding_type": "insight", "severity": "low", "message": "Test agent 2 checkpoint reached", "data": {"checkpoint": "50%", "timestamp": "2026-01-04T20:04:48"}}
+{"timestamp": "2026-01-04T20:05:21.436204", "agent_id": "tester-2-200357-93bb91", "finding_type": "insight", "severity": "low", "message": "Test agent 2 checkpoint reached", "data": {"checkpoint": "75%", "timestamp": "2026-01-04T20:05:09"}}
+{"timestamp": "2026-01-04T20:05:43.427005", "agent_id": "tester-2-200357-93bb91", "finding_type": "insight", "severity": "low", "message": "Test agent 2 checkpoint reached", "data": {"checkpoint": "100%", "timestamp": "2026-01-04T20:05:31"}}

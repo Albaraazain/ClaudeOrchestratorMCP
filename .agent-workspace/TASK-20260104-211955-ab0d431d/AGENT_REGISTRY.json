@@ -1,0 +1,498 @@
+{
+  "task_id": "TASK-20260104-211955-ab0d431d",
+  "task_description": "Investigate and implement UI distinction between reviewer agents and phase work agents in the dashboard",
+  "created_at": "2026-01-04T21:19:55.413144",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP",
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "phases": [
+    {
+      "id": "phase-92601885",
+      "order": 1,
+      "name": "Investigation",
+      "description": "Analyze current dashboard code and agent data structure to understand how to distinguish reviewers",
+      "status": "APPROVED",
+      "created_at": "2026-01-04T21:19:55.413127",
+      "started_at": "2026-01-04T21:19:55.413130",
+      "auto_submitted_at": "2026-01-04T21:22:54.870951",
+      "auto_submitted_reason": "All 2 agents terminal (SQLite/JSONL truth)",
+      "review_started_at": "2026-01-04T21:22:54.873909",
+      "active_review_id": "auto-review-8e8a01219a39",
+      "auto_review": true,
+      "approved_at": "2026-01-04T21:25:07.361026"
+    },
+    {
+      "id": "phase-d7351072",
+      "order": 2,
+      "name": "Implementation",
+      "description": "Add visual distinction for reviewer agents in the UI",
+      "status": "ACTIVE",
+      "created_at": "2026-01-04T21:19:55.413141",
+      "started_at": "2026-01-04T21:25:07.361035"
+    }
+  ],
+  "current_phase_index": 1,
+  "agents": [
+    {
+      "id": "dashboard_investigator-212033-56be2b",
+      "type": "dashboard_investigator",
+      "model": "opus",
+      "tmux_session": "agent_dashboard_investigator-212033-56be2b",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "completed",
+      "started_at": "2026-01-04T21:20:35.798195",
+      "progress": 100,
+      "last_update": "2026-01-04T21:22:54.865319",
+      "prompt": "Investigate the dashboard frontend code to understand how agents are currently displayed and identify how to distinguish reviewer agents from regular phase work agents.\n\nSPECIFIC TASKS:\n1. Find the da...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/agent_prompt_dashboard_investigator-212033-56be2b.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/dashboard_investigator-212033-56be2b_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/progress/dashboard_investigator-212033-56be2b_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/findings/dashboard_investigator-212033-56be2b_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/deploy_dashboard_investigator-212033-56be2b.json"
+      },
+      "completion_validation": {
+        "confidence": 0.9,
+        "warnings": [
+          "Completed in 139 seconds - consider spending more time on quality"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 9,
+            "progress_entries_count": 4,
+            "findings_count": 3
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 317,
+            "suspicious_phrases_found": [],
+            "evidence_keywords_found": [
+              "found"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 139.061754,
+            "speed": "fast",
+            "working_updates_count": 3
+          }
+        },
+        "validated_at": "2026-01-04T21:22:54.866298"
+      },
+      "completed_at": "2026-01-04T21:22:54.866325",
+      "auto_cleanup_scheduled_at": "2026-01-04T21:22:54.866348",
+      "auto_cleanup_result": {
+        "success": false,
+        "tmux_session_killed": false,
+        "prompt_file_deleted": true,
+        "log_files_archived": true,
+        "verified_no_zombies": false,
+        "errors": [
+          "Skipped tmux kill for agent_dashboard_investigator-212033-56be2b (kill_tmux=False)",
+          "Found 4 lingering processes for agent dashboard_investigator-212033-56be2b"
+        ],
+        "archived_files": [
+          "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/archive/dashboard_investigator-212033-56be2b_stream.jsonl",
+          "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/archive/dashboard_investigator-212033-56be2b_progress.jsonl",
+          "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/archive/dashboard_investigator-212033-56be2b_findings.jsonl"
+        ],
+        "zombie_processes": 4,
+        "zombie_process_details": [
+          "albaraa          81686   0.2  0.0 435305856   6400   ??  Ss    9:20PM   0:00.05 tmux new-session -d -s agent_dashboard_investigator-212033-56be2b -c /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP cd '/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP' && npx -y @anthropic-ai/claude-code --print --output-format stream-json --verbose --dangerously-skip-permissions --model opus 'You are a headless Claude agent in an orchestrator system.\\012\\012\ud83e\udd16 AGENT IDENTITY:\\012- Agent ID: dashboard_investigator-212033-56be2b\\012- Agent Type: dashboard_investigator\\012- Task ID: TASK-20260104-211955-ab0d431d\\012- Parent Agent: orchestrator\\012- Depth Level: 1\\012- Workspace: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d\\012\\012\ud83d\udcdd YOUR MISSION:\\012Investigate the dashboard frontend code to understand how agents are currently displayed and identify how to distinguish reviewer agents from regular phase work agents.\\012\\012SPECIFIC TASKS:\\0121. Find the dashboard frontend files in /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/dashboard/frontend/src/\\0122. Look at how agents are rendered - find components that display agent lists/cards\\0123. Check the agent data structure - look for fields that could identify reviewers (agent_type starting with \"reviewer-\", phase_index=-1, etc.)\\0124. Identify what visual changes would be needed to distinguish reviewers\\012\\012REPORT:\\012- Current agent display code location and structure\\012- Fields available to identify reviewer agents\\012- Recommended approach for visual distinction\\012- Specific files that need modification\\012\\012\\012PROJECT CONTEXT (Source: config_files):\\012- Language: Python\\012- Frameworks: FastMCP\\012- Testing: pytest\\012- Package Manager: pip\\012- Project Type: mcp_server\\012- Config Files: pyproject.toml\\012\\012IMPLICATIONS FOR YOUR WORK:\\012- Use snake_case for functions and variables\\012- Follow PEP 8 style guidelines\\012- Check pyproject.toml or requirements.txt for dependencies before importing\\012- Write async functions if the project uses async/await patterns\\012- Follow FastMCP conventions: @mcp.tool decorator for tools\\012- Use .fn attribute when calling MCP tools from within other MCP tools\\012- Add tests in tests/ directory with test_*.py naming\\012- Use pytest fixtures and assertions\\012\\012DO NOT:\\012- Use camelCase (this is Python, not JavaScript)\\012- Import libraries not in requirements.txt/pyproject.toml\\012- Write synchronous code if async patterns are used\\012\\012\\012\\012AGENT PROTOCOL - SYSTEMATIC APPROACH\\012\\012MISSION EXECUTION STEPS:\\0121. UNDERSTAND (30% of time):\\012   - Read relevant code/documentation to understand context\\012   - Identify what exists vs what needs to change\\012   - Check project conventions and patterns\\012   - Map dependencies and constraints\\012\\0122. PLAN & IMPLEMENT (40% of time):\\012   - Break down the task into specific steps\\012   - Consider edge cases and error scenarios\\012   - Implement with proper error handling\\012   - Follow project coding standards\\012\\0123. VERIFY & DOCUMENT (30% of time):\\012   - Test your changes work correctly\\012   - Check for regressions or side effects\\012   - Document findings with file:line citations\\012   - Provide evidence of completion\\012\\012SUCCESS CRITERIA - Definition of '\"'\"'DONE'\"'\"':\\012Your work is ONLY complete when:\\012- Task requirements fully addressed (not partial)\\012- Changes tested and verified working\\012- Evidence provided (file paths, test results, findings)\\012- No regressions introduced\\012- Work follows project patterns and conventions\\012\\012EVIDENCE REQUIRED FOR COMPLETION:\\012BEFORE reporting status='\"'\"'completed'\"'\"', you MUST provide:\\0121. What you accomplished - specific changes made\\0122. Files modified - list paths with what changed\\0123. Testing performed - show results/output\\0124. Findings documented - use report_agent_finding for discoveries\\0125. Quality check - did you verify it works?\\012\\012ANTI-PATTERNS TO AVOID:\\012- Assuming without reading actual code\\012- Generic findings without specific evidence\\012- Claiming done without testing/verification\\012- Breaking existing functionality\\012- No file:line citations for your findings\\012\\012FORCED SELF-INTERROGATION CHECKLIST:\\012Answer BEFORE claiming done:\\0121. Did I READ the relevant code or assume?\\0122. Can I cite specific files/lines I analyzed or modified?\\0123. Did I TEST my changes work?\\0124. Did I document findings with evidence?\\0125. What could go wrong? Did I handle edge cases?\\0126. Would I accept this work quality from someone else?\\012\\012\\012\\012\\012ORCHESTRATION GUIDANCE (Depth 1/5, Complexity: 1/20):\\012\\012You are may consider to spawn specialized child agents for better implementation quality.\\012\\012RECOMMENDED CHILD SPECIALISTS:\\012- js_specialist\\012- component_specialist\\012- animation_specialist\\012- documentation_specialist\\012- css_specialist\\012- quality_assurance\\012\\012ORCHESTRATION STRATEGY:\\0121. ANALYZE if your task benefits from specialization\\0122. SPAWN 1-2 child agents with focused, specific roles\\0123. COORDINATE their work efficiently\\0124. Each child should handle a distinct domain\\012\\012NAMING CONVENTION: Use clear, descriptive names:\\012   - '\"'\"'css_responsive_specialist'\"'\"' not just '\"'\"'css'\"'\"'\\012   - '\"'\"'api_authentication_handler'\"'\"' not just '\"'\"'auth'\"'\"'\\012   - '\"'\"'database_optimization_expert'\"'\"' not just '\"'\"'db'\"'\"'\\012\\012SUCCESS CRITERIA: Balance specialization with efficiency:\\012   - Spawn specialists only when beneficial\\012   - Coordinate effectively without micro-management\\012   - Deliver comprehensive, integrated results\\012\\012\ud83d\udd17 MCP SELF-REPORTING WITH COORDINATION - You MUST use these MCP functions to report progress:\\012\\0121. PROGRESS UPDATES (every few minutes):\\012```\\012mcp__claude-orchestrator__update_agent_progress\\012Parameters: \\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"dashboard_investigator-212033-56be2b\"  \\012- status: \"working\" | \"blocked\" | \"completed\" | \"error\"\\012- message: \"Description of current work\"\\012- progress: 0-100 (percentage)\\012\\012RETURNS: Your update confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\0122. REPORT FINDINGS (whenever you discover something important):\\012```\\012mcp__claude-orchestrator__report_agent_finding\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"dashboard_investigator-212033-56be2b\"\\012- finding_type: \"issue\" | \"solution\" | \"insight\" | \"recommendation\"\\012- severity: \"low\" | \"medium\" | \"high\" | \"critical\"  \\012- message: \"What you discovered\"\\012- data: {\"any\": \"additional info\"}\\012\\012RETURNS: Your finding confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\012\ud83d\udca1 COORDINATION ADVANTAGE: Every time you update progress or report a finding, you'\"'\"'ll receive:\\012- Complete status of all other agents working on this task\\012- Their latest progress updates and discoveries\\012- Opportunity to coordinate and avoid duplicate work\\012- Insights to build upon others'\"'\"' findings\\012\\0123. SPAWN CHILD AGENTS (if you need specialized help):\\012```\\012mcp__claude-orchestrator__spawn_opus_child_agent or spawn_sonnet_child_agent\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- parent_agent_id: \"dashboard_investigator-212033-56be2b\"\\012- child_agent_type: \"investigator\" | \"builder\" | \"fixer\" | etc\\012- child_prompt: \"Specific task for the child agent\"\\012```\\012\\012\ud83d\udea8 CRITICAL PROTOCOL:\\0121. START by calling update_agent_progress with status=\"working\", progress=0\\0122. REGULARLY update progress every few minutes\\0123. REPORT key findings as you discover them\\0124. SPAWN child agents if you need specialized help\\0125. END by calling update_agent_progress with status=\"completed\", progress=100\\012\\012\u26a0\ufe0f REPORTING REQUIREMENTS:\\012- Update progress EVERY 3-5 minutes minimum\\012- Progress must be REALISTIC and match actual work done\\012- Completion requires EVIDENCE: files modified, tests passed, findings documented\\012- If you don'\"'\"'t report for 5+ minutes, you'\"'\"'ll be flagged as stalled\\012- BEFORE claiming done: perform self-review and list what could be improved\\012\\012\ud83d\udeab DO NOT USE THESE TOOLS (they waste tokens and return nothing useful):\\012- get_agent_output - This is for ORCHESTRATOR monitoring only, not agent coordination\\012- Peer agent logs are NOT accessible to you - use findings/progress instead\\012\\012You are working independently but can coordinate through the MCP orchestrator system.\\012\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\u26a1 MANDATORY COMPLETION STEP - YOUR WORK IS NOT FINISHED UNTIL YOU DO THIS \u26a1\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012Before you stop working, you MUST call:\\012\\012```\\012mcp__claude-orchestrator__update_agent_progress(\\012    task_id=\"TASK-20260104-211955-ab0d431d\",\\012    agent_id=\"dashboard_investigator-212033-56be2b\",\\012    status=\"completed\",\\012    message=\"<SUMMARY: List what you accomplished and any key findings>\",\\012    progress=100\\012)\\012```\\012\\012IF YOU DO NOT CALL THIS:\\012- The system will think you are still working\\012- The phase CANNOT proceed to review\\012- Other agents will wait indefinitely for you\\012- The orchestrator will be stuck\\012\\012COMPLETE YOUR WORK AND REPORT STATUS!\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012BEGIN YOUR WORK NOW!\\012' | tee '/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/dashboard_investigator-212033-56be2b_stream.jsonl'",
+          "albaraa          81688   0.0  0.8 436239376 127488 s013  S+    9:20PM   0:01.73 npm exec @anthropic-ai/claude-code --print --output-format stream-json --verbose --dangerously-skip-permissions --model opus You are a headless Claude agent in an orchestrator system.\\012\\012\ud83e\udd16 AGENT IDENTITY:\\012- Agent ID: dashboard_investigator-212033-56be2b\\012- Agent Type: dashboard_investigator\\012- Task ID: TASK-20260104-211955-ab0d431d\\012- Parent Agent: orchestrator\\012- Depth Level: 1\\012- Workspace: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d\\012\\012\ud83d\udcdd YOUR MISSION:\\012Investigate the dashboard frontend code to understand how agents are currently displayed and identify how to distinguish reviewer agents from regular phase work agents.\\012\\012SPECIFIC TASKS:\\0121. Find the dashboard frontend files in /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/dashboard/frontend/src/\\0122. Look at how agents are rendered - find components that display agent lists/cards\\0123. Check the agent data structure - look for fields that could identify reviewers (agent_type starting with \"reviewer-\", phase_index=-1, etc.)\\0124. Identify what visual changes would be needed to distinguish reviewers\\012\\012REPORT:\\012- Current agent display code location and structure\\012- Fields available to identify reviewer agents\\012- Recommended approach for visual distinction\\012- Specific files that need modification\\012\\012\\012PROJECT CONTEXT (Source: config_files):\\012- Language: Python\\012- Frameworks: FastMCP\\012- Testing: pytest\\012- Package Manager: pip\\012- Project Type: mcp_server\\012- Config Files: pyproject.toml\\012\\012IMPLICATIONS FOR YOUR WORK:\\012- Use snake_case for functions and variables\\012- Follow PEP 8 style guidelines\\012- Check pyproject.toml or requirements.txt for dependencies before importing\\012- Write async functions if the project uses async/await patterns\\012- Follow FastMCP conventions: @mcp.tool decorator for tools\\012- Use .fn attribute when calling MCP tools from within other MCP tools\\012- Add tests in tests/ directory with test_*.py naming\\012- Use pytest fixtures and assertions\\012\\012DO NOT:\\012- Use camelCase (this is Python, not JavaScript)\\012- Import libraries not in requirements.txt/pyproject.toml\\012- Write synchronous code if async patterns are used\\012\\012\\012\\012AGENT PROTOCOL - SYSTEMATIC APPROACH\\012\\012MISSION EXECUTION STEPS:\\0121. UNDERSTAND (30% of time):\\012   - Read relevant code/documentation to understand context\\012   - Identify what exists vs what needs to change\\012   - Check project conventions and patterns\\012   - Map dependencies and constraints\\012\\0122. PLAN & IMPLEMENT (40% of time):\\012   - Break down the task into specific steps\\012   - Consider edge cases and error scenarios\\012   - Implement with proper error handling\\012   - Follow project coding standards\\012\\0123. VERIFY & DOCUMENT (30% of time):\\012   - Test your changes work correctly\\012   - Check for regressions or side effects\\012   - Document findings with file:line citations\\012   - Provide evidence of completion\\012\\012SUCCESS CRITERIA - Definition of 'DONE':\\012Your work is ONLY complete when:\\012- Task requirements fully addressed (not partial)\\012- Changes tested and verified working\\012- Evidence provided (file paths, test results, findings)\\012- No regressions introduced\\012- Work follows project patterns and conventions\\012\\012EVIDENCE REQUIRED FOR COMPLETION:\\012BEFORE reporting status='completed', you MUST provide:\\0121. What you accomplished - specific changes made\\0122. Files modified - list paths with what changed\\0123. Testing performed - show results/output\\0124. Findings documented - use report_agent_finding for discoveries\\0125. Quality check - did you verify it works?\\012\\012ANTI-PATTERNS TO AVOID:\\012- Assuming without reading actual code\\012- Generic findings without specific evidence\\012- Claiming done without testing/verification\\012- Breaking existing functionality\\012- No file:line citations for your findings\\012\\012FORCED SELF-INTERROGATION CHECKLIST:\\012Answer BEFORE claiming done:\\0121. Did I READ the relevant code or assume?\\0122. Can I cite specific files/lines I analyzed or modified?\\0123. Did I TEST my changes work?\\0124. Did I document findings with evidence?\\0125. What could go wrong? Did I handle edge cases?\\0126. Would I accept this work quality from someone else?\\012\\012\\012\\012\\012ORCHESTRATION GUIDANCE (Depth 1/5, Complexity: 1/20):\\012\\012You are may consider to spawn specialized child agents for better implementation quality.\\012\\012RECOMMENDED CHILD SPECIALISTS:\\012- js_specialist\\012- component_specialist\\012- animation_specialist\\012- documentation_specialist\\012- css_specialist\\012- quality_assurance\\012\\012ORCHESTRATION STRATEGY:\\0121. ANALYZE if your task benefits from specialization\\0122. SPAWN 1-2 child agents with focused, specific roles\\0123. COORDINATE their work efficiently\\0124. Each child should handle a distinct domain\\012\\012NAMING CONVENTION: Use clear, descriptive names:\\012   - 'css_responsive_specialist' not just 'css'\\012   - 'api_authentication_handler' not just 'auth'\\012   - 'database_optimization_expert' not just 'db'\\012\\012SUCCESS CRITERIA: Balance specialization with efficiency:\\012   - Spawn specialists only when beneficial\\012   - Coordinate effectively without micro-management\\012   - Deliver comprehensive, integrated results\\012\\012\ud83d\udd17 MCP SELF-REPORTING WITH COORDINATION - You MUST use these MCP functions to report progress:\\012\\0121. PROGRESS UPDATES (every few minutes):\\012```\\012mcp__claude-orchestrator__update_agent_progress\\012Parameters: \\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"dashboard_investigator-212033-56be2b\"  \\012- status: \"working\" | \"blocked\" | \"completed\" | \"error\"\\012- message: \"Description of current work\"\\012- progress: 0-100 (percentage)\\012\\012RETURNS: Your update confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\0122. REPORT FINDINGS (whenever you discover something important):\\012```\\012mcp__claude-orchestrator__report_agent_finding\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"dashboard_investigator-212033-56be2b\"\\012- finding_type: \"issue\" | \"solution\" | \"insight\" | \"recommendation\"\\012- severity: \"low\" | \"medium\" | \"high\" | \"critical\"  \\012- message: \"What you discovered\"\\012- data: {\"any\": \"additional info\"}\\012\\012RETURNS: Your finding confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\012\ud83d\udca1 COORDINATION ADVANTAGE: Every time you update progress or report a finding, you'll receive:\\012- Complete status of all other agents working on this task\\012- Their latest progress updates and discoveries\\012- Opportunity to coordinate and avoid duplicate work\\012- Insights to build upon others' findings\\012\\0123. SPAWN CHILD AGENTS (if you need specialized help):\\012```\\012mcp__claude-orchestrator__spawn_opus_child_agent or spawn_sonnet_child_agent\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- parent_agent_id: \"dashboard_investigator-212033-56be2b\"\\012- child_agent_type: \"investigator\" | \"builder\" | \"fixer\" | etc\\012- child_prompt: \"Specific task for the child agent\"\\012```\\012\\012\ud83d\udea8 CRITICAL PROTOCOL:\\0121. START by calling update_agent_progress with status=\"working\", progress=0\\0122. REGULARLY update progress every few minutes\\0123. REPORT key findings as you discover them\\0124. SPAWN child agents if you need specialized help\\0125. END by calling update_agent_progress with status=\"completed\", progress=100\\012\\012\u26a0\ufe0f REPORTING REQUIREMENTS:\\012- Update progress EVERY 3-5 minutes minimum\\012- Progress must be REALISTIC and match actual work done\\012- Completion requires EVIDENCE: files modified, tests passed, findings documented\\012- If you don't report for 5+ minutes, you'll be flagged as stalled\\012- BEFORE claiming done: perform self-review and list what could be improved\\012\\012\ud83d\udeab DO NOT USE THESE TOOLS (they waste tokens and return nothing useful):\\012- get_agent_output - This is for ORCHESTRATOR monitoring only, not agent coordination\\012- Peer agent logs are NOT accessible to you - use findings/progress instead\\012\\012You are working independently but can coordinate through the MCP orchestrator system.\\012\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\u26a1 MANDATORY COMPLETION STEP - YOUR WORK IS NOT FINISHED UNTIL YOU DO THIS \u26a1\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012Before you stop working, you MUST call:\\012\\012```\\012mcp__claude-orchestrator__update_agent_progress(\\012    task_id=\"TASK-20260104-211955-ab0d431d\",\\012    agent_id=\"dashboard_investigator-212033-56be2b\",\\012    status=\"completed\",\\012    message=\"<SUMMARY: List what you accomplished and any key findings>\",\\012    progress=100\\012)\\012```\\012\\012IF YOU DO NOT CALL THIS:\\012- The system will think you are still working\\012- The phase CANNOT proceed to review\\012- Other agents will wait indefinitely for you\\012- The orchestrator will be stuck\\012\\012COMPLETE YOUR WORK AND REPORT STATUS!\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012BEGIN YOUR WORK NOW!           ",
+          "albaraa          81689   0.0  0.0 435300272   1168 s013  S+    9:20PM   0:00.00 tee /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/dashboard_investigator-212033-56be2b_stream.jsonl"
+        ]
+      },
+      "auto_cleanup_timestamp": "2026-01-04T21:22:57.387710"
+    },
+    {
+      "id": "backend_investigator-212035-fb570c",
+      "type": "backend_investigator",
+      "model": "opus",
+      "tmux_session": "agent_backend_investigator-212035-fb570c",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": 0,
+      "status": "completed",
+      "started_at": "2026-01-04T21:20:37.887726",
+      "progress": 100,
+      "last_update": "2026-01-04T21:22:45.825169",
+      "prompt": "Investigate the backend API and MCP server to understand how reviewer agents are identified in the data.\n\nSPECIFIC TASKS:\n1. Check /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/real_mcp_serv...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/agent_prompt_backend_investigator-212035-fb570c.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/backend_investigator-212035-fb570c_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/progress/backend_investigator-212035-fb570c_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/findings/backend_investigator-212035-fb570c_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/deploy_backend_investigator-212035-fb570c.json"
+      },
+      "completion_validation": {
+        "confidence": 0.9,
+        "warnings": [
+          "Completed in 128 seconds - consider spending more time on quality"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 8,
+            "progress_entries_count": 4,
+            "findings_count": 3
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 293,
+            "suspicious_phrases_found": [],
+            "evidence_keywords_found": [
+              "found"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 127.933166,
+            "speed": "fast",
+            "working_updates_count": 3
+          }
+        },
+        "validated_at": "2026-01-04T21:22:45.826107"
+      },
+      "completed_at": "2026-01-04T21:22:45.826135",
+      "auto_cleanup_scheduled_at": "2026-01-04T21:22:45.826156",
+      "auto_cleanup_result": {
+        "success": false,
+        "tmux_session_killed": false,
+        "prompt_file_deleted": true,
+        "log_files_archived": true,
+        "verified_no_zombies": false,
+        "errors": [
+          "Skipped tmux kill for agent_backend_investigator-212035-fb570c (kill_tmux=False)",
+          "Found 3 lingering processes for agent backend_investigator-212035-fb570c"
+        ],
+        "archived_files": [
+          "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/archive/backend_investigator-212035-fb570c_stream.jsonl",
+          "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/archive/backend_investigator-212035-fb570c_progress.jsonl",
+          "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/archive/backend_investigator-212035-fb570c_findings.jsonl"
+        ],
+        "zombie_processes": 3,
+        "zombie_process_details": [
+          "albaraa          81738   0.0  0.7 436236608 124608 s014  S+    9:20PM   0:01.91 npm exec @anthropic-ai/claude-code --print --output-format stream-json --verbose --dangerously-skip-permissions --model opus You are a headless Claude agent in an orchestrator system.\\012\\012\ud83e\udd16 AGENT IDENTITY:\\012- Agent ID: backend_investigator-212035-fb570c\\012- Agent Type: backend_investigator\\012- Task ID: TASK-20260104-211955-ab0d431d\\012- Parent Agent: orchestrator\\012- Depth Level: 1\\012- Workspace: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d\\012\\012\ud83d\udcdd YOUR MISSION:\\012Investigate the backend API and MCP server to understand how reviewer agents are identified in the data.\\012\\012SPECIFIC TASKS:\\0121. Check /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/real_mcp_server.py for how reviewer agents are created\\0122. Look at the trigger_agentic_review function to see what makes reviewer agents special\\0123. Check the AGENT_REGISTRY.json structure for reviewer agent entries\\0124. Look at dashboard/backend/ API routes to see what agent data is exposed\\012\\012REPORT:\\012- How reviewer agents are identified in the data (agent_type pattern, phase_index, etc.)\\012- What fields distinguish reviewers from regular agents\\012- Whether the backend already exposes enough info to identify reviewers\\012- Any changes needed to the API to support UI distinction\\012\\012\\012PROJECT CONTEXT (Source: config_files):\\012- Language: Python\\012- Frameworks: FastMCP\\012- Testing: pytest\\012- Package Manager: pip\\012- Project Type: mcp_server\\012- Config Files: pyproject.toml\\012\\012IMPLICATIONS FOR YOUR WORK:\\012- Use snake_case for functions and variables\\012- Follow PEP 8 style guidelines\\012- Check pyproject.toml or requirements.txt for dependencies before importing\\012- Write async functions if the project uses async/await patterns\\012- Follow FastMCP conventions: @mcp.tool decorator for tools\\012- Use .fn attribute when calling MCP tools from within other MCP tools\\012- Add tests in tests/ directory with test_*.py naming\\012- Use pytest fixtures and assertions\\012\\012DO NOT:\\012- Use camelCase (this is Python, not JavaScript)\\012- Import libraries not in requirements.txt/pyproject.toml\\012- Write synchronous code if async patterns are used\\012\\012\\012\\012AGENT PROTOCOL - SYSTEMATIC APPROACH\\012\\012MISSION EXECUTION STEPS:\\0121. UNDERSTAND (30% of time):\\012   - Read relevant code/documentation to understand context\\012   - Identify what exists vs what needs to change\\012   - Check project conventions and patterns\\012   - Map dependencies and constraints\\012\\0122. PLAN & IMPLEMENT (40% of time):\\012   - Break down the task into specific steps\\012   - Consider edge cases and error scenarios\\012   - Implement with proper error handling\\012   - Follow project coding standards\\012\\0123. VERIFY & DOCUMENT (30% of time):\\012   - Test your changes work correctly\\012   - Check for regressions or side effects\\012   - Document findings with file:line citations\\012   - Provide evidence of completion\\012\\012SUCCESS CRITERIA - Definition of 'DONE':\\012Your work is ONLY complete when:\\012- Task requirements fully addressed (not partial)\\012- Changes tested and verified working\\012- Evidence provided (file paths, test results, findings)\\012- No regressions introduced\\012- Work follows project patterns and conventions\\012\\012EVIDENCE REQUIRED FOR COMPLETION:\\012BEFORE reporting status='completed', you MUST provide:\\0121. What you accomplished - specific changes made\\0122. Files modified - list paths with what changed\\0123. Testing performed - show results/output\\0124. Findings documented - use report_agent_finding for discoveries\\0125. Quality check - did you verify it works?\\012\\012ANTI-PATTERNS TO AVOID:\\012- Assuming without reading actual code\\012- Generic findings without specific evidence\\012- Claiming done without testing/verification\\012- Breaking existing functionality\\012- No file:line citations for your findings\\012\\012FORCED SELF-INTERROGATION CHECKLIST:\\012Answer BEFORE claiming done:\\0121. Did I READ the relevant code or assume?\\0122. Can I cite specific files/lines I analyzed or modified?\\0123. Did I TEST my changes work?\\0124. Did I document findings with evidence?\\0125. What could go wrong? Did I handle edge cases?\\0126. Would I accept this work quality from someone else?\\012\\012\\012\\012\\012ORCHESTRATION GUIDANCE (Depth 1/5, Complexity: 1/20):\\012\\012You are may consider to spawn specialized child agents for better implementation quality.\\012\\012RECOMMENDED CHILD SPECIALISTS:\\012- js_specialist\\012- component_specialist\\012- animation_specialist\\012- documentation_specialist\\012- css_specialist\\012- quality_assurance\\012\\012ORCHESTRATION STRATEGY:\\0121. ANALYZE if your task benefits from specialization\\0122. SPAWN 1-2 child agents with focused, specific roles\\0123. COORDINATE their work efficiently\\0124. Each child should handle a distinct domain\\012\\012NAMING CONVENTION: Use clear, descriptive names:\\012   - 'css_responsive_specialist' not just 'css'\\012   - 'api_authentication_handler' not just 'auth'\\012   - 'database_optimization_expert' not just 'db'\\012\\012SUCCESS CRITERIA: Balance specialization with efficiency:\\012   - Spawn specialists only when beneficial\\012   - Coordinate effectively without micro-management\\012   - Deliver comprehensive, integrated results\\012\\012\ud83d\udd17 MCP SELF-REPORTING WITH COORDINATION - You MUST use these MCP functions to report progress:\\012\\0121. PROGRESS UPDATES (every few minutes):\\012```\\012mcp__claude-orchestrator__update_agent_progress\\012Parameters: \\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"backend_investigator-212035-fb570c\"  \\012- status: \"working\" | \"blocked\" | \"completed\" | \"error\"\\012- message: \"Description of current work\"\\012- progress: 0-100 (percentage)\\012\\012RETURNS: Your update confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\0122. REPORT FINDINGS (whenever you discover something important):\\012```\\012mcp__claude-orchestrator__report_agent_finding\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"backend_investigator-212035-fb570c\"\\012- finding_type: \"issue\" | \"solution\" | \"insight\" | \"recommendation\"\\012- severity: \"low\" | \"medium\" | \"high\" | \"critical\"  \\012- message: \"What you discovered\"\\012- data: {\"any\": \"additional info\"}\\012\\012RETURNS: Your finding confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\012\ud83d\udca1 COORDINATION ADVANTAGE: Every time you update progress or report a finding, you'll receive:\\012- Complete status of all other agents working on this task\\012- Their latest progress updates and discoveries\\012- Opportunity to coordinate and avoid duplicate work\\012- Insights to build upon others' findings\\012\\0123. SPAWN CHILD AGENTS (if you need specialized help):\\012```\\012mcp__claude-orchestrator__spawn_opus_child_agent or spawn_sonnet_child_agent\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- parent_agent_id: \"backend_investigator-212035-fb570c\"\\012- child_agent_type: \"investigator\" | \"builder\" | \"fixer\" | etc\\012- child_prompt: \"Specific task for the child agent\"\\012```\\012\\012\ud83d\udea8 CRITICAL PROTOCOL:\\0121. START by calling update_agent_progress with status=\"working\", progress=0\\0122. REGULARLY update progress every few minutes\\0123. REPORT key findings as you discover them\\0124. SPAWN child agents if you need specialized help\\0125. END by calling update_agent_progress with status=\"completed\", progress=100\\012\\012\u26a0\ufe0f REPORTING REQUIREMENTS:\\012- Update progress EVERY 3-5 minutes minimum\\012- Progress must be REALISTIC and match actual work done\\012- Completion requires EVIDENCE: files modified, tests passed, findings documented\\012- If you don't report for 5+ minutes, you'll be flagged as stalled\\012- BEFORE claiming done: perform self-review and list what could be improved\\012\\012\ud83d\udeab DO NOT USE THESE TOOLS (they waste tokens and return nothing useful):\\012- get_agent_output - This is for ORCHESTRATOR monitoring only, not agent coordination\\012- Peer agent logs are NOT accessible to you - use findings/progress instead\\012\\012You are working independently but can coordinate through the MCP orchestrator system.\\012\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\u26a1 MANDATORY COMPLETION STEP - YOUR WORK IS NOT FINISHED UNTIL YOU DO THIS \u26a1\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012Before you stop working, you MUST call:\\012\\012```\\012mcp__claude-orchestrator__update_agent_progress(\\012    task_id=\"TASK-20260104-211955-ab0d431d\",\\012    agent_id=\"backend_investigator-212035-fb570c\",\\012    status=\"completed\",\\012    message=\"<SUMMARY: List what you accomplished and any key findings>\",\\012    progress=100\\012)\\012```\\012\\012IF YOU DO NOT CALL THIS:\\012- The system will think you are still working\\012- The phase CANNOT proceed to review\\012- Other agents will wait indefinitely for you\\012- The orchestrator will be stuck\\012\\012COMPLETE YOUR WORK AND REPORT STATUS!\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012BEGIN YOUR WORK NOW!           ",
+          "albaraa          81739   0.0  0.0 435299808   1168 s014  S+    9:20PM   0:00.00 tee /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/backend_investigator-212035-fb570c_stream.jsonl",
+          "albaraa          81737   0.0  0.0 435308624   2464 s014  Ss+   9:20PM   0:00.01 zsh -c cd '/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP' && npx -y @anthropic-ai/claude-code --print --output-format stream-json --verbose --dangerously-skip-permissions --model opus 'You are a headless Claude agent in an orchestrator system.\\012\\012\ud83e\udd16 AGENT IDENTITY:\\012- Agent ID: backend_investigator-212035-fb570c\\012- Agent Type: backend_investigator\\012- Task ID: TASK-20260104-211955-ab0d431d\\012- Parent Agent: orchestrator\\012- Depth Level: 1\\012- Workspace: /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d\\012\\012\ud83d\udcdd YOUR MISSION:\\012Investigate the backend API and MCP server to understand how reviewer agents are identified in the data.\\012\\012SPECIFIC TASKS:\\0121. Check /Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/real_mcp_server.py for how reviewer agents are created\\0122. Look at the trigger_agentic_review function to see what makes reviewer agents special\\0123. Check the AGENT_REGISTRY.json structure for reviewer agent entries\\0124. Look at dashboard/backend/ API routes to see what agent data is exposed\\012\\012REPORT:\\012- How reviewer agents are identified in the data (agent_type pattern, phase_index, etc.)\\012- What fields distinguish reviewers from regular agents\\012- Whether the backend already exposes enough info to identify reviewers\\012- Any changes needed to the API to support UI distinction\\012\\012\\012PROJECT CONTEXT (Source: config_files):\\012- Language: Python\\012- Frameworks: FastMCP\\012- Testing: pytest\\012- Package Manager: pip\\012- Project Type: mcp_server\\012- Config Files: pyproject.toml\\012\\012IMPLICATIONS FOR YOUR WORK:\\012- Use snake_case for functions and variables\\012- Follow PEP 8 style guidelines\\012- Check pyproject.toml or requirements.txt for dependencies before importing\\012- Write async functions if the project uses async/await patterns\\012- Follow FastMCP conventions: @mcp.tool decorator for tools\\012- Use .fn attribute when calling MCP tools from within other MCP tools\\012- Add tests in tests/ directory with test_*.py naming\\012- Use pytest fixtures and assertions\\012\\012DO NOT:\\012- Use camelCase (this is Python, not JavaScript)\\012- Import libraries not in requirements.txt/pyproject.toml\\012- Write synchronous code if async patterns are used\\012\\012\\012\\012AGENT PROTOCOL - SYSTEMATIC APPROACH\\012\\012MISSION EXECUTION STEPS:\\0121. UNDERSTAND (30% of time):\\012   - Read relevant code/documentation to understand context\\012   - Identify what exists vs what needs to change\\012   - Check project conventions and patterns\\012   - Map dependencies and constraints\\012\\0122. PLAN & IMPLEMENT (40% of time):\\012   - Break down the task into specific steps\\012   - Consider edge cases and error scenarios\\012   - Implement with proper error handling\\012   - Follow project coding standards\\012\\0123. VERIFY & DOCUMENT (30% of time):\\012   - Test your changes work correctly\\012   - Check for regressions or side effects\\012   - Document findings with file:line citations\\012   - Provide evidence of completion\\012\\012SUCCESS CRITERIA - Definition of '\"'\"'DONE'\"'\"':\\012Your work is ONLY complete when:\\012- Task requirements fully addressed (not partial)\\012- Changes tested and verified working\\012- Evidence provided (file paths, test results, findings)\\012- No regressions introduced\\012- Work follows project patterns and conventions\\012\\012EVIDENCE REQUIRED FOR COMPLETION:\\012BEFORE reporting status='\"'\"'completed'\"'\"', you MUST provide:\\0121. What you accomplished - specific changes made\\0122. Files modified - list paths with what changed\\0123. Testing performed - show results/output\\0124. Findings documented - use report_agent_finding for discoveries\\0125. Quality check - did you verify it works?\\012\\012ANTI-PATTERNS TO AVOID:\\012- Assuming without reading actual code\\012- Generic findings without specific evidence\\012- Claiming done without testing/verification\\012- Breaking existing functionality\\012- No file:line citations for your findings\\012\\012FORCED SELF-INTERROGATION CHECKLIST:\\012Answer BEFORE claiming done:\\0121. Did I READ the relevant code or assume?\\0122. Can I cite specific files/lines I analyzed or modified?\\0123. Did I TEST my changes work?\\0124. Did I document findings with evidence?\\0125. What could go wrong? Did I handle edge cases?\\0126. Would I accept this work quality from someone else?\\012\\012\\012\\012\\012ORCHESTRATION GUIDANCE (Depth 1/5, Complexity: 1/20):\\012\\012You are may consider to spawn specialized child agents for better implementation quality.\\012\\012RECOMMENDED CHILD SPECIALISTS:\\012- js_specialist\\012- component_specialist\\012- animation_specialist\\012- documentation_specialist\\012- css_specialist\\012- quality_assurance\\012\\012ORCHESTRATION STRATEGY:\\0121. ANALYZE if your task benefits from specialization\\0122. SPAWN 1-2 child agents with focused, specific roles\\0123. COORDINATE their work efficiently\\0124. Each child should handle a distinct domain\\012\\012NAMING CONVENTION: Use clear, descriptive names:\\012   - '\"'\"'css_responsive_specialist'\"'\"' not just '\"'\"'css'\"'\"'\\012   - '\"'\"'api_authentication_handler'\"'\"' not just '\"'\"'auth'\"'\"'\\012   - '\"'\"'database_optimization_expert'\"'\"' not just '\"'\"'db'\"'\"'\\012\\012SUCCESS CRITERIA: Balance specialization with efficiency:\\012   - Spawn specialists only when beneficial\\012   - Coordinate effectively without micro-management\\012   - Deliver comprehensive, integrated results\\012\\012\ud83d\udd17 MCP SELF-REPORTING WITH COORDINATION - You MUST use these MCP functions to report progress:\\012\\0121. PROGRESS UPDATES (every few minutes):\\012```\\012mcp__claude-orchestrator__update_agent_progress\\012Parameters: \\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"backend_investigator-212035-fb570c\"  \\012- status: \"working\" | \"blocked\" | \"completed\" | \"error\"\\012- message: \"Description of current work\"\\012- progress: 0-100 (percentage)\\012\\012RETURNS: Your update confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\0122. REPORT FINDINGS (whenever you discover something important):\\012```\\012mcp__claude-orchestrator__report_agent_finding\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- agent_id: \"backend_investigator-212035-fb570c\"\\012- finding_type: \"issue\" | \"solution\" | \"insight\" | \"recommendation\"\\012- severity: \"low\" | \"medium\" | \"high\" | \"critical\"  \\012- message: \"What you discovered\"\\012- data: {\"any\": \"additional info\"}\\012\\012RETURNS: Your finding confirmation + comprehensive status of ALL agents for coordination!\\012- coordination_info.agents: Status of all other agents\\012- coordination_info.coordination_data.recent_progress: Latest progress from all agents\\012- coordination_info.coordination_data.recent_findings: Latest discoveries from all agents\\012```\\012\\012\ud83d\udca1 COORDINATION ADVANTAGE: Every time you update progress or report a finding, you'\"'\"'ll receive:\\012- Complete status of all other agents working on this task\\012- Their latest progress updates and discoveries\\012- Opportunity to coordinate and avoid duplicate work\\012- Insights to build upon others'\"'\"' findings\\012\\0123. SPAWN CHILD AGENTS (if you need specialized help):\\012```\\012mcp__claude-orchestrator__spawn_opus_child_agent or spawn_sonnet_child_agent\\012Parameters:\\012- task_id: \"TASK-20260104-211955-ab0d431d\"\\012- parent_agent_id: \"backend_investigator-212035-fb570c\"\\012- child_agent_type: \"investigator\" | \"builder\" | \"fixer\" | etc\\012- child_prompt: \"Specific task for the child agent\"\\012```\\012\\012\ud83d\udea8 CRITICAL PROTOCOL:\\0121. START by calling update_agent_progress with status=\"working\", progress=0\\0122. REGULARLY update progress every few minutes\\0123. REPORT key findings as you discover them\\0124. SPAWN child agents if you need specialized help\\0125. END by calling update_agent_progress with status=\"completed\", progress=100\\012\\012\u26a0\ufe0f REPORTING REQUIREMENTS:\\012- Update progress EVERY 3-5 minutes minimum\\012- Progress must be REALISTIC and match actual work done\\012- Completion requires EVIDENCE: files modified, tests passed, findings documented\\012- If you don'\"'\"'t report for 5+ minutes, you'\"'\"'ll be flagged as stalled\\012- BEFORE claiming done: perform self-review and list what could be improved\\012\\012\ud83d\udeab DO NOT USE THESE TOOLS (they waste tokens and return nothing useful):\\012- get_agent_output - This is for ORCHESTRATOR monitoring only, not agent coordination\\012- Peer agent logs are NOT accessible to you - use findings/progress instead\\012\\012You are working independently but can coordinate through the MCP orchestrator system.\\012\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\u26a1 MANDATORY COMPLETION STEP - YOUR WORK IS NOT FINISHED UNTIL YOU DO THIS \u26a1\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012Before you stop working, you MUST call:\\012\\012```\\012mcp__claude-orchestrator__update_agent_progress(\\012    task_id=\"TASK-20260104-211955-ab0d431d\",\\012    agent_id=\"backend_investigator-212035-fb570c\",\\012    status=\"completed\",\\012    message=\"<SUMMARY: List what you accomplished and any key findings>\",\\012    progress=100\\012)\\012```\\012\\012IF YOU DO NOT CALL THIS:\\012- The system will think you are still working\\012- The phase CANNOT proceed to review\\012- Other agents will wait indefinitely for you\\012- The orchestrator will be stuck\\012\\012COMPLETE YOUR WORK AND REPORT STATUS!\\012\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\\012\\012BEGIN YOUR WORK NOW!\\012' | tee '/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/backend_investigator-212035-fb570c_stream.jsonl'"
+        ]
+      },
+      "auto_cleanup_timestamp": "2026-01-04T21:22:48.331280"
+    },
+    {
+      "id": "reviewer-8e8a0121-1-212254-4b1276",
+      "type": "reviewer-8e8a0121-1",
+      "model": "opus",
+      "tmux_session": "agent_reviewer-8e8a0121-1-212254-4b1276",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": -1,
+      "status": "completed",
+      "started_at": "2026-01-04T21:22:56.906752",
+      "progress": 100,
+      "last_update": "2026-01-04T21:25:06.352080",
+      "prompt": "You are an INDEPENDENT REVIEWER AGENT for phase \"Investigation\" (Task: TASK-20260104-211955-ab0d431d).\n\nTHIS IS AN AUTOMATED REVIEW - The orchestrator CANNOT bypass this review. Your verdict is bindin...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/agent_prompt_reviewer-8e8a0121-1-212254-4b1276.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/reviewer-8e8a0121-1-212254-4b1276_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/progress/reviewer-8e8a0121-1-212254-4b1276_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/findings/reviewer-8e8a0121-1-212254-4b1276_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/deploy_reviewer-8e8a0121-1-212254-4b1276.json"
+      },
+      "completed_at": "2026-01-04T21:25:06.353210",
+      "final_verdict": "approved",
+      "completion_validation": {
+        "confidence": 0.8,
+        "warnings": [
+          "Message lacks evidence keywords - should describe concrete actions taken",
+          "Completed in 129 seconds - consider spending more time on quality"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 14,
+            "progress_entries_count": 5,
+            "findings_count": 0
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 210,
+            "suspicious_phrases_found": [],
+            "evidence_keywords_found": []
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 129.440678,
+            "speed": "fast",
+            "working_updates_count": 4
+          }
+        },
+        "validated_at": "2026-01-04T21:25:06.353185"
+      }
+    },
+    {
+      "id": "reviewer-8e8a0121-2-212256-c2c177",
+      "type": "reviewer-8e8a0121-2",
+      "model": "opus",
+      "tmux_session": "agent_reviewer-8e8a0121-2-212256-c2c177",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": -1,
+      "status": "completed",
+      "started_at": "2026-01-04T21:22:58.944501",
+      "progress": 100,
+      "last_update": "2026-01-04T21:25:11.045462",
+      "prompt": "You are an INDEPENDENT REVIEWER AGENT for phase \"Investigation\" (Task: TASK-20260104-211955-ab0d431d).\n\nTHIS IS AN AUTOMATED REVIEW - The orchestrator CANNOT bypass this review. Your verdict is bindin...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/agent_prompt_reviewer-8e8a0121-2-212256-c2c177.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/reviewer-8e8a0121-2-212256-c2c177_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/progress/reviewer-8e8a0121-2-212256-c2c177_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/findings/reviewer-8e8a0121-2-212256-c2c177_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/deploy_reviewer-8e8a0121-2-212256-c2c177.json"
+      },
+      "completed_at": "2026-01-04T21:25:11.046528",
+      "final_verdict": "approved",
+      "completion_validation": {
+        "confidence": 0.8,
+        "warnings": [
+          "Message lacks evidence keywords - should describe concrete actions taken",
+          "Completed in 132 seconds - consider spending more time on quality"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 11,
+            "progress_entries_count": 5,
+            "findings_count": 0
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 235,
+            "suspicious_phrases_found": [],
+            "evidence_keywords_found": []
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 132.095743,
+            "speed": "fast",
+            "working_updates_count": 4
+          }
+        },
+        "validated_at": "2026-01-04T21:25:11.046503"
+      }
+    },
+    {
+      "id": "reviewer-8e8a0121-3-212258-a13350",
+      "type": "reviewer-8e8a0121-3",
+      "model": "opus",
+      "tmux_session": "agent_reviewer-8e8a0121-3-212258-a13350",
+      "parent": "orchestrator",
+      "depth": 1,
+      "phase_index": -1,
+      "status": "completed",
+      "started_at": "2026-01-04T21:23:00.991457",
+      "progress": 100,
+      "last_update": "2026-01-04T21:25:14.540786",
+      "prompt": "You are an INDEPENDENT REVIEWER AGENT for phase \"Investigation\" (Task: TASK-20260104-211955-ab0d431d).\n\nTHIS IS AN AUTOMATED REVIEW - The orchestrator CANNOT bypass this review. Your verdict is bindin...",
+      "tracked_files": {
+        "prompt_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/agent_prompt_reviewer-8e8a0121-3-212258-a13350.txt",
+        "log_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/reviewer-8e8a0121-3-212258-a13350_stream.jsonl",
+        "progress_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/progress/reviewer-8e8a0121-3-212258-a13350_progress.jsonl",
+        "findings_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/findings/reviewer-8e8a0121-3-212258-a13350_findings.jsonl",
+        "deploy_log": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260104-211955-ab0d431d/logs/deploy_reviewer-8e8a0121-3-212258-a13350.json"
+      },
+      "completed_at": "2026-01-04T21:25:14.541848",
+      "final_verdict": "approved",
+      "completion_validation": {
+        "confidence": 0.9,
+        "warnings": [
+          "Completed in 134 seconds - consider spending more time on quality"
+        ],
+        "blocking_issues": [],
+        "evidence_summary": {
+          "workspace_evidence": {
+            "modified_files_count": 9,
+            "progress_entries_count": 6,
+            "findings_count": 0
+          },
+          "type_specific": {},
+          "message_validation": {
+            "length": 220,
+            "suspicious_phrases_found": [],
+            "evidence_keywords_found": [
+              "verified"
+            ]
+          },
+          "progress_pattern": {
+            "pattern": "normal",
+            "elapsed_seconds": 133.544403,
+            "speed": "fast",
+            "working_updates_count": 5
+          }
+        },
+        "validated_at": "2026-01-04T21:25:14.541821"
+      }
+    }
+  ],
+  "agent_hierarchy": {
+    "orchestrator": [
+      "dashboard_investigator-212033-56be2b",
+      "backend_investigator-212035-fb570c",
+      "reviewer-8e8a0121-1-212254-4b1276",
+      "reviewer-8e8a0121-2-212256-c2c177",
+      "reviewer-8e8a0121-3-212258-a13350"
+    ]
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 5,
+  "active_count": 0,
+  "completed_count": 5,
+  "reviews": [
+    {
+      "review_id": "auto-review-8e8a01219a39",
+      "phase_id": "phase-92601885",
+      "phase_name": "Investigation",
+      "status": "completed",
+      "num_reviewers": 3,
+      "reviewers": [
+        {
+          "agent_id": "reviewer-8e8a0121-1-212254-4b1276",
+          "agent_type": "reviewer-8e8a0121-1",
+          "spawned_at": "2026-01-04T21:22:56.910579",
+          "status": "reviewing"
+        },
+        {
+          "agent_id": "reviewer-8e8a0121-2-212256-c2c177",
+          "agent_type": "reviewer-8e8a0121-2",
+          "spawned_at": "2026-01-04T21:22:58.949045",
+          "status": "reviewing"
+        },
+        {
+          "agent_id": "reviewer-8e8a0121-3-212258-a13350",
+          "agent_type": "reviewer-8e8a0121-3",
+          "spawned_at": "2026-01-04T21:23:00.997482",
+          "status": "reviewing"
+        }
+      ],
+      "verdicts": [
+        {
+          "verdict": "approved",
+          "findings": [
+            {
+              "type": "praise",
+              "severity": "low",
+              "message": "Dashboard investigator thoroughly analyzed frontend types and components, correctly identified agent_type and phase_index fields as key identifiers"
+            },
+            {
+              "type": "praise",
+              "severity": "low",
+              "message": "Backend investigator properly traced reviewer agent creation in real_mcp_server.py, confirmed reviewer naming pattern 'reviewer-{id}-{num}' and phase_index=-1"
+            },
+            {
+              "type": "praise",
+              "severity": "medium",
+              "message": "Both agents provided specific file:line citations with evidence. Dashboard: types/index.ts:6-7,19. Backend: real_mcp_server.py:4963,4972,5179"
+            },
+            {
+              "type": "suggestion",
+              "severity": "low",
+              "message": "Investigation complete with actionable recommendations: use agent.type?.startsWith('reviewer-') || agent.phase_index === -1 for detection"
+            }
+          ],
+          "reviewer_notes": "Investigation phase successfully completed. Both agents delivered comprehensive findings with specific code locations, identified the key fields (agent_type with 'reviewer-' prefix and phase_index=-1) that distinguish reviewer agents from regular phase work agents, and provided actionable implementation guidance for the UI changes. All success criteria met.",
+          "submitted_at": "2026-01-04T21:24:59.846633"
+        },
+        {
+          "verdict": "approved",
+          "findings": [
+            {
+              "type": "praise",
+              "severity": "low",
+              "message": "Dashboard investigator correctly identified phase_index=-1 and agent_type pattern for reviewer identification"
+            },
+            {
+              "type": "praise",
+              "severity": "low",
+              "message": "Backend investigator verified API already exposes all necessary data - no backend changes needed"
+            },
+            {
+              "type": "suggestion",
+              "severity": "medium",
+              "message": "Consider documenting the reviewer identification pattern in code comments for future developers"
+            },
+            {
+              "type": "praise",
+              "severity": "medium",
+              "message": "Both agents provided specific file locations and line numbers for implementation"
+            }
+          ],
+          "reviewer_notes": "Investigation phase successfully completed. Key deliverables verified:\n1. Reviewer agents are identified by phase_index=-1 (real_mcp_server.py:4972)\n2. Reviewer agents have type pattern 'reviewer-{prefix}-{number}' (real_mcp_server.py:4963)\n3. Frontend components identified: TaskDetail.tsx:244-289, Dashboard.tsx, AgentTree.tsx\n4. Backend API already exposes necessary fields through agent.type and agent.phase_index\n5. Clear visual distinction recommendations provided (purple theme, badge, icon, grouping)",
+          "submitted_at": "2026-01-04T21:25:02.405286"
+        },
+        {
+          "verdict": "approved",
+          "findings": [
+            {
+              "type": "praise",
+              "severity": "medium",
+              "message": "Dashboard investigator correctly identified key fields (agent_type and phase_index) in the frontend types that can distinguish reviewer agents"
+            },
+            {
+              "type": "praise",
+              "severity": "high",
+              "message": "Backend investigator accurately found the reviewer naming pattern (reviewer-{prefix}-{number}) and confirmed phase_index=-1 for reviewers in real_mcp_server.py"
+            },
+            {
+              "type": "praise",
+              "severity": "medium",
+              "message": "Both agents provided specific line numbers and file references for verification - real_mcp_server.py:4963,4972 and types/index.ts:6,19"
+            },
+            {
+              "type": "suggestion",
+              "severity": "low",
+              "message": "Agents could have used the formal findings reporting mechanism instead of just logging to archived files, but the information was captured adequately"
+            }
+          ],
+          "reviewer_notes": "Investigation phase successfully completed. Both agents identified the correct mechanisms for distinguishing reviewer agents: phase_index=-1 and agent_type pattern 'reviewer-*'. The dashboard investigator found the frontend type definitions and suggested visual distinctions. The backend investigator confirmed the backend already exposes necessary data. All claims were verified against actual code.",
+          "submitted_at": "2026-01-04T21:25:07.360999"
+        }
+      ],
+      "created_at": "2026-01-04T21:22:54.873902",
+      "review_focus": [
+        "completeness",
+        "correctness",
+        "quality"
+      ],
+      "auto_triggered": true,
+      "trigger_reason": "All 2 phase agents finished (2 completed, 0 failed)",
+      "final_verdict": "approved",
+      "completed_at": "2026-01-04T21:25:07.361023"
+    }
+  ],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-04T21:19:55.413167",
+    "violations": 0
+  },
+  "_pending_auto_review": {
+    "phase_index": 0,
+    "phase_name": "Investigation",
+    "task_id": "TASK-20260104-211955-ab0d431d",
+    "completed_agents": 2,
+    "failed_agents": 0
+  }
+}

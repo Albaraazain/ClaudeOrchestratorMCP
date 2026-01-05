@@ -94,7 +94,7 @@ class TaskSummary(BaseModel):
     task_id: str
     description: str
     created_at: datetime
-    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED"]
+    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED", "ARCHIVED"]
     current_phase: Optional[PhaseData] = None
     agent_count: int
     active_agents: int
@@ -109,7 +109,7 @@ class TaskDetail(BaseModel):
     workspace: str
     workspace_base: str
     client_cwd: str
-    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED"]
+    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED", "ARCHIVED"]
     priority: Literal["P0", "P1", "P2", "P3", "P4"]
     phases: List[PhaseData]
     current_phase_index: int

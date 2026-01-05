@@ -80,7 +80,7 @@ export const getFindingIcon = (type: string): string => {
 export const getLogTypeColor = (type: string): string => {
   const typeMap: Record<string, string> = {
     assistant: 'text-blue-400',
-    tool_call: 'text-purple-400',
+    tool_call: 'text-sky-400',
     tool_result: 'text-green-400',
     error: 'text-red-400',
     system: 'text-gray-400',

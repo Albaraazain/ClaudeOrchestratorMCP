@@ -1,3 +1,22 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Light theme base styles */
+@layer base {
+  html {
+    background-color: #ffffff;
+    color: #09090b;
+  }
+
+  body {
+    background-color: #ffffff;
+    color: #09090b;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+/* Ensure text colors are applied globally */
+* {
+  color: inherit;
+}

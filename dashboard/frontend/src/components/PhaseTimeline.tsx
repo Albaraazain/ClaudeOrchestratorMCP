@@ -79,7 +79,7 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({
         statusClasses = 'bg-orange-50 border-orange-500';
         break;
       case 'ESCALATED':
-        statusClasses = 'bg-purple-50 border-purple-500';
+        statusClasses = 'bg-sky-50 border-sky-500';
         break;
       default:
         statusClasses = 'bg-gray-50 border-gray-300';
@@ -138,7 +138,7 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({
                 phase.status === 'AWAITING_REVIEW' && 'bg-yellow-100 text-yellow-700',
                 phase.status === 'UNDER_REVIEW' && 'bg-yellow-100 text-yellow-700',
                 phase.status === 'REVISING' && 'bg-orange-100 text-orange-700',
-                phase.status === 'ESCALATED' && 'bg-purple-100 text-purple-700'
+                phase.status === 'ESCALATED' && 'bg-sky-100 text-sky-700'
               )}>
                 {phase.status}
               </div>
