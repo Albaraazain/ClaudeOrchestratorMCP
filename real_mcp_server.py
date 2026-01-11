@@ -5575,7 +5575,7 @@ def _should_spawn_tester(deliverables: List[str], description: str) -> bool:
 
     Previously determined if TESTER should spawn based on UI keywords.
     Now TESTER always spawns because every phase needs testing:
-    - UI phases → browser-use tests
+    - UI phases → chrome-devtools MCP tests
     - API phases → curl tests
     - Backend phases → integration tests
     - Infrastructure phases → health checks
@@ -5596,12 +5596,12 @@ def _spawn_tester_agent(
     description: str
 ) -> Optional[str]:
     """
-    Spawn a TESTER agent to run browser-use tests for the phase.
+    Spawn a TESTER agent to run UI tests for the phase using chrome-devtools MCP.
 
     The tester will:
-    1. Verify prerequisites (Vite running on :5173)
+    1. Discover correct port via lsof
     2. Get phase handover to understand deliverables
-    3. Create browser-use test script
+    3. Use chrome-devtools MCP for browser automation
     4. Run tests
     5. Submit verdict via submit_review_verdict
 
