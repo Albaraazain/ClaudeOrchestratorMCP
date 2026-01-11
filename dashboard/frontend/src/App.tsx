@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import TaskDetail from './pages/TaskDetail';
+import TaskBoard from './pages/TaskBoard';
 import Dashboard from './pages/Dashboard';
 import { AgentDetail } from './pages/AgentDetail';
 import Layout from './components/Layout';
@@ -16,6 +17,9 @@ function App() {
 
           {/* Task Detail Page */}
           <Route path="/tasks/:taskId" element={<TaskDetail />} />
+
+          {/* Task Board View */}
+          <Route path="/tasks/:taskId/board" element={<TaskBoard />} />
 
           {/* Agent Detail Page */}
           <Route path="/tasks/:taskId/agents/:agentId" element={<AgentDetail />} />

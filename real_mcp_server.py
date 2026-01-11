@@ -221,6 +221,119 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# PEER CONTEXT HELPER (Auto-included in progress/finding responses)
+# ============================================================================
+
+def _get_peer_context(workspace: str, exclude_agent_id: str, max_progress: int = 3, max_findings: int = 3) -> Dict[str, Any]:
+    """
+    Fetch latest progress updates and findings from OTHER agents.
+
+    This is automatically included in update_agent_progress and report_agent_finding
+    responses so agents stay aware of peer activity without explicit get_task_findings calls.
+
+    Args:
+        workspace: Task workspace path
+        exclude_agent_id: The calling agent's ID (to exclude from results)
+        max_progress: Max number of peer progress updates to return
+        max_findings: Max number of peer findings to return
+
+    Returns:
+        Dict with peer_progress and peer_findings lists
+    """
+    peer_progress = []
+    peer_findings = []
+
+    # Collect progress from other agents
+    progress_dir = f"{workspace}/progress"
+    if os.path.exists(progress_dir):
+        all_progress = []
+        for file in os.listdir(progress_dir):
+            if not file.endswith('_progress.jsonl'):
+                continue
+            file_agent_id = file.replace('_progress.jsonl', '')
+            if file_agent_id == exclude_agent_id:
+                continue  # Skip calling agent's own progress
+            try:
+                with open(f"{progress_dir}/{file}", 'r') as f:
+                    lines = f.readlines()
+                    # Get last entry from this agent (most recent)
+                    for line in reversed(lines):
+                        line = line.strip()
+                        if line:
+                            try:
+                                entry = json.loads(line)
+                                all_progress.append(entry)
+                                break  # Only take most recent per agent
+                            except json.JSONDecodeError:
+                                continue
+            except Exception:
+                continue
+
+        # Sort by timestamp (newest first) and take top N
+        all_progress.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        peer_progress = [
+            {
+                "agent": p.get("agent_id", "unknown"),
+                "status": p.get("status", "unknown"),
+                "message": p.get("message", "")[:100],  # Truncate long messages
+                "progress": p.get("progress", 0),
+                "time": p.get("timestamp", "")[-8:]  # Just time portion HH:MM:SS
+            }
+            for p in all_progress[:max_progress]
+        ]
+
+    # Collect findings from other agents
+    findings_dir = f"{workspace}/findings"
+    archive_dir = f"{workspace}/archive"
+
+    findings_dirs = []
+    if os.path.exists(findings_dir):
+        findings_dirs.append(findings_dir)
+    if os.path.exists(archive_dir):
+        findings_dirs.append(archive_dir)
+
+    all_findings = []
+    for search_dir in findings_dirs:
+        for file in os.listdir(search_dir):
+            if not file.endswith('_findings.jsonl'):
+                continue
+            file_agent_id = file.replace('_findings.jsonl', '')
+            if file_agent_id == exclude_agent_id:
+                continue  # Skip calling agent's own findings
+            try:
+                with open(f"{search_dir}/{file}", 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                entry = json.loads(line)
+                                all_findings.append(entry)
+                            except json.JSONDecodeError:
+                                continue
+            except Exception:
+                continue
+
+    # Sort by timestamp (newest first) and take top N
+    all_findings.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    peer_findings = [
+        {
+            "agent": f.get("agent_id", "unknown"),
+            "type": f.get("finding_type", "unknown"),
+            "severity": f.get("severity", "unknown"),
+            "message": f.get("message", "")[:150],  # Truncate long messages
+            "time": f.get("timestamp", "")[-8:]  # Just time portion HH:MM:SS
+        }
+        for f in all_findings[:max_findings]
+    ]
+
+    return {
+        "peer_progress": peer_progress,
+        "peer_findings": peer_findings,
+        "note": "Latest updates from other agents. Use get_task_findings for full history."
+    }
+
+
+# ============================================================================
 @mcp.tool
 def create_real_task(
     description: str,
@@ -804,10 +917,12 @@ def deploy_claude_tmux_agent(
                     "error": f"Too many active agents ({registry['active_count']}/{registry['max_concurrent']})"
                 }
 
-            if registry['total_spawned'] >= registry['max_agents']:
+            # Check active + pending agents, not total_spawned (allows reusing slots after completion)
+            current_active = registry.get('active_count', 0)
+            if current_active >= registry['max_agents']:
                 return {
                     "success": False,
-                    "error": f"Max agents reached ({registry['total_spawned']}/{registry['max_agents']})"
+                    "error": f"Max active agents reached ({current_active}/{registry['max_agents']})"
                 }
 
             # Check for duplicate agents (deduplication)
@@ -1093,8 +1208,18 @@ BEGIN YOUR WORK NOW!
 
         # Escape the prompt for shell and pass as argument (not stdin redirection)
         escaped_prompt = agent_prompt.replace("'", "'\"'\"'")
-        # Add tee pipe to capture Claude stream-json output to persistent log
-        claude_command = f"cd '{calling_project_dir}' && {claude_executable} {claude_flags} '{escaped_prompt}' | tee '{log_file}'"
+
+        # Completion notifier script - called immediately when Claude exits
+        # This ensures registry is updated the moment the agent finishes
+        notifier_script = os.path.join(os.path.dirname(__file__), 'orchestrator', 'completion_notifier.py')
+
+        # Build command chain: Claude runs, then notifier triggers on exit
+        # The notifier reads the stream log and updates registry immediately
+        claude_command = (
+            f"cd '{calling_project_dir}' && "
+            f"{claude_executable} {claude_flags} '{escaped_prompt}' | tee '{log_file}'; "
+            f"python3 '{notifier_script}' '{task_id}' '{agent_id}' '{workspace}' '{log_file}'"
+        )
         
         # Create the session in the calling project directory
         session_result = create_tmux_session(
@@ -1375,20 +1500,73 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
 
     try:
         with LockedRegistryFile(registry_path) as (registry, f):
-            # Update agent statuses based on tmux sessions
+            # Update agent statuses - check STREAM LOGS FIRST (most authoritative), then tmux
             for agent in registry['agents']:
                 agent_status = agent.get('status', '')
-                # Check if agent is in an active status AND has a tmux session
-                if agent_status in active_statuses_to_check and 'tmux_session' in agent:
-                    # Check if tmux session still exists
+                agent_id = agent.get('id', '')
+
+                # Skip if already in terminal state
+                if agent_status not in active_statuses_to_check:
+                    continue
+
+                # FIRST: Check stream log for completion marker (most reliable)
+                # Claude writes {"type":"result",...} when it finishes
+                stream_log = f"{workspace}/logs/{agent_id}_stream.jsonl"
+                stream_completed = False
+
+                if os.path.exists(stream_log):
+                    try:
+                        # Read last line efficiently
+                        with open(stream_log, 'rb') as sf:
+                            sf.seek(0, 2)  # End of file
+                            file_size = sf.tell()
+                            if file_size > 0:
+                                # Read last 4KB to find last line
+                                read_size = min(4096, file_size)
+                                sf.seek(-read_size, 2)
+                                last_chunk = sf.read().decode('utf-8', errors='ignore')
+                                lines = [l.strip() for l in last_chunk.split('\n') if l.strip()]
+                                if lines:
+                                    try:
+                                        last_entry = json.loads(lines[-1])
+                                        if last_entry.get('type') == 'result':
+                                            # Stream log shows completion!
+                                            is_error = last_entry.get('is_error', False)
+                                            result_msg = last_entry.get('result', '')[:200]
+
+                                            if is_error:
+                                                agent['status'] = 'failed'
+                                                agent['failed_at'] = datetime.now().isoformat()
+                                                agent['failure_reason'] = f'Stream log error: {result_msg}'
+                                                registry['active_count'] = max(0, registry['active_count'] - 1)
+                                                registry['failed_count'] = registry.get('failed_count', 0) + 1
+                                            else:
+                                                agent['status'] = 'completed'
+                                                agent['completed_at'] = datetime.now().isoformat()
+                                                agent['progress'] = 100
+                                                registry['active_count'] = max(0, registry['active_count'] - 1)
+                                                registry['completed_count'] = registry.get('completed_count', 0) + 1
+
+                                            agent['completion_reason'] = 'stream_log_result_marker'
+                                            agent['stream_result'] = result_msg
+                                            agents_completed.append(agent_id)
+                                            stream_completed = True
+                                            logger.info(f"Detected agent {agent_id} completed via stream log (is_error={is_error}, was {agent_status})")
+                                    except json.JSONDecodeError:
+                                        pass
+                    except Exception as e:
+                        logger.debug(f"Error reading stream log for {agent_id}: {e}")
+
+                # SECOND: Check tmux session (fallback if stream log check didn't find result)
+                if not stream_completed and 'tmux_session' in agent:
                     if not check_tmux_session_exists(agent['tmux_session']):
                         agent['status'] = 'completed'
                         agent['completed_at'] = datetime.now().isoformat()
                         agent['completion_reason'] = 'tmux_session_terminated'
                         registry['active_count'] = max(0, registry['active_count'] - 1)
                         registry['completed_count'] = registry.get('completed_count', 0) + 1
-                        agents_completed.append(agent['id'])
-                        logger.info(f"Detected agent {agent['id']} completed (tmux session terminated, was {agent_status})")
+                        agents_completed.append(agent_id)
+                        logger.info(f"Detected agent {agent_id} completed (tmux session terminated, was {agent_status})")
 
             # Write back atomically while still holding lock
             f.seek(0)
@@ -3136,16 +3314,20 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
     """
     Update agent progress - called by agents themselves to self-report.
     Returns comprehensive status of all agents for coordination.
-    
+
     Args:
         task_id: Task ID
-        agent_id: Agent ID reporting progress  
+        agent_id: Agent ID reporting progress
         status: Current status (working/blocked/completed/etc)
         message: Status message describing current work
         progress: Progress percentage (0-100)
-    
+
     Returns:
         Update result with comprehensive task status for coordination
+        Includes peer_context with:
+        - peer_progress: Latest 3 progress updates from OTHER agents
+        - peer_findings: Latest 3 findings from OTHER agents
+        This keeps you aware of what peers are doing without needing to call get_task_findings.
     """
     # Find the task workspace
     workspace = find_task_workspace(task_id)
@@ -3497,8 +3679,14 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
         except Exception as e:
             logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewers: {e}")
 
-    # LEAN RESPONSE: Only return own update + guidance to fetch peer info explicitly
-    # This prevents O(n²) context bloat from returning all peer data on every call
+    # Include peer context so agents stay aware without explicit get_task_findings calls
+    # Returns latest 3 progress updates + 3 findings from OTHER agents (not O(n²) bloat)
+    try:
+        peer_context = _get_peer_context(workspace, exclude_agent_id=agent_id)
+    except Exception as e:
+        logger.warning(f"Failed to get peer context: {e}")
+        peer_context = {"peer_progress": [], "peer_findings": [], "note": "Error fetching peer context"}
+
     response = {
         "success": True,
         "own_update": {
@@ -3508,15 +3696,8 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
             "message": message,
             "timestamp": progress_entry["timestamp"]
         },
-        "coordination_guidance": {
-            "message": "To see what other agents are working on and avoid duplicate work, call get_task_findings",
-            "tool": "get_task_findings",
-            "parameters": {
-                "task_id": task_id,
-                "summary_only": True
-            },
-            "tip": "Use 'since' parameter with a timestamp to get only NEW findings since your last check"
-        }
+        "peer_context": peer_context,
+        "coordination_tip": "Peer context shows latest 3 updates from other agents. Use get_task_findings for full history."
     }
 
     # Add completion reminder if not yet completed
@@ -3535,22 +3716,26 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
 
     return response
 
-@mcp.tool  
+@mcp.tool
 def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severity: str, message: str, data: dict = None) -> Dict[str, Any]:
     """
     Report a finding/discovery - called by agents to share discoveries.
     Returns comprehensive status of all agents for coordination.
-    
+
     Args:
         task_id: Task ID
         agent_id: Agent ID reporting finding
         finding_type: Type of finding (issue/solution/insight/etc)
-        severity: Severity level (low/medium/high/critical)  
+        severity: Severity level (low/medium/high/critical)
         message: Finding description
         data: Additional finding data
-    
+
     Returns:
         Report result with comprehensive task status for coordination
+        Includes peer_context with:
+        - peer_progress: Latest 3 progress updates from OTHER agents
+        - peer_findings: Latest 3 findings from OTHER agents
+        This keeps you aware of what peers are doing without needing to call get_task_findings.
     """
     if data is None:
         data = {}
@@ -3594,8 +3779,14 @@ def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severit
     except Exception as e:
         logger.warning(f"Failed to record finding in state_db: {e}")
 
-    # LEAN RESPONSE: Only return own finding + guidance to fetch peer info explicitly
-    # This prevents O(n²) context bloat from returning all peer data on every call
+    # Include peer context so agents stay aware without explicit get_task_findings calls
+    # Returns latest 3 progress updates + 3 findings from OTHER agents
+    try:
+        peer_context = _get_peer_context(workspace, exclude_agent_id=agent_id)
+    except Exception as e:
+        logger.warning(f"Failed to get peer context: {e}")
+        peer_context = {"peer_progress": [], "peer_findings": [], "note": "Error fetching peer context"}
+
     return {
         "success": True,
         "own_finding": {
@@ -3606,15 +3797,8 @@ def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severit
             "timestamp": finding_entry["timestamp"],
             "data": data
         },
-        "coordination_guidance": {
-            "message": "To see findings from other agents and coordinate effectively, call get_task_findings",
-            "tool": "get_task_findings",
-            "parameters": {
-                "task_id": task_id,
-                "summary_only": True
-            },
-            "tip": "Use 'since' parameter with a timestamp to get only NEW findings since your last check"
-        },
+        "peer_context": peer_context,
+        "coordination_tip": "Peer context shows latest 3 updates from other agents. Use get_task_findings for full history.",
         "important_reminder": (
             "CRITICAL: When you finish your work, you MUST call update_agent_progress with status='completed'. "
             "If you don't, the phase cannot advance and other agents will be blocked waiting for you. "
@@ -4925,13 +5109,18 @@ def _auto_spawn_phase_reviewers(
     completed_agents: int,
     failed_agents: int,
     workspace: str,
-    num_reviewers: int = 3
+    num_reviewers: int = 2
 ) -> Dict[str, Any]:
     """
-    INTERNAL: Auto-spawn reviewer agents when a phase completes.
+    INTERNAL: Auto-spawn reviewer agents + 1 critique agent when a phase completes.
 
     This is called automatically by update_agent_progress when all phase agents finish.
-    It creates a review record and spawns reviewer agents without orchestrator involvement.
+    It creates a review record and spawns:
+    - 2 Sonnet REVIEWER agents (submit verdicts - approve/reject/needs_revision)
+    - 1 Sonnet CRITIQUE agent (senior dev perspective, no verdict, just observations)
+
+    The critique agent provides birds-eye view feedback but doesn't affect phase approval.
+    Only reviewer verdicts count for pass/fail decisions.
 
     Args:
         task_id: Task ID
@@ -4940,10 +5129,10 @@ def _auto_spawn_phase_reviewers(
         completed_agents: Number of agents that completed successfully
         failed_agents: Number of agents that failed
         workspace: Task workspace path
-        num_reviewers: Number of reviewer agents to spawn (default 3)
+        num_reviewers: Number of reviewer agents to spawn (default 2, plus 1 critique)
 
     Returns:
-        Dict with review_id, spawned agents, and status
+        Dict with review_id, spawned agents, critique agent, and status
     """
     registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
 
@@ -4962,18 +5151,24 @@ def _auto_spawn_phase_reviewers(
         if current_phase.get('status') != 'AWAITING_REVIEW':
             return {"success": False, "error": f"Phase not awaiting review: {current_phase.get('status')}"}
 
-        # Create review record
+        # Create review record (2 reviewers + 1 critique + optional tester)
         review_record = {
             "review_id": review_id,
             "phase_id": current_phase.get('id', f"phase-{phase_index}"),
             "phase_name": phase_name,
             "status": "in_progress",
-            "num_reviewers": num_reviewers,
+            "num_reviewers": num_reviewers,  # Only counts verdict-submitting reviewers (2, or 3 with tester)
             "reviewers": [],
             "verdicts": [],
+            "has_critique": True,  # This review includes a critique agent
+            "critique_agent_id": None,  # Set when critique agent is spawned
+            "critique_submitted": False,
+            "critique": None,  # Will hold critique observations when submitted
+            "has_tester": False,  # Set to True when tester spawns for UI testing
+            "tester_agent_id": None,  # Set to tester agent_id when spawned
             "created_at": datetime.now().isoformat(),
             "review_focus": review_focus,
-            "auto_triggered": True,  # Mark as auto-triggered
+            "auto_triggered": True,
             "trigger_reason": f"All {completed_agents + failed_agents} phase agents finished ({completed_agents} completed, {failed_agents} failed)"
         }
 
@@ -5140,25 +5335,37 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Spawn reviewer agents
+    # Spawn reviewer agents (Sonnet for speed/cost - reviews are formulaic)
     spawned_agents = []
+    review_prefix = review_id.split('-')[-1][:8]  # e.g., "auto-review-abc123..." -> "abc123"
+
+    # DEBUG: Log key variables before reviewer spawn loop
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: === REVIEWER SPAWN DEBUG ===")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: task_id={task_id}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: review_id={review_id}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: review_prefix={review_prefix}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: num_reviewers={num_reviewers}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: workspace={workspace}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: registry_path={registry_path}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: review_prompt length={len(review_prompt)}")
+
     for i in range(num_reviewers):
         # CRITICAL FIX (v2): Agent types must be unique per-REVIEW, not just per-phase
-        # The find_existing_agent check blocks spawning if same agent_type exists with status 'working'
-        # When a phase needs re-review, old reviewers may still have status 'working' (before the status fix)
         # Include review_id prefix to guarantee uniqueness across multiple reviews of the same phase
-        review_prefix = review_id.split('-')[-1][:8]  # e.g., "auto-review-abc123..." -> "abc123"
         agent_type = f"reviewer-{review_prefix}-{i+1}"
+        logger.info(f"AUTO-PHASE-ENFORCEMENT: Attempting to spawn reviewer {i+1}/{num_reviewers}: agent_type={agent_type}")
         try:
-            # Use the internal deployment function with a special phase_index (-1 = reviewer)
-            # Reviewers don't belong to any phase - they review phases
+            # Use Sonnet for reviewers (faster, cheaper, sufficient for structured review tasks)
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Calling deploy_claude_tmux_agent for {agent_type}...")
             result = deploy_claude_tmux_agent(
                 task_id=task_id,
                 agent_type=agent_type,
                 prompt=review_prompt,
                 parent="orchestrator",
-                phase_index=-1  # -1 indicates reviewer agent (not part of any phase)
+                phase_index=-1,  # -1 indicates reviewer agent (not part of any phase)
+                model="claude-sonnet-4-5"  # Sonnet for reviewers
             )
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: deploy_claude_tmux_agent returned: success={result.get('success')}, error={result.get('error', 'N/A')}")
             if result.get('success'):
                 agent_id = result.get('agent_id')
                 spawned_agents.append(agent_id)
@@ -5170,6 +5377,7 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                             rev['reviewers'].append({
                                 "agent_id": agent_id,
                                 "agent_type": agent_type,
+                                "role": "reviewer",  # Distinguish from critique
                                 "spawned_at": datetime.now().isoformat(),
                                 "status": "reviewing"
                             })
@@ -5178,12 +5386,173 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                     json.dump(reg, f2, indent=2)
                     f2.truncate()
 
-                logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned reviewer {agent_id}")
+                logger.info(f"AUTO-PHASE-ENFORCEMENT: Successfully spawned Sonnet reviewer {agent_id}")
             else:
-                # CRITICAL: Log when deployment fails (was silently ignored before, causing 0-reviewer mystery)
                 logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewer {i+1}: {result.get('error', 'Unknown error')}")
+                logger.error(f"AUTO-PHASE-ENFORCEMENT: Full result: {result}")
         except Exception as e:
-            logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewer {i+1}: {e}")
+            logger.error(f"AUTO-PHASE-ENFORCEMENT: Exception spawning reviewer {i+1}: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"AUTO-PHASE-ENFORCEMENT: Traceback: {traceback.format_exc()}")
+
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: Reviewer spawn loop complete. Spawned: {len(spawned_agents)} agents")
+
+    # Build critique prompt (different from reviewer - senior dev birds-eye view)
+    critique_prompt = f"""You are a SENIOR DEVELOPER CRITIQUE AGENT for phase "{phase_name}" (Task: {task_id}).
+
+YOUR ROLE IS DIFFERENT FROM REVIEWERS:
+- You do NOT submit a verdict (approve/reject)
+- You provide senior developer perspective and observations
+- Your feedback informs the orchestrator but doesn't block progress
+- Think like a tech lead doing a high-level code review
+
+PHASE SUMMARY:
+- Phase: {phase_name} (index {phase_index})
+- Description: {phase_description if phase_description else 'Not provided'}
+- Agents completed: {completed_agents}
+- Agents failed: {failed_agents}
+{deliverables_section}
+{out_of_scope_section}
+YOUR MISSION: Provide birds-eye view observations, not pass/fail judgment.
+
+STEP 1 - GET AGENT FINDINGS:
+```
+mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={phase_index})
+```
+
+STEP 2 - GET TASK CONTEXT (if needed):
+```
+mcp__claude-orchestrator__get_real_task_status(task_id="{task_id}")
+```
+
+STEP 3 - EXAMINE CODE/DELIVERABLES:
+- Use Read tool to check actual files
+- Look for architectural patterns
+- Check for technical debt
+- Workspace: {workspace}
+
+WHAT TO LOOK FOR (senior dev perspective):
+1. ARCHITECTURAL: Is the approach sound? Any red flags?
+2. TECHNICAL DEBT: Are there shortcuts that will cause problems later?
+3. MAINTAINABILITY: Will this be easy to maintain/extend?
+4. BEST PRACTICES: Are coding standards followed?
+5. SUGGESTIONS: What could be improved (even if not blocking)?
+
+SUBMIT YOUR CRITIQUE (NOT a verdict):
+```
+mcp__claude-orchestrator__submit_critique(
+    task_id="{task_id}",
+    review_id="{review_id}",
+    observations=[
+        {{"type": "architectural|technical_debt|suggestion|concern|praise", "priority": "high|medium|low", "message": "...", "scope": "current_phase|future_phases|overall"}}
+    ],
+    summary="High-level assessment from senior dev perspective",
+    recommendations=["Optional list of recommendations for orchestrator"]
+)
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+⚡ MANDATORY: YOU MUST SUBMIT YOUR CRITIQUE - YOUR JOB IS NOT COMPLETE WITHOUT IT ⚡
+═══════════════════════════════════════════════════════════════════════════════
+
+REMEMBER: You are providing observations and advice, NOT a pass/fail verdict.
+The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
+"""
+
+    # Spawn critique agent (Sonnet)
+    critique_agent_id = None
+    try:
+        critique_agent_type = f"critique-{review_prefix}"
+        result = deploy_claude_tmux_agent(
+            task_id=task_id,
+            agent_type=critique_agent_type,
+            prompt=critique_prompt,
+            parent="orchestrator",
+            phase_index=-1,  # -1 indicates review-related agent
+            model="claude-sonnet-4-5"  # Sonnet for critique
+        )
+        if result.get('success'):
+            critique_agent_id = result.get('agent_id')
+
+            # Update review record with critique agent
+            with LockedRegistryFile(registry_path) as (reg, f2):
+                for rev in reg.get('reviews', []):
+                    if rev.get('review_id') == review_id:
+                        rev['critique_agent_id'] = critique_agent_id
+                        break
+                f2.seek(0)
+                json.dump(reg, f2, indent=2)
+                f2.truncate()
+
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned Sonnet critique agent {critique_agent_id}")
+        else:
+            logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn critique: {result.get('error', 'Unknown error')}")
+    except Exception as e:
+        logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn critique: {e}")
+
+    # ALWAYS spawn TESTER agent for all phases (UI + non-UI)
+    # Every phase needs testing - browser tests for UI, curl/integration tests for APIs, etc.
+    tester_agent_id = None
+    # Write debug to file since stderr may not be visible
+    debug_file = workspace + "/tester_spawn_debug.log"
+    with open(debug_file, "a") as df:
+        df.write(f"\n=== TESTER SPAWN DEBUG @ {datetime.now().isoformat()} ===\n")
+        df.write(f"task_id={task_id}, phase_index={phase_index}, phase_name={phase_name}\n")
+        df.write(f"review_id={review_id}, workspace={workspace}\n")
+        df.write(f"deliverables={phase_deliverables}\n")
+        df.write(f"description={phase_description[:100] if phase_description else 'None'}\n")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: === TESTER SPAWN DEBUG ===")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: task_id={task_id}, phase_index={phase_index}, phase_name={phase_name}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: review_id={review_id}, workspace={workspace}")
+    logger.info(f"AUTO-PHASE-ENFORCEMENT: deliverables={phase_deliverables}, description={phase_description[:100] if phase_description else 'None'}")
+    try:
+        with open(debug_file, "a") as df:
+            df.write(f"Calling _spawn_tester_agent...\n")
+        logger.info(f"AUTO-PHASE-ENFORCEMENT: Calling _spawn_tester_agent...")
+        tester_agent_id = _spawn_tester_agent(
+            task_id=task_id,
+            phase_index=phase_index,
+            phase_name=phase_name,
+            review_id=review_id,
+            workspace=workspace,
+            deliverables=phase_deliverables,
+            description=phase_description
+        )
+        with open(debug_file, "a") as df:
+            df.write(f"_spawn_tester_agent returned: {tester_agent_id}\n")
+        logger.info(f"AUTO-PHASE-ENFORCEMENT: _spawn_tester_agent returned: {tester_agent_id}")
+
+        if tester_agent_id:
+            # Update review record with tester agent
+            with LockedRegistryFile(registry_path) as (reg, f3):
+                for rev in reg.get('reviews', []):
+                    if rev.get('review_id') == review_id:
+                        rev['has_tester'] = True
+                        rev['tester_agent_id'] = tester_agent_id
+                        rev['num_reviewers'] = rev.get('num_reviewers', 2) + 1  # Tester counts as reviewer
+                        # Add tester to reviewers list
+                        rev['reviewers'].append({
+                            "agent_id": tester_agent_id,
+                            "agent_type": f"tester-{review_id.split('-')[-1][:8]}",
+                            "role": "tester",
+                            "spawned_at": datetime.now().isoformat(),
+                            "status": "testing"
+                        })
+                        break
+                f3.seek(0)
+                json.dump(reg, f3, indent=2)
+                f3.truncate()
+
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned Sonnet tester agent {tester_agent_id}")
+        else:
+            logger.warning(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn tester agent")
+    except Exception as e:
+        logger.error(f"AUTO-PHASE-ENFORCEMENT: Exception spawning tester: {e}")
+
+    # Build message based on what was spawned
+    message_parts = [f"{len(spawned_agents)} Sonnet reviewers", "1 Sonnet critique agent"]
+    if tester_agent_id:
+        message_parts.append("1 Sonnet tester agent")
 
     return {
         "success": True,
@@ -5191,11 +5560,175 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
         "phase": phase_name,
         "phase_index": phase_index,
         "status": "UNDER_REVIEW",
-        "num_reviewers": num_reviewers,
-        "spawned_agents": spawned_agents,
+        "num_reviewers": num_reviewers + (1 if tester_agent_id else 0),
+        "spawned_reviewer_agents": spawned_agents,
+        "critique_agent_id": critique_agent_id,
+        "tester_agent_id": tester_agent_id,
         "auto_triggered": True,
-        "message": f"Auto-spawned {len(spawned_agents)} reviewer agents"
+        "message": f"Auto-spawned {' + '.join(message_parts)}"
     }
+
+
+def _should_spawn_tester(deliverables: List[str], description: str) -> bool:
+    """
+    DEPRECATED: This function is no longer used. TESTER now spawns for ALL phases.
+
+    Previously determined if TESTER should spawn based on UI keywords.
+    Now TESTER always spawns because every phase needs testing:
+    - UI phases → browser-use tests
+    - API phases → curl tests
+    - Backend phases → integration tests
+    - Infrastructure phases → health checks
+
+    Kept for backwards compatibility but always returns True.
+    """
+    # TESTER now always spawns for all phases - universal testing
+    return True
+
+
+def _spawn_tester_agent(
+    task_id: str,
+    phase_index: int,
+    phase_name: str,
+    review_id: str,
+    workspace: str,
+    deliverables: List[str],
+    description: str
+) -> Optional[str]:
+    """
+    Spawn a TESTER agent to run browser-use tests for the phase.
+
+    The tester will:
+    1. Verify prerequisites (Vite running on :5173)
+    2. Get phase handover to understand deliverables
+    3. Create browser-use test script
+    4. Run tests
+    5. Submit verdict via submit_review_verdict
+
+    Args:
+        task_id: Task ID
+        phase_index: Phase index
+        phase_name: Phase name
+        review_id: Review ID
+        workspace: Task workspace path
+        deliverables: Phase deliverables
+        description: Phase description
+
+    Returns:
+        Agent ID if spawn successful, None otherwise
+    """
+    # Debug file for tester spawn issues
+    debug_file = workspace + "/tester_spawn_debug.log"
+    try:
+        with open(debug_file, "a") as df:
+            df.write(f"\n--- Inside _spawn_tester_agent ---\n")
+        # Format deliverables for prompt
+        deliverables_section = "\n".join([f"- {d}" for d in deliverables])
+        if not deliverables_section:
+            deliverables_section = "No specific deliverables listed - check phase handover"
+
+        review_prefix = review_id.split('-')[-1][:8]
+        agent_type = f"tester-{review_prefix}"
+
+        tester_prompt = f"""TESTER AGENT for phase "{phase_name}" (Task: {task_id})
+
+DELIVERABLES TO TEST:
+{deliverables_section}
+
+YOUR JOB: Test that deliverables actually work. Submit verdict via submit_review_verdict.
+
+WORKFLOW:
+1. Get context: mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={phase_index})
+2. Discover the correct port FIRST:
+   - Check running servers: lsof -i :3000,5173,4000,4010,8080 | grep LISTEN
+   - UI typically on 5173 (Vite) or 3000 (Next.js/CRA)
+   - API typically on 4000 or 4010
+3. Choose test approach based on deliverables:
+   - UI/frontend → Use chrome-devtools MCP (mcp__chrome-devtools__* tools)
+   - API/backend → curl tests
+   - Functions → run existing tests or quick verification
+4. Run tests and collect results
+5. Submit verdict:
+   mcp__claude-orchestrator__submit_review_verdict(
+       task_id="{task_id}",
+       review_id="{review_id}",
+       verdict="approved"|"rejected"|"needs_revision",
+       findings=[{{"type":"praise|blocker|issue","severity":"low|medium|high|critical","message":"..."}}],
+       reviewer_notes="Summary"
+   )
+
+VERDICT RULES:
+- Tests pass → approved
+- Tests fail (bug) → rejected
+- Infra down/timeout → needs_revision
+
+═══════════════════════════════════════════════════════════════
+⚡ UI TESTING: USE CHROME-DEVTOOLS MCP (NOT browser-use)
+═══════════════════════════════════════════════════════════════
+You have access to chrome-devtools MCP tools for browser automation:
+
+1. mcp__chrome-devtools__new_page - Open URL in browser
+2. mcp__chrome-devtools__take_snapshot - Get page accessibility tree (find element UIDs)
+3. mcp__chrome-devtools__take_screenshot - Visual verification
+4. mcp__chrome-devtools__click - Click elements by UID
+5. mcp__chrome-devtools__fill - Enter text in inputs
+6. mcp__chrome-devtools__navigate_page - Navigate/reload
+
+TESTING WORKFLOW:
+1. Open page: mcp__chrome-devtools__new_page(url="http://localhost:PORT/page")
+2. Take snapshot: mcp__chrome-devtools__take_snapshot() - find element UIDs
+3. Interact: click/fill using UIDs from snapshot
+4. Verify: take_screenshot to confirm expected state
+5. Repeat for each test case
+
+Example:
+- new_page(url="http://localhost:5173/dashboard")
+- take_snapshot() → find button UID like "btn-123"
+- click(uid="btn-123")
+- take_snapshot() → verify expected change
+- take_screenshot() → visual confirmation
+
+DO NOT USE: browser-use, Gemini, external Python scripts
+USE: chrome-devtools MCP tools (you already have access)
+
+MANDATORY: Call submit_review_verdict before finishing!
+"""
+
+        logger.info(f"TESTER: Spawning tester agent for phase '{phase_name}'")
+        with open(debug_file, "a") as df:
+            df.write(f"Calling deploy_claude_tmux_agent for tester...\n")
+            df.write(f"  agent_type={agent_type}\n")
+            df.write(f"  prompt_length={len(tester_prompt)}\n")
+
+        result = deploy_claude_tmux_agent(
+            task_id=task_id,
+            agent_type=agent_type,
+            prompt=tester_prompt,
+            parent="orchestrator",
+            phase_index=-1,  # Not part of phase work (like reviewers)
+            model="claude-sonnet-4-5"  # Sonnet for tester
+        )
+
+        with open(debug_file, "a") as df:
+            df.write(f"deploy_claude_tmux_agent returned: {result}\n")
+
+        if result.get('success'):
+            agent_id = result.get('agent_id')
+            logger.info(f"TESTER: Successfully spawned tester agent: {agent_id}")
+            return agent_id
+        else:
+            with open(debug_file, "a") as df:
+                df.write(f"FAILED to spawn tester: {result.get('error')}\n")
+            logger.error(f"TESTER: Failed to spawn tester: {result.get('error')}")
+            return None
+
+    except Exception as e:
+        import traceback
+        with open(debug_file, "a") as df:
+            df.write(f"EXCEPTION spawning tester: {e}\n")
+            df.write(f"Traceback: {traceback.format_exc()}\n")
+        logger.error(f"TESTER: Exception spawning tester agent: {e}")
+        return None
 
 
 @mcp.tool()
@@ -5207,15 +5740,15 @@ def trigger_agentic_review(
     """
     Trigger automated agentic review by spawning reviewer agents.
 
-    This deploys specialized reviewer agents that independently examine
-    the phase work and submit verdicts. Use this instead of manual
-    approve/reject for automated quality gates.
+    This deploys specialized agents to review phase work:
+    - 2 Sonnet REVIEWER agents (submit verdicts - approve/reject/needs_revision)
+    - 1 Sonnet CRITIQUE agent (senior dev perspective, no verdict, observations only)
 
     Flow:
         1. Phase must be in AWAITING_REVIEW state
-        2. Spawns num_reviewers agents with review prompts
-        3. Each agent reviews and calls submit_review_verdict
-        4. System aggregates verdicts and auto-transitions phase
+        2. Spawns num_reviewers (default 2) Sonnet agents + 1 critique agent
+        3. Reviewers call submit_review_verdict, critique calls submit_critique
+        4. System aggregates verdicts (2 reviewer tie-break: approve+reject → needs_revision)
 
     Args:
         task_id: Task ID containing the phase to review
@@ -5223,7 +5756,7 @@ def trigger_agentic_review(
         review_focus: Optional focus areas like ["security", "performance", "code_quality"]
 
     Returns:
-        Dict with review_id, spawned agent IDs, and phase status
+        Dict with review_id, spawned agent IDs, critique agent ID, and phase status
     """
     from orchestrator.review import create_review_record, ReviewConfig
 
@@ -5260,16 +5793,20 @@ def trigger_agentic_review(
             current_phase['escalation_retry_at'] = datetime.now().isoformat()
             current_phase['escalation_retry_reason'] = 'Manual retry via trigger_agentic_review'
 
-        # Create review record
+        # Create review record (reviewers + critique)
         review_id = f"review-{uuid.uuid4().hex[:12]}"
         review_record = {
             "review_id": review_id,
             "phase_id": phase_id,
             "phase_name": phase_name,
             "status": "in_progress",
-            "num_reviewers": num_reviewers,
+            "num_reviewers": num_reviewers,  # Only counts verdict-submitting reviewers
             "reviewers": [],
             "verdicts": [],
+            "has_critique": True,  # This review includes a critique agent
+            "critique_agent_id": None,  # Set when critique agent is spawned
+            "critique_submitted": False,
+            "critique": None,  # Will hold critique observations when submitted
             "created_at": datetime.now().isoformat(),
             "review_focus": review_focus or ["completeness", "correctness", "quality"]
         }
@@ -5358,20 +5895,21 @@ REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Spawn reviewer agents
+    # Spawn reviewer agents (Sonnet for speed/cost)
     spawned_agents = []
+    review_prefix = review_id.split('-')[-1][:8]  # e.g., "review-abc123..." -> "abc123"
+
     for i in range(num_reviewers):
         # CRITICAL FIX (v2): Agent types must be unique per-REVIEW, not just per-phase
-        # Include review_id prefix to guarantee uniqueness across multiple reviews
-        review_prefix = review_id.split('-')[-1][:8]  # e.g., "review-abc123..." -> "abc123"
         agent_type = f"reviewer-{review_prefix}-{i+1}"
         try:
-            # Use the internal deployment function (not MCP-decorated)
+            # Use Sonnet for reviewers (faster, cheaper, sufficient for structured review tasks)
             result = deploy_claude_tmux_agent(
                 task_id=task_id,
                 agent_type=agent_type,
                 prompt=review_prompt,
-                parent="orchestrator"
+                parent="orchestrator",
+                model="claude-sonnet-4-5"  # Sonnet for reviewers
             )
             if result.get('success'):
                 agent_id = result.get('agent_id')
@@ -5384,6 +5922,7 @@ REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                             rev['reviewers'].append({
                                 "agent_id": agent_id,
                                 "agent_type": agent_type,
+                                "role": "reviewer",  # Distinguish from critique
                                 "spawned_at": datetime.now().isoformat(),
                                 "status": "reviewing"
                             })
@@ -5391,11 +5930,99 @@ REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                     f2.seek(0)
                     json.dump(reg, f2, indent=2)
                     f2.truncate()
+
+                logger.info(f"Spawned Sonnet reviewer {agent_id}")
             else:
-                # Log when deployment fails (was silently ignored before)
                 logger.error(f"Failed to spawn reviewer {i+1}: {result.get('error', 'Unknown error')}")
         except Exception as e:
             logger.error(f"Failed to spawn reviewer {i+1}: {e}")
+
+    # Build critique prompt (senior dev birds-eye view, no verdict)
+    critique_prompt = f"""You are a SENIOR DEVELOPER CRITIQUE AGENT for phase "{phase_name}" (Task: {task_id}).
+
+YOUR ROLE IS DIFFERENT FROM REVIEWERS:
+- You do NOT submit a verdict (approve/reject)
+- You provide senior developer perspective and observations
+- Your feedback informs the orchestrator but doesn't block progress
+- Think like a tech lead doing a high-level code review
+
+REVIEW FOCUS AREAS: {', '.join(focus_areas)}
+
+YOUR MISSION: Provide birds-eye view observations, not pass/fail judgment.
+
+STEP 1 - GET TASK CONTEXT:
+```
+mcp__claude-orchestrator__get_real_task_status(task_id="{task_id}")
+```
+
+STEP 2 - GET AGENT FINDINGS:
+```
+mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={current_phase_idx})
+```
+
+STEP 3 - EXAMINE CODE/DELIVERABLES:
+- Use Read tool to check actual files
+- Look for architectural patterns
+- Check for technical debt
+- Workspace: {workspace}
+
+WHAT TO LOOK FOR (senior dev perspective):
+1. ARCHITECTURAL: Is the approach sound? Any red flags?
+2. TECHNICAL DEBT: Are there shortcuts that will cause problems later?
+3. MAINTAINABILITY: Will this be easy to maintain/extend?
+4. BEST PRACTICES: Are coding standards followed?
+5. SUGGESTIONS: What could be improved (even if not blocking)?
+
+SUBMIT YOUR CRITIQUE (NOT a verdict):
+```
+mcp__claude-orchestrator__submit_critique(
+    task_id="{task_id}",
+    review_id="{review_id}",
+    observations=[
+        {{"type": "architectural|technical_debt|suggestion|concern|praise", "priority": "high|medium|low", "message": "...", "scope": "current_phase|future_phases|overall"}}
+    ],
+    summary="High-level assessment from senior dev perspective",
+    recommendations=["Optional list of recommendations for orchestrator"]
+)
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+⚡ MANDATORY: YOU MUST SUBMIT YOUR CRITIQUE - YOUR JOB IS NOT COMPLETE WITHOUT IT ⚡
+═══════════════════════════════════════════════════════════════════════════════
+
+REMEMBER: You are providing observations and advice, NOT a pass/fail verdict.
+The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
+"""
+
+    # Spawn critique agent (Sonnet)
+    critique_agent_id = None
+    try:
+        critique_agent_type = f"critique-{review_prefix}"
+        result = deploy_claude_tmux_agent(
+            task_id=task_id,
+            agent_type=critique_agent_type,
+            prompt=critique_prompt,
+            parent="orchestrator",
+            model="claude-sonnet-4-5"  # Sonnet for critique
+        )
+        if result.get('success'):
+            critique_agent_id = result.get('agent_id')
+
+            # Update review record with critique agent
+            with LockedRegistryFile(registry_path) as (reg, f2):
+                for rev in reg.get('reviews', []):
+                    if rev.get('review_id') == review_id:
+                        rev['critique_agent_id'] = critique_agent_id
+                        break
+                f2.seek(0)
+                json.dump(reg, f2, indent=2)
+                f2.truncate()
+
+            logger.info(f"Spawned Sonnet critique agent {critique_agent_id}")
+        else:
+            logger.error(f"Failed to spawn critique: {result.get('error', 'Unknown error')}")
+    except Exception as e:
+        logger.error(f"Failed to spawn critique: {e}")
 
     return json.dumps({
         "success": True,
@@ -5403,8 +6030,9 @@ REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
         "phase": phase_name,
         "status": "UNDER_REVIEW",
         "num_reviewers": num_reviewers,
-        "spawned_agents": spawned_agents,
-        "message": f"Spawned {len(spawned_agents)} reviewer agents"
+        "spawned_reviewer_agents": spawned_agents,
+        "critique_agent_id": critique_agent_id,
+        "message": f"Spawned {len(spawned_agents)} Sonnet reviewers + 1 Sonnet critique agent"
     }, indent=2)
 
 
@@ -5539,19 +6167,55 @@ def submit_review_verdict(
 
         # If all reviewers submitted (or dead), aggregate and finalize
         if should_finalize:
-            # Aggregate verdicts
+            # Aggregate verdicts from reviewers
             all_verdicts = [v['verdict'] for v in review_record['verdicts']]
             all_findings = []
             for v in review_record['verdicts']:
                 all_findings.extend(v.get('findings', []))
 
-            # Simple aggregation: any rejection = rejected, any needs_revision = needs_revision
-            if 'rejected' in all_verdicts:
-                final_verdict = 'rejected'
-            elif 'needs_revision' in all_verdicts:
-                final_verdict = 'needs_revision'
+            # Verdict aggregation with balanced tie-break logic:
+            # - 2 reviewers: Specific tie-break rules
+            # - 3 reviewers (with tester): Fallback to conservative majority logic
+            # - Unanimous → use that verdict
+            # - approve + reject → needs_revision (tie-break: give chance to fix)
+            # - approve + needs_revision → needs_revision
+            # - reject + needs_revision → rejected
+            approve_count = all_verdicts.count('approved')
+            reject_count = all_verdicts.count('rejected')
+            revision_count = all_verdicts.count('needs_revision')
+
+            if len(all_verdicts) == 2:
+                # 2-reviewer specific logic
+                if approve_count == 2:
+                    final_verdict = 'approved'
+                elif reject_count == 2:
+                    final_verdict = 'rejected'
+                elif revision_count == 2:
+                    final_verdict = 'needs_revision'
+                elif approve_count == 1 and reject_count == 1:
+                    # Tie-break: one says pass, one says fail → needs_revision (middle ground)
+                    final_verdict = 'needs_revision'
+                    logger.info(f"TIE-BREAK: 1 approve + 1 reject → needs_revision")
+                elif reject_count == 1 and revision_count == 1:
+                    # One says reject, other says minor fix → reject wins
+                    final_verdict = 'rejected'
+                else:
+                    # approve + needs_revision → needs_revision
+                    final_verdict = 'needs_revision'
             else:
-                final_verdict = 'approved'
+                # Fallback for other reviewer counts (1 or 3+)
+                if reject_count > approve_count and reject_count >= revision_count:
+                    final_verdict = 'rejected'
+                elif revision_count > 0 or reject_count > 0:
+                    final_verdict = 'needs_revision'
+                else:
+                    final_verdict = 'approved'
+
+            # Include critique info if available (informational, doesn't affect verdict)
+            critique_info = review_record.get('critique')
+            if critique_info:
+                result_info['critique_summary'] = critique_info.get('summary', '')
+                result_info['critique_recommendations'] = critique_info.get('recommendations', [])
 
             review_record['status'] = 'completed'
             review_record['final_verdict'] = final_verdict
@@ -5582,6 +6246,106 @@ def submit_review_verdict(
             result_info['final_verdict'] = final_verdict
             result_info['review_completed'] = True
             result_info['phase_status'] = current_phase.get('status') if current_idx < len(phases) else None
+
+        f.seek(0)
+        json.dump(registry, f, indent=2)
+        f.truncate()
+
+    return json.dumps(result_info, indent=2)
+
+
+@mcp.tool()
+def submit_critique(
+    task_id: str,
+    review_id: str,
+    observations: List[Dict[str, Any]],
+    summary: str,
+    recommendations: Optional[List[str]] = None
+) -> str:
+    """
+    Submit a critique (called by the critique agent - NOT a reviewer).
+
+    The critique agent provides senior developer perspective without a verdict.
+    Their observations inform the orchestrator but don't affect phase approval.
+
+    Args:
+        task_id: Task ID
+        review_id: Review ID from the review process
+        observations: List of observations, each with:
+            - type: "architectural", "technical_debt", "suggestion", "concern", "praise"
+            - priority: "high", "medium", "low" (how important to address)
+            - message: Description of the observation
+            - scope: "current_phase" | "future_phases" | "overall"
+        summary: High-level summary from senior dev perspective
+        recommendations: Optional list of recommendations for orchestrator
+
+    Returns:
+        Dict with submission status
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+
+    with LockedRegistryFile(registry_path) as (registry, f):
+        # Find the review record
+        reviews = registry.get('reviews', [])
+        review_record = None
+        for rev in reviews:
+            if rev.get('review_id') == review_id:
+                review_record = rev
+                break
+
+        if not review_record:
+            return json.dumps({
+                "success": False,
+                "error": f"Review {review_id} not found"
+            })
+
+        # Record the critique
+        review_record['critique'] = {
+            "observations": observations,
+            "summary": summary,
+            "recommendations": recommendations or [],
+            "submitted_at": datetime.now().isoformat()
+        }
+        review_record['critique_submitted'] = True
+
+        # Update critique agent status to completed
+        critique_agent_id = review_record.get('critique_agent_id')
+        if critique_agent_id:
+            for agent in registry.get('agents', []):
+                if agent.get('id') == critique_agent_id:
+                    if agent.get('status') in ['working', 'running']:
+                        registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
+                        registry['completed_count'] = registry.get('completed_count', 0) + 1
+                    agent['status'] = 'completed'
+                    agent['completed_at'] = datetime.now().isoformat()
+                    logger.info(f"CRITIQUE STATUS UPDATE: {critique_agent_id} marked completed")
+                    break
+
+        # Check if review can be finalized (2 verdicts + 1 critique)
+        num_verdicts = len(review_record.get('verdicts', []))
+        num_expected_reviewers = review_record.get('num_reviewers', 2)
+        critique_done = review_record.get('critique_submitted', False)
+
+        result_info = {
+            "success": True,
+            "review_id": review_id,
+            "critique_submitted": True,
+            "observations_count": len(observations),
+            "verdicts_submitted": num_verdicts,
+            "verdicts_expected": num_expected_reviewers,
+            "ready_to_finalize": num_verdicts >= num_expected_reviewers and critique_done
+        }
+
+        # If all submissions complete, trigger finalization check
+        # (finalization happens in submit_review_verdict when last verdict comes in)
+        if num_verdicts >= num_expected_reviewers and critique_done:
+            result_info['message'] = "Critique received. Review is ready for verdict aggregation."
+        else:
+            result_info['message'] = f"Critique received. Waiting for {num_expected_reviewers - num_verdicts} more verdict(s)."
 
         f.seek(0)
         json.dump(registry, f, indent=2)

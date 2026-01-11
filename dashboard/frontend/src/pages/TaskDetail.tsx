@@ -15,6 +15,7 @@ import {
   StopCircle,
   ChevronRight,
   LayoutList,
+  LayoutGrid,
   Server,
   ShieldCheck
 } from 'lucide-react';
@@ -155,19 +156,28 @@ const TaskDetail: React.FC = () => {
             </div>
             <p className="text-textMuted max-w-3xl">{task.task_description}</p>
           </div>
-          <div className="flex gap-8 text-right">
-             <div>
-                <div className="text-3xl font-bold text-text">{task.active_count}</div>
-                <div className="text-xs text-textMuted uppercase tracking-wider">Active Agents</div>
-             </div>
-             <div>
-                <div className="text-3xl font-bold text-secondary">
-                  {task.agents.length > 0
-                    ? Math.round(task.agents.reduce((sum, a) => sum + a.progress, 0) / task.agents.length)
-                    : 0}%
-                </div>
-                <div className="text-xs text-textMuted uppercase tracking-wider">Avg Progress</div>
-             </div>
+          <div className="flex items-center gap-6">
+            <button 
+              onClick={() => navigate(`/tasks/${task.task_id}/board`)}
+              className="flex items-center gap-2 px-4 py-2 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg transition-colors font-medium border border-primary/20"
+            >
+                <LayoutGrid className="w-4 h-4" />
+                Board View
+            </button>
+            <div className="flex gap-8 text-right">
+               <div>
+                  <div className="text-3xl font-bold text-text">{task.active_count}</div>
+                  <div className="text-xs text-textMuted uppercase tracking-wider">Active Agents</div>
+               </div>
+               <div>
+                  <div className="text-3xl font-bold text-secondary">
+                    {task.agents.length > 0
+                      ? Math.round(task.agents.reduce((sum, a) => sum + a.progress, 0) / task.agents.length)
+                      : 0}%
+                  </div>
+                  <div className="text-xs text-textMuted uppercase tracking-wider">Avg Progress</div>
+               </div>
+            </div>
           </div>
         </div>
       </div>

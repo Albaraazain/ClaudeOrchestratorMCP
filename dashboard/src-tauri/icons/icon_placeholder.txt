@@ -1,0 +1,21 @@
+ICON PLACEHOLDERS
+
+To complete the Tauri build, you need to create icons in the following sizes:
+
+Required files:
+- 32x32.png      (32x32 pixels)
+- 128x128.png    (128x128 pixels)
+- 128x128@2x.png (256x256 pixels)
+- icon.icns      (macOS app icon - can generate from 1024x1024 PNG)
+- icon.ico       (Windows icon - can generate from 256x256 PNG)
+
+Quick generation (macOS):
+1. Create a 1024x1024 PNG named "icon.png"
+2. Run: sips -z 32 32 icon.png --out 32x32.png
+3. Run: sips -z 128 128 icon.png --out 128x128.png
+4. Run: sips -z 256 256 icon.png --out 128x128@2x.png
+5. For .icns: iconutil -c icns icon.iconset (create iconset folder first)
+6. For .ico: use online converter or ImageMagick
+
+Or use Tauri's icon generator:
+  cargo tauri icon /path/to/1024x1024.png

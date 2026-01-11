@@ -1,21 +1,60 @@
 // API service for communicating with the FastAPI backend
 
 import type { Task, Agent, Finding, LogMessage } from '../types';
+import { getBackendUrl, getWsUrl, isTauri, waitForBackend } from '../lib/tauri';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+// Default URLs for web mode
+const DEFAULT_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const DEFAULT_WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
 
 class ApiService {
   private baseUrl: string;
   private wsBaseUrl: string;
+  private initialized: boolean = false;
 
   constructor() {
-    this.baseUrl = API_BASE_URL;
-    this.wsBaseUrl = WS_BASE_URL;
+    this.baseUrl = DEFAULT_API_URL;
+    this.wsBaseUrl = DEFAULT_WS_URL;
+  }
+
+  /**
+   * Initialize the API service.
+   * In Tauri mode, waits for backend sidecar and gets dynamic URLs.
+   * Call this before making any API requests.
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+
+    console.log('[API] Initializing...', { isTauri: isTauri() });
+
+    if (isTauri()) {
+      console.log('[API] Waiting for Tauri backend...');
+      const ready = await waitForBackend(30000);
+      if (!ready) {
+        throw new Error('Backend failed to start within 30 seconds');
+      }
+
+      this.baseUrl = await getBackendUrl();
+      this.wsBaseUrl = await getWsUrl();
+      console.log('[API] Tauri backend URLs:', { api: this.baseUrl, ws: this.wsBaseUrl });
+    }
+
+    this.initialized = true;
+    console.log('[API] Initialized:', { api: this.baseUrl, ws: this.wsBaseUrl });
+  }
+
+  /**
+   * Ensure initialized before making requests.
+   */
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
   }
 
   // Helper method for fetch with error handling
   private async fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+    await this.ensureInitialized();
     const response = await fetch(`${this.baseUrl}${url}`, {
       ...options,
       headers: {
@@ -32,8 +71,14 @@ class ApiService {
   }
 
   // Task endpoints
-  async getTasks(): Promise<Task[]> {
-    return this.fetchJson<Task[]>('/api/tasks');
+  async getTasks(options?: { since?: string; status?: string; project?: string; limit?: number }): Promise<Task[]> {
+    const params = new URLSearchParams();
+    // Default to 'all' to show all tasks, not just today's
+    params.set('since', options?.since ?? 'all');
+    if (options?.status) params.set('status', options.status);
+    if (options?.project) params.set('project', options.project);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    return this.fetchJson<Task[]>(`/api/tasks?${params.toString()}`);
   }
 
   async getTask(taskId: string): Promise<Task> {
@@ -63,7 +108,12 @@ class ApiService {
     return this.fetchJson<Agent>(`/api/agents/${taskId}/${agentId}`);
   }
 
+  async getAgentFindings(taskId: string, agentId: string, limit: number = 100): Promise<Finding[]> {
+    return this.fetchJson<Finding[]>(`/api/agents/${taskId}/${agentId}/findings?limit=${limit}`);
+  }
+
   async getAgentOutput(taskId: string, agentId: string): Promise<string> {
+    await this.ensureInitialized();
     const response = await fetch(`${this.baseUrl}/api/agents/${taskId}/${agentId}/output`);
     if (!response.ok) {
       throw new Error(`API Error: ${response.status} ${response.statusText}`);
@@ -83,7 +133,8 @@ class ApiService {
   }
 
   // WebSocket connection for real-time logs
-  connectToLogs(taskId: string, onMessage: (message: LogMessage) => void, onError?: (error: Event) => void): WebSocket {
+  async connectToLogs(taskId: string, onMessage: (message: LogMessage) => void, onError?: (error: Event) => void): Promise<WebSocket> {
+    await this.ensureInitialized();
     const ws = new WebSocket(`${this.wsBaseUrl}/ws/${taskId}`);
 
     ws.onmessage = (event) => {
@@ -105,6 +156,11 @@ class ApiService {
     };
 
     return ws;
+  }
+
+  // Get base URLs (for components that need direct access)
+  getUrls(): { api: string; ws: string } {
+    return { api: this.baseUrl, ws: this.wsBaseUrl };
   }
 
   // tmux session endpoint

@@ -12,15 +12,30 @@ from fastapi import APIRouter, HTTPException, Query
 orchestrator_path = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(orchestrator_path))
 
-# Try orchestrator imports with fallback
+# Try orchestrator imports with fallback to standalone registry
 try:
     from orchestrator.registry import read_registry_with_lock
     from orchestrator.workspace import find_task_workspace
     # Import state_db for SQLite-based counts
     from orchestrator import state_db
     HAS_STATE_DB = True
+    HAS_STANDALONE = False
+    print("[API] Using orchestrator modules (full integration)")
 except ImportError:
     HAS_STATE_DB = False
+    # Try standalone registry for PyInstaller bundle
+    try:
+        from services.standalone_registry import (
+            get_all_tasks as standalone_get_all_tasks,
+            find_task_workspace as standalone_find_task_workspace,
+            get_dashboard_data as standalone_get_dashboard_data,
+        )
+        HAS_STANDALONE = True
+        print("[API] Using standalone registry (desktop mode)")
+    except ImportError:
+        HAS_STANDALONE = False
+        print("[API] WARNING: No registry backend available!")
+
     # Fallback implementations
     def read_registry_with_lock(path: str) -> Optional[Dict[str, Any]]:
         try:
@@ -30,6 +45,9 @@ except ImportError:
             return None
 
     def find_task_workspace(task_id: str) -> Optional[str]:
+        # Use standalone if available
+        if HAS_STANDALONE:
+            return standalone_find_task_workspace(task_id)
         # Check common locations
         bases = [
             Path.home() / ".agent-workspace",
@@ -361,7 +379,44 @@ async def list_tasks(
     elif since == "all":
         since = None  # No filter
     try:
-        # Try global registry first (supports cross-project filtering)
+        # Try standalone registry first (for PyInstaller bundle / desktop mode)
+        if HAS_STANDALONE:
+            try:
+                standalone_tasks = standalone_get_all_tasks(
+                    limit=limit,
+                    offset=offset,
+                    status_filter=status,
+                    since=since,
+                    until=until,
+                    project_filter=project
+                )
+                if standalone_tasks:
+                    filters_applied = []
+                    if since: filters_applied.append(f"since={since}")
+                    if until: filters_applied.append(f"until={until}")
+                    if project: filters_applied.append(f"project={project}")
+                    if status: filters_applied.append(f"status={status}")
+                    filter_str = f" with filters: {', '.join(filters_applied)}" if filters_applied else ""
+                    print(f"[API] list_tasks: Using standalone registry ({len(standalone_tasks)} tasks){filter_str}")
+
+                    tasks: List[TaskSummary] = []
+                    for task_data in standalone_tasks:
+                        created_at = datetime.fromisoformat(task_data['created_at']) if task_data.get('created_at') else datetime.now()
+                        tasks.append(TaskSummary(
+                            task_id=task_data['task_id'],
+                            description=task_data.get('description', ''),
+                            created_at=created_at,
+                            status=task_data.get('status', 'INITIALIZED'),
+                            current_phase=None,
+                            agent_count=0,
+                            active_agents=0,
+                            progress=0
+                        ))
+                    return tasks
+            except Exception as e:
+                print(f"[API] Standalone registry failed: {e}")
+
+        # Try global registry next (supports cross-project filtering)
         try:
             from orchestrator import global_registry
             global_registry.ensure_global_registry()
@@ -819,7 +874,17 @@ async def get_task_registry(task_id: str):
 async def get_dashboard_summary():
     """Get dashboard summary with SQLite-derived counts from all projects."""
     try:
-        # Try global registry first - it aggregates all projects
+        # Try standalone registry first (for PyInstaller bundle / desktop mode)
+        if HAS_STANDALONE:
+            try:
+                dashboard_data = standalone_get_dashboard_data()
+                if dashboard_data and dashboard_data.get("global_counts", {}).get("total_tasks", 0) > 0:
+                    print(f"[API] get_dashboard_summary: Using standalone registry ({dashboard_data.get('workspace_count', 0)} workspaces)")
+                    return dashboard_data
+            except Exception as e:
+                print(f"[API] Standalone dashboard failed: {e}")
+
+        # Try global registry next - it aggregates all projects
         try:
             from orchestrator import global_registry
             global_registry.ensure_global_registry()

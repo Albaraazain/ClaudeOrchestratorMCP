@@ -355,6 +355,62 @@
       "has_enhanced_context": false,
       "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260105-140359-1d61686a",
       "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260106-105505-92233a45": {
+      "description": "Test reviewer spawning - simple investigation task",
+      "created_at": "2026-01-06T10:55:05.764712",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260106-105505-92233a45",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260106-110853-3e83f39f": {
+      "description": "Test TESTER agent spawning",
+      "created_at": "2026-01-06T11:08:53.045663",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260106-110853-3e83f39f",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260106-111125-6241cc38": {
+      "description": "Test TESTER agent spawning v2",
+      "created_at": "2026-01-06T11:11:25.475031",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260106-111125-6241cc38",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260106-111430-a8281cc3": {
+      "description": "Test TESTER agent spawning v3",
+      "created_at": "2026-01-06T11:14:30.394372",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260106-111430-a8281cc3",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260106-111814-dab60328": {
+      "description": "Test TESTER v4",
+      "created_at": "2026-01-06T11:18:14.476833",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260106-111814-dab60328",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260106-112241-5663a12e": {
+      "description": "Test TESTER v5",
+      "created_at": "2026-01-06T11:22:41.935388",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260106-112241-5663a12e",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260108-142413-f156a207": {
+      "description": "Test agent lifespan monitoring",
+      "created_at": "2026-01-08T14:24:14.010493",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260108-142413-f156a207",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
     }
   },
   "agents": {
