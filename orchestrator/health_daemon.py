@@ -31,7 +31,7 @@ AGENT_ACTIVE_STATUSES = {'running', 'working', 'blocked'}
 
 # Health check configuration
 DEFAULT_SCAN_INTERVAL = 30  # seconds between health scans
-STUCK_AGENT_THRESHOLD = 300  # 5 minutes without log activity = stuck
+STUCK_AGENT_THRESHOLD = 900  # 15 minutes without log activity = stuck (increased from 5 min for complex reasoning tasks)
 LOG_CHECK_INTERVAL = 60  # check log files every 60 seconds
 
 
@@ -222,9 +222,19 @@ class HealthDaemon:
             logger.error(f"Error reading registry for task {task_id}: {e}")
             return
 
-        # Reconcile terminal progress updates that may not have been written to the registry
+        # FIRST: Check stream logs for completion markers (most authoritative signal)
+        # This detects agents that completed but didn't call update_agent_progress
+        stream_reconciled_ids = self._reconcile_agents_from_stream_logs(task_id, workspace, registry_path, active_agents)
+
+        # Filter out already reconciled agents for progress check
+        remaining_active = [a for a in active_agents if a.get("id") not in stream_reconciled_ids]
+
+        # SECOND: Reconcile terminal progress updates that may not have been written to the registry
         # (e.g., tool call killed agent or cleanup blocked registry write).
-        reconciled_ids = self._reconcile_agents_from_progress(task_id, workspace, registry_path, active_agents)
+        progress_reconciled_ids = self._reconcile_agents_from_progress(task_id, workspace, registry_path, remaining_active)
+
+        # Combine all reconciled IDs
+        reconciled_ids = stream_reconciled_ids | progress_reconciled_ids
 
         # Run health checks on remaining active agents only
         for agent_snapshot in active_agents:
@@ -276,6 +286,154 @@ class HealthDaemon:
             return None
         except Exception:
             return None
+
+    def _check_stream_log_completion(self, agent_id: str, workspace: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if agent's stream log has a completion marker (type=result).
+
+        Claude writes {"type":"result","subtype":"success|error","is_error":true|false,...}
+        to the stream log when it finishes. This is the most reliable completion signal.
+
+        Args:
+            agent_id: Agent ID
+            workspace: Task workspace path
+
+        Returns:
+            Dict with completion info if found, None otherwise.
+            {
+                'completed': True,
+                'is_error': bool,
+                'result': str,
+                'timestamp': str (from file mtime)
+            }
+        """
+        stream_log = os.path.join(workspace, 'logs', f'{agent_id}_stream.jsonl')
+        if not os.path.exists(stream_log):
+            return None
+
+        last_entry = self._read_last_jsonl_entry(stream_log)
+        if not last_entry:
+            return None
+
+        # Check for completion marker
+        if last_entry.get('type') == 'result':
+            # Get file modification time as completion timestamp
+            try:
+                mtime = os.path.getmtime(stream_log)
+                timestamp = datetime.fromtimestamp(mtime).isoformat()
+            except:
+                timestamp = datetime.now().isoformat()
+
+            return {
+                'completed': True,
+                'is_error': last_entry.get('is_error', False),
+                'subtype': last_entry.get('subtype', 'unknown'),
+                'result': last_entry.get('result', '')[:200],  # Truncate long results
+                'timestamp': timestamp,
+                'duration_ms': last_entry.get('duration_ms'),
+                'session_id': last_entry.get('session_id')
+            }
+
+        return None
+
+    def _reconcile_agents_from_stream_logs(
+        self,
+        task_id: str,
+        workspace: str,
+        registry_path: str,
+        active_agents: List[Dict[str, Any]],
+    ) -> set:
+        """
+        Check stream logs for completion markers and reconcile registry.
+
+        This detects agents that completed but didn't call update_agent_progress.
+        The stream log's {"type":"result",...} entry is the definitive completion signal.
+
+        Returns:
+            Set of agent_ids that were reconciled to a terminal state.
+        """
+        updates: List[Dict[str, Any]] = []
+
+        for a in active_agents:
+            agent_id = a.get("id")
+            if not agent_id:
+                continue
+
+            completion = self._check_stream_log_completion(agent_id, workspace)
+            if not completion:
+                continue
+
+            # Determine status based on completion result
+            if completion.get('is_error'):
+                # Agent hit an error (spending cap, connection error, etc.)
+                new_status = 'failed'
+                reason = completion.get('result', 'Unknown error')
+            else:
+                # Agent completed successfully
+                new_status = 'completed'
+                reason = 'Stream log shows successful completion'
+
+            updates.append({
+                "agent_id": agent_id,
+                "status": new_status,
+                "progress": 100 if new_status == 'completed' else a.get('progress', 0),
+                "timestamp": completion['timestamp'],
+                "completion_reason": reason,
+                "stream_log_result": completion.get('result', '')
+            })
+
+            logger.info(f"Stream log completion detected for agent {agent_id}: "
+                       f"is_error={completion.get('is_error')}, status={new_status}")
+
+        if not updates:
+            return set()
+
+        reconciled: set[str] = set()
+        try:
+            with LockedRegistryFile(registry_path) as (registry, f):
+                for upd in updates:
+                    agent_id = upd["agent_id"]
+                    agent = next((x for x in registry.get("agents", []) if x.get("id") == agent_id), None)
+                    if not agent:
+                        continue
+
+                    prev_status = agent.get("status")
+
+                    # Skip if already in terminal state
+                    if prev_status in AGENT_TERMINAL_STATUSES:
+                        continue
+
+                    agent["status"] = upd["status"]
+                    agent["progress"] = upd["progress"]
+                    agent["last_update"] = upd["timestamp"]
+                    agent["completion_reason"] = upd.get("completion_reason", "")
+                    agent["stream_log_result"] = upd.get("stream_log_result", "")
+
+                    if upd["status"] == "completed":
+                        agent["completed_at"] = upd["timestamp"]
+                    elif upd["status"] == "failed":
+                        agent["failed_at"] = upd["timestamp"]
+                        agent["failure_reason"] = upd.get("completion_reason", "Stream log error")
+
+                    # Update counters
+                    if prev_status in AGENT_ACTIVE_STATUSES:
+                        registry["active_count"] = max(0, registry.get("active_count", 0) - 1)
+                        if upd["status"] == "completed":
+                            registry["completed_count"] = registry.get("completed_count", 0) + 1
+                        else:
+                            registry["failed_count"] = registry.get("failed_count", 0) + 1
+
+                    reconciled.add(agent_id)
+                    logger.info(f"Reconciled agent {agent_id} from stream log: {prev_status} -> {upd['status']}")
+
+                f.seek(0)
+                f.write(json.dumps(registry, indent=2))
+                f.truncate()
+
+        except Exception as e:
+            logger.warning(f"Failed to reconcile agents from stream logs for task {task_id}: {e}")
+
+        return reconciled
 
     def _reconcile_agents_from_progress(
         self,

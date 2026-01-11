@@ -80,18 +80,11 @@ app = FastAPI(
 )
 
 # Configure CORS for frontend access
+# In Tauri desktop mode, the origin is "tauri://localhost" or null
+# Allow all origins for flexibility (this is a local-only dashboard)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:5175",
-        "http://127.0.0.1:5175",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],  # Vite dev server (multiple ports in case of conflicts)
+    allow_origins=["*"],  # Allow all origins (Tauri uses tauri://localhost or null)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -177,13 +170,34 @@ async def internal_error_handler(request, exc):
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
 
-    # Run server
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Claude Orchestrator Dashboard API')
+    parser.add_argument('--port', type=int, default=8000, help='Port to run the server on')
+    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--reload', action='store_true', help='Enable auto-reload (dev mode)')
+    args = parser.parse_args()
+
+    print(f"[Dashboard API] Starting on {args.host}:{args.port}")
+
+    # Run server - use app object directly for PyInstaller compatibility
+    # Note: reload=True doesn't work with PyInstaller, so we ignore it if bundled
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle - no reload support
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level="info"
+        )
+    else:
+        # Running as regular Python script - reload available
+        uvicorn.run(
+            "main:app",
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+            log_level="info"
+        )

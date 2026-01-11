@@ -1,0 +1,23 @@
+{
+  "name": "claude-orchestrator-dashboard-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude Orchestrator Dashboard - Desktop Application",
+  "scripts": {
+    "dev": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "desktop:dev": "./build-desktop.sh --dev",
+    "desktop:build": "./build-desktop.sh",
+    "backend": "cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload",
+    "backend:desktop": "cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8765",
+    "install:all": "cd frontend && npm install",
+    "install:tauri": "cargo install tauri-cli",
+    "install:pyinstaller": "pip3 install pyinstaller"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

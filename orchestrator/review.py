@@ -49,7 +49,7 @@ REVIEW_FINDING_SEVERITIES = frozenset({'critical', 'high', 'medium', 'low'})
 DEFAULT_MIN_REVIEWERS = 1
 DEFAULT_REQUIRE_UNANIMOUS = False
 DEFAULT_AUTO_APPROVE_THRESHOLD = 0.0  # Disabled by default
-DEFAULT_TIMEOUT_SECONDS = 300  # 5 minutes
+DEFAULT_TIMEOUT_SECONDS = 900  # 15 minutes (increased from 5 min for complex reviews)
 
 
 # ============================================================================
