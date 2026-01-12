@@ -50,7 +50,7 @@ export class WebSocketManager {
   private readonly RECONNECT_DELAY = 3000;
   private readonly HEARTBEAT_INTERVAL = 30000;
 
-  constructor(baseUrl: string = 'ws://localhost:8000') {
+  constructor(baseUrl: string = 'ws://localhost:8765') {
     this.url = baseUrl;
   }
 

@@ -74,3 +74,100 @@ The orchestrator CANNOT:
 - Manually advance before review ❌
 - but be carefull we are using sqlite as registery now instead of json file
 - can the global registery be sqlite aswell, since the json file has locking problems, and very buggy
+
+## Project Context Feature (Jan 2026)
+
+When creating tasks, you can pass `project_context` to provide testers/reviewers with critical project info:
+
+```python
+create_real_task(
+    description="...",
+    phases=[...],
+    project_context={
+        "dev_server_port": 3000,           # Port where dev server runs
+        "start_command": "npm run dev",     # How to start the server
+        "test_url": "http://localhost:3000", # Base URL for testing
+        "framework": "Next.js",             # Framework used
+        "test_credentials": {               # Optional test user credentials
+            "email": "test@example.com",
+            "password": "test123"
+        }
+    }
+)
+```
+
+This info is automatically passed to:
+- **Reviewer agents**: Shown in PROJECT CONTEXT section so they can verify deliverables on correct port
+- **Final Testing phase agents**: Used to test against the correct server URL/port
+
+### Why This Matters
+Without project_context, testers often default to port 5173 (Vite) when the actual app might be running on:
+- 3000 (Next.js, CRA)
+- 4000/4010 (Backend APIs)
+- 8080 (various)
+
+### Phase Deliverables Warning
+When creating phases without `deliverables` or `success_criteria`, the system now warns:
+```
+REVIEWER_CONTEXT_WARNING: Phases without deliverables (reviewers will see 'Not explicitly defined'): [Phase 1]
+```
+
+Always include deliverables per phase so reviewers know exactly what to verify.
+
+## Handover System (Jan 2026 Fixes)
+
+Handovers now auto-generate when:
+1. **Phase approved via review**: `submit_review_verdict()` auto-generates handover from agent findings
+2. **Phase manually advanced**: `advance_to_next_phase()` falls back to auto-generation if no explicit data
+
+Reviewers can access handovers via:
+```
+mcp__claude-orchestrator__get_phase_handover(task_id="...", phase_index=0)
+```
+
+The legacy `trigger_agentic_review()` function was removed - all reviews now go through `_auto_spawn_phase_reviewers()`.
+
+## Mandatory Final Testing Phase (Jan 2026)
+
+**What changed:**
+- Per-phase tester agents were REMOVED (unnecessary overhead for Investigation/Design phases)
+- A "Final Testing" phase is now AUTO-APPENDED to every task
+
+**How it works:**
+1. When you call `create_real_task()`, if the last phase isn't already a testing phase (name contains "test", "testing", "verification", "qa", or "quality"), the system automatically appends a "Final Testing" phase
+2. This phase includes:
+   - Default deliverables for UI/API/test suite coverage
+   - Success criteria for core flows, console errors, performance
+   - Metadata tracking which phases it tests (`tests_deliverables_from`)
+
+**Example:**
+```python
+# You provide:
+phases = [
+    {"name": "Investigation", ...},
+    {"name": "Implementation", ...}
+]
+
+# System auto-appends:
+# Phase 3: "Final Testing" with comprehensive testing deliverables
+```
+
+**Review flow per phase:**
+- Phase N completes → 2 reviewers + 1 critique agent spawned
+- NO tester agent spawned (testers only in Final Testing phase)
+- Review focuses on code quality, logic, deliverables
+
+**Final Testing phase flow:**
+- Same review process (2 reviewers + 1 critique)
+- Reviewers focus on test coverage and results
+- `project_context` still used for port/URL info
+
+**Skip auto-append:**
+If you want to handle testing yourself, name your last phase with a testing keyword:
+```python
+phases = [
+    {"name": "Investigation", ...},
+    {"name": "Implementation", ...},
+    {"name": "Testing & QA", ...}  # Won't auto-append another
+]
+```

@@ -345,7 +345,8 @@ def create_real_task(
     success_criteria: Optional[List[str]] = None,
     constraints: Optional[List[str]] = None,
     relevant_files: Optional[List[str]] = None,
-    conversation_history: Optional[List[Dict[str, str]]] = None
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    project_context: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Create an orchestration task with mandatory phases.
@@ -363,6 +364,8 @@ def create_real_task(
         description: Description of the task
         priority: Task priority (P0-P4)
         phases: REQUIRED - List of phase definitions. Each phase needs 'name', optional 'description'.
+                STRONGLY RECOMMENDED: Include 'deliverables' and 'success_criteria' per phase
+                for accurate reviewer context.
         client_cwd: IMPORTANT - The client's working directory where agents should run.
                     Pass the current project path so agents operate in the correct location.
                     If not provided, agents may run in the wrong directory.
@@ -372,13 +375,37 @@ def create_real_task(
         constraints: Optional list of constraints
         relevant_files: Optional list of relevant file paths
         conversation_history: Optional conversation context
+        project_context: Optional dict with project-specific info for testers/reviewers:
+                        - dev_server_port: Port where dev server runs (e.g., 3000, 5173)
+                        - start_command: How to start the dev server (e.g., "npm run dev")
+                        - test_url: Base URL for testing (e.g., "http://localhost:3000")
+                        - framework: Framework used (e.g., "Next.js", "React", "Vue")
+                        - test_credentials: Dict with test user credentials if needed
 
-    Example phases:
+    Example phases (with deliverables - RECOMMENDED):
         [
-            {"name": "Investigation", "description": "Research the codebase"},
-            {"name": "Implementation", "description": "Write the code"},
-            {"name": "Testing", "description": "Verify everything works"}
+            {
+                "name": "Investigation",
+                "description": "Research the codebase",
+                "deliverables": ["Document auth flow", "List security gaps"],
+                "success_criteria": ["Flow documented", "3+ gaps identified"]
+            },
+            {
+                "name": "Implementation",
+                "description": "Write the code",
+                "deliverables": ["JWT auth endpoint", "Login page"],
+                "success_criteria": ["Tokens expire correctly", "Login redirects to dashboard"]
+            }
         ]
+
+    Example project_context:
+        {
+            "dev_server_port": 3000,
+            "start_command": "npm run dev",
+            "test_url": "http://localhost:3000",
+            "framework": "Next.js",
+            "test_credentials": {"email": "test@example.com", "password": "test123"}
+        }
 
     Returns:
         Task creation result with phases, validation warnings, and enhancement flags
@@ -608,6 +635,59 @@ def create_real_task(
                 "started_at": datetime.now().isoformat() if i == 0 else None
             })
 
+        # CRITICAL: Warn about phases without deliverables (reviewers need these!)
+        phases_without_deliverables = [p['name'] for p in enriched_phases if not p.get('deliverables')]
+        phases_without_criteria = [p['name'] for p in enriched_phases if not p.get('success_criteria')]
+
+        if phases_without_deliverables:
+            warning = f"REVIEWER_CONTEXT_WARNING: Phases without deliverables (reviewers will see 'Not explicitly defined'): {phases_without_deliverables}"
+            validation_warnings.append(warning)
+            logger.warning(f"TASK-CREATION: {warning}")
+
+        if phases_without_criteria:
+            warning = f"REVIEWER_CONTEXT_WARNING: Phases without success_criteria (reviewers won't know approval criteria): {phases_without_criteria}"
+            validation_warnings.append(warning)
+            logger.warning(f"TASK-CREATION: {warning}")
+
+        # AUTO-APPEND MANDATORY "Final Testing" PHASE (Jan 2026)
+        # Testing is now a dedicated final phase instead of per-phase overhead.
+        # Skip if the last phase already looks like a testing phase.
+        last_phase_name = enriched_phases[-1]['name'].lower() if enriched_phases else ""
+        is_testing_phase = any(keyword in last_phase_name for keyword in ['test', 'testing', 'verification', 'qa', 'quality'])
+
+        if not is_testing_phase:
+            # Collect deliverables from all prior phases to know what to test
+            all_prior_deliverables = []
+            for p in enriched_phases:
+                all_prior_deliverables.extend(p.get('deliverables', []))
+
+            testing_phase = {
+                "id": f"phase-{uuid.uuid4().hex[:8]}",
+                "order": len(enriched_phases) + 1,
+                "name": "Final Testing",
+                "description": "Comprehensive testing of all implemented features. This phase uses chrome-devtools MCP for browser testing, curl for API tests, and runs any existing test suites.",
+                "deliverables": [
+                    "All UI features tested via browser automation",
+                    "All API endpoints tested via curl/integration tests",
+                    "Existing test suites pass (if applicable)",
+                    "No critical bugs or regressions found"
+                ],
+                "success_criteria": [
+                    "Core user flows work end-to-end",
+                    "No console errors during testing",
+                    "API responses are correct and performant",
+                    "Visual appearance matches expectations"
+                ],
+                "status": "PENDING",
+                "created_at": datetime.now().isoformat(),
+                "started_at": None,
+                "auto_appended": True,  # Mark this was system-generated
+                "tests_deliverables_from": [p['name'] for p in enriched_phases]  # What phases we're testing
+            }
+            enriched_phases.append(testing_phase)
+            logger.info(f"TASK-CREATION: Auto-appended 'Final Testing' phase (order={len(enriched_phases)})")
+            validation_warnings.append(f"AUTO_TESTING_PHASE: Added mandatory 'Final Testing' phase as phase {len(enriched_phases)}")
+
     # Create task registry
     registry = {
         "task_id": task_id,
@@ -645,6 +725,11 @@ def create_real_task(
     # Add task_context to registry only if enhancement fields provided
     if has_enhanced_context:
         registry['task_context'] = task_context
+
+    # Add project_context to registry (for testers/reviewers to know port, framework, etc.)
+    if project_context and isinstance(project_context, dict):
+        registry['project_context'] = project_context
+        logger.info(f"TASK-CREATION: project_context stored: {list(project_context.keys())}")
 
     with open(f"{workspace}/AGENT_REGISTRY.json", 'w') as f:
         json.dump(registry, f, indent=2)
@@ -4722,14 +4807,40 @@ def advance_to_next_phase(
             }, indent=2)
 
         # Create handover document
-        handover = HandoverDocument(
-            phase_id=current_phase.get('id', f"phase-{current_idx}"),
-            phase_name=current_phase.get('name', f"Phase {current_idx + 1}"),
-            summary=handover_summary or f"Completed {current_phase.get('name', 'phase')}",
-            key_findings=key_findings or [],
-            blockers=blockers or [],
-            recommendations=recommendations or []
-        )
+        # If no explicit handover data provided, auto-generate from phase findings
+        phase_id = current_phase.get('id', f"phase-{current_idx}")
+        phase_name_str = current_phase.get('name', f"Phase {current_idx + 1}")
+
+        if not handover_summary and not key_findings:
+            # Auto-generate handover from phase data (findings, metrics, etc.)
+            logger.info(f"ADVANCE-PHASE: No explicit handover data, auto-generating from phase {phase_id}")
+            try:
+                handover = auto_generate_handover(
+                    task_workspace=workspace,
+                    phase_id=phase_id,
+                    phase_name=phase_name_str,
+                    registry=registry
+                )
+            except Exception as e:
+                logger.error(f"ADVANCE-PHASE: Auto-generation failed, using placeholder: {e}")
+                handover = HandoverDocument(
+                    phase_id=phase_id,
+                    phase_name=phase_name_str,
+                    summary=f"Completed {phase_name_str}",
+                    key_findings=[],
+                    blockers=[],
+                    recommendations=[]
+                )
+        else:
+            # Use explicitly provided handover data
+            handover = HandoverDocument(
+                phase_id=phase_id,
+                phase_name=phase_name_str,
+                summary=handover_summary or f"Completed {phase_name_str}",
+                key_findings=key_findings or [],
+                blockers=blockers or [],
+                recommendations=recommendations or []
+            )
 
         # Save handover (save_handover takes task_workspace, handover)
         save_result = save_handover(workspace, handover)
@@ -5187,6 +5298,9 @@ def _auto_spawn_phase_reviewers(
         phase_success_criteria = current_phase.get('success_criteria', [])
         phase_description = current_phase.get('description', '')
 
+        # Extract project_context for reviewers/testers (port, framework, test credentials)
+        project_context = registry.get('project_context', {})
+
         # Build OUT OF SCOPE section from future phases
         future_phases = []
         for fp_idx, fp in enumerate(phases):
@@ -5256,6 +5370,35 @@ CRITICAL: If you find issues related to future phases, do NOT mark as blocker.
           Only evaluate this phase's deliverables and success criteria.
 """
 
+    # Build project context section (port, framework, test URLs for testers/reviewers)
+    project_context_section = ""
+    if project_context:
+        ctx_items = []
+        if project_context.get('dev_server_port'):
+            ctx_items.append(f"  - Dev Server Port: {project_context['dev_server_port']}")
+        if project_context.get('test_url'):
+            ctx_items.append(f"  - Test URL: {project_context['test_url']}")
+        if project_context.get('start_command'):
+            ctx_items.append(f"  - Start Command: {project_context['start_command']}")
+        if project_context.get('framework'):
+            ctx_items.append(f"  - Framework: {project_context['framework']}")
+        if project_context.get('test_credentials'):
+            creds = project_context['test_credentials']
+            # Show credentials exist but mask password for security in logs
+            cred_info = f"Email: {creds.get('email', 'N/A')}, Password: [provided]"
+            ctx_items.append(f"  - Test Credentials: {cred_info}")
+
+        if ctx_items:
+            ctx_list = "\n".join(ctx_items)
+            project_context_section = f"""
+═══════════════════════════════════════════════════════════════════════════════
+🔧 PROJECT CONTEXT (for testing/verification):
+═══════════════════════════════════════════════════════════════════════════════
+{ctx_list}
+
+USE THIS INFO: When verifying deliverables, use these settings instead of defaults.
+"""
+
     # Build review prompt for agents with phase-specific context
     review_prompt = f"""You are an INDEPENDENT REVIEWER AGENT for phase "{phase_name}" (Task: {task_id}).
 
@@ -5269,6 +5412,7 @@ PHASE SUMMARY:
 {deliverables_section}
 {success_criteria_section}
 {out_of_scope_section}
+{project_context_section}
 YOUR MISSION: Review ONLY this phase's deliverables against ONLY this phase's success criteria.
 
 REVIEW FOCUS AREAS: {', '.join(review_focus)}
@@ -5490,69 +5634,12 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
     except Exception as e:
         logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn critique: {e}")
 
-    # ALWAYS spawn TESTER agent for all phases (UI + non-UI)
-    # Every phase needs testing - browser tests for UI, curl/integration tests for APIs, etc.
-    tester_agent_id = None
-    # Write debug to file since stderr may not be visible
-    debug_file = workspace + "/tester_spawn_debug.log"
-    with open(debug_file, "a") as df:
-        df.write(f"\n=== TESTER SPAWN DEBUG @ {datetime.now().isoformat()} ===\n")
-        df.write(f"task_id={task_id}, phase_index={phase_index}, phase_name={phase_name}\n")
-        df.write(f"review_id={review_id}, workspace={workspace}\n")
-        df.write(f"deliverables={phase_deliverables}\n")
-        df.write(f"description={phase_description[:100] if phase_description else 'None'}\n")
-    logger.info(f"AUTO-PHASE-ENFORCEMENT: === TESTER SPAWN DEBUG ===")
-    logger.info(f"AUTO-PHASE-ENFORCEMENT: task_id={task_id}, phase_index={phase_index}, phase_name={phase_name}")
-    logger.info(f"AUTO-PHASE-ENFORCEMENT: review_id={review_id}, workspace={workspace}")
-    logger.info(f"AUTO-PHASE-ENFORCEMENT: deliverables={phase_deliverables}, description={phase_description[:100] if phase_description else 'None'}")
-    try:
-        with open(debug_file, "a") as df:
-            df.write(f"Calling _spawn_tester_agent...\n")
-        logger.info(f"AUTO-PHASE-ENFORCEMENT: Calling _spawn_tester_agent...")
-        tester_agent_id = _spawn_tester_agent(
-            task_id=task_id,
-            phase_index=phase_index,
-            phase_name=phase_name,
-            review_id=review_id,
-            workspace=workspace,
-            deliverables=phase_deliverables,
-            description=phase_description
-        )
-        with open(debug_file, "a") as df:
-            df.write(f"_spawn_tester_agent returned: {tester_agent_id}\n")
-        logger.info(f"AUTO-PHASE-ENFORCEMENT: _spawn_tester_agent returned: {tester_agent_id}")
-
-        if tester_agent_id:
-            # Update review record with tester agent
-            with LockedRegistryFile(registry_path) as (reg, f3):
-                for rev in reg.get('reviews', []):
-                    if rev.get('review_id') == review_id:
-                        rev['has_tester'] = True
-                        rev['tester_agent_id'] = tester_agent_id
-                        rev['num_reviewers'] = rev.get('num_reviewers', 2) + 1  # Tester counts as reviewer
-                        # Add tester to reviewers list
-                        rev['reviewers'].append({
-                            "agent_id": tester_agent_id,
-                            "agent_type": f"tester-{review_id.split('-')[-1][:8]}",
-                            "role": "tester",
-                            "spawned_at": datetime.now().isoformat(),
-                            "status": "testing"
-                        })
-                        break
-                f3.seek(0)
-                json.dump(reg, f3, indent=2)
-                f3.truncate()
-
-            logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned Sonnet tester agent {tester_agent_id}")
-        else:
-            logger.warning(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn tester agent")
-    except Exception as e:
-        logger.error(f"AUTO-PHASE-ENFORCEMENT: Exception spawning tester: {e}")
+    # NOTE: Per-phase tester removed (Jan 2026)
+    # Testing is now a mandatory final phase instead of per-phase overhead.
+    # This reduces review complexity and focuses testing where it matters.
 
     # Build message based on what was spawned
     message_parts = [f"{len(spawned_agents)} Sonnet reviewers", "1 Sonnet critique agent"]
-    if tester_agent_id:
-        message_parts.append("1 Sonnet tester agent")
 
     return {
         "success": True,
@@ -5560,480 +5647,26 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
         "phase": phase_name,
         "phase_index": phase_index,
         "status": "UNDER_REVIEW",
-        "num_reviewers": num_reviewers + (1 if tester_agent_id else 0),
+        "num_reviewers": num_reviewers,
         "spawned_reviewer_agents": spawned_agents,
         "critique_agent_id": critique_agent_id,
-        "tester_agent_id": tester_agent_id,
         "auto_triggered": True,
         "message": f"Auto-spawned {' + '.join(message_parts)}"
     }
 
 
-def _should_spawn_tester(deliverables: List[str], description: str) -> bool:
-    """
-    DEPRECATED: This function is no longer used. TESTER now spawns for ALL phases.
-
-    Previously determined if TESTER should spawn based on UI keywords.
-    Now TESTER always spawns because every phase needs testing:
-    - UI phases → chrome-devtools MCP tests
-    - API phases → curl tests
-    - Backend phases → integration tests
-    - Infrastructure phases → health checks
-
-    Kept for backwards compatibility but always returns True.
-    """
-    # TESTER now always spawns for all phases - universal testing
-    return True
-
-
-def _spawn_tester_agent(
-    task_id: str,
-    phase_index: int,
-    phase_name: str,
-    review_id: str,
-    workspace: str,
-    deliverables: List[str],
-    description: str
-) -> Optional[str]:
-    """
-    Spawn a TESTER agent to run UI tests for the phase using chrome-devtools MCP.
-
-    The tester will:
-    1. Discover correct port via lsof
-    2. Get phase handover to understand deliverables
-    3. Use chrome-devtools MCP for browser automation
-    4. Run tests
-    5. Submit verdict via submit_review_verdict
-
-    Args:
-        task_id: Task ID
-        phase_index: Phase index
-        phase_name: Phase name
-        review_id: Review ID
-        workspace: Task workspace path
-        deliverables: Phase deliverables
-        description: Phase description
-
-    Returns:
-        Agent ID if spawn successful, None otherwise
-    """
-    # Debug file for tester spawn issues
-    debug_file = workspace + "/tester_spawn_debug.log"
-    try:
-        with open(debug_file, "a") as df:
-            df.write(f"\n--- Inside _spawn_tester_agent ---\n")
-        # Format deliverables for prompt
-        deliverables_section = "\n".join([f"- {d}" for d in deliverables])
-        if not deliverables_section:
-            deliverables_section = "No specific deliverables listed - check phase handover"
-
-        review_prefix = review_id.split('-')[-1][:8]
-        agent_type = f"tester-{review_prefix}"
-
-        tester_prompt = f"""TESTER AGENT for phase "{phase_name}" (Task: {task_id})
-
-DELIVERABLES TO TEST:
-{deliverables_section}
-
-YOUR JOB: Test that deliverables actually work. Submit verdict via submit_review_verdict.
-
-WORKFLOW:
-1. Get context: mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={phase_index})
-2. Discover the correct port FIRST:
-   - Check running servers: lsof -i :3000,5173,4000,4010,8080 | grep LISTEN
-   - UI typically on 5173 (Vite) or 3000 (Next.js/CRA)
-   - API typically on 4000 or 4010
-3. Choose test approach based on deliverables:
-   - UI/frontend → Use chrome-devtools MCP (mcp__chrome-devtools__* tools)
-   - API/backend → curl tests
-   - Functions → run existing tests or quick verification
-4. Run tests and collect results
-5. Submit verdict:
-   mcp__claude-orchestrator__submit_review_verdict(
-       task_id="{task_id}",
-       review_id="{review_id}",
-       verdict="approved"|"rejected"|"needs_revision",
-       findings=[{{"type":"praise|blocker|issue","severity":"low|medium|high|critical","message":"..."}}],
-       reviewer_notes="Summary"
-   )
-
-VERDICT RULES:
-- Tests pass → approved
-- Tests fail (bug) → rejected
-- Infra down/timeout → needs_revision
-
-═══════════════════════════════════════════════════════════════
-⚡ UI TESTING: USE CHROME-DEVTOOLS MCP (NOT browser-use)
-═══════════════════════════════════════════════════════════════
-You have access to chrome-devtools MCP tools for browser automation:
-
-1. mcp__chrome-devtools__new_page - Open URL in browser
-2. mcp__chrome-devtools__take_snapshot - Get page accessibility tree (find element UIDs)
-3. mcp__chrome-devtools__take_screenshot - Visual verification
-4. mcp__chrome-devtools__click - Click elements by UID
-5. mcp__chrome-devtools__fill - Enter text in inputs
-6. mcp__chrome-devtools__navigate_page - Navigate/reload
-
-TESTING WORKFLOW:
-1. Open page: mcp__chrome-devtools__new_page(url="http://localhost:PORT/page")
-2. Take snapshot: mcp__chrome-devtools__take_snapshot() - find element UIDs
-3. Interact: click/fill using UIDs from snapshot
-4. Verify: take_screenshot to confirm expected state
-5. Repeat for each test case
-
-Example:
-- new_page(url="http://localhost:5173/dashboard")
-- take_snapshot() → find button UID like "btn-123"
-- click(uid="btn-123")
-- take_snapshot() → verify expected change
-- take_screenshot() → visual confirmation
-
-DO NOT USE: browser-use, Gemini, external Python scripts
-USE: chrome-devtools MCP tools (you already have access)
-
-MANDATORY: Call submit_review_verdict before finishing!
-"""
-
-        logger.info(f"TESTER: Spawning tester agent for phase '{phase_name}'")
-        with open(debug_file, "a") as df:
-            df.write(f"Calling deploy_claude_tmux_agent for tester...\n")
-            df.write(f"  agent_type={agent_type}\n")
-            df.write(f"  prompt_length={len(tester_prompt)}\n")
-
-        result = deploy_claude_tmux_agent(
-            task_id=task_id,
-            agent_type=agent_type,
-            prompt=tester_prompt,
-            parent="orchestrator",
-            phase_index=-1,  # Not part of phase work (like reviewers)
-            model="claude-sonnet-4-5"  # Sonnet for tester
-        )
-
-        with open(debug_file, "a") as df:
-            df.write(f"deploy_claude_tmux_agent returned: {result}\n")
-
-        if result.get('success'):
-            agent_id = result.get('agent_id')
-            logger.info(f"TESTER: Successfully spawned tester agent: {agent_id}")
-            return agent_id
-        else:
-            with open(debug_file, "a") as df:
-                df.write(f"FAILED to spawn tester: {result.get('error')}\n")
-            logger.error(f"TESTER: Failed to spawn tester: {result.get('error')}")
-            return None
-
-    except Exception as e:
-        import traceback
-        with open(debug_file, "a") as df:
-            df.write(f"EXCEPTION spawning tester: {e}\n")
-            df.write(f"Traceback: {traceback.format_exc()}\n")
-        logger.error(f"TESTER: Exception spawning tester agent: {e}")
-        return None
-
-
-@mcp.tool()
-def trigger_agentic_review(
-    task_id: str,
-    num_reviewers: int = 2,
-    review_focus: Optional[List[str]] = None
-) -> str:
-    """
-    Trigger automated agentic review by spawning reviewer agents.
-
-    This deploys specialized agents to review phase work:
-    - 2 Sonnet REVIEWER agents (submit verdicts - approve/reject/needs_revision)
-    - 1 Sonnet CRITIQUE agent (senior dev perspective, no verdict, observations only)
-
-    Flow:
-        1. Phase must be in AWAITING_REVIEW state
-        2. Spawns num_reviewers (default 2) Sonnet agents + 1 critique agent
-        3. Reviewers call submit_review_verdict, critique calls submit_critique
-        4. System aggregates verdicts (2 reviewer tie-break: approve+reject → needs_revision)
-
-    Args:
-        task_id: Task ID containing the phase to review
-        num_reviewers: Number of reviewer agents to spawn (1-5, default 2)
-        review_focus: Optional focus areas like ["security", "performance", "code_quality"]
-
-    Returns:
-        Dict with review_id, spawned agent IDs, critique agent ID, and phase status
-    """
-    from orchestrator.review import create_review_record, ReviewConfig
-
-    workspace = find_task_workspace(task_id)
-    if not workspace:
-        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
-
-    # Clamp num_reviewers
-    num_reviewers = max(1, min(5, num_reviewers))
-
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
-
-    with LockedRegistryFile(registry_path) as (registry, f):
-        phases = registry.get('phases', [])
-        current_idx = registry.get('current_phase_index', 0)
-
-        if not phases or current_idx >= len(phases):
-            return json.dumps({"success": False, "error": "No current phase"})
-
-        current_phase = phases[current_idx]
-        phase_id = current_phase.get('id', f"phase-{current_idx}")
-        phase_name = current_phase.get('name', 'Unknown')
-
-        phase_status = current_phase.get('status')
-        if phase_status not in ['AWAITING_REVIEW', 'ESCALATED']:
-            return json.dumps({
-                "success": False,
-                "error": f"Phase must be AWAITING_REVIEW or ESCALATED to trigger review. Current: {phase_status}"
-            })
-
-        # If phase was ESCALATED, log the retry
-        if phase_status == 'ESCALATED':
-            logger.info(f"Retrying review for ESCALATED phase {current_idx} in task {task_id}")
-            current_phase['escalation_retry_at'] = datetime.now().isoformat()
-            current_phase['escalation_retry_reason'] = 'Manual retry via trigger_agentic_review'
-
-        # Create review record (reviewers + critique)
-        review_id = f"review-{uuid.uuid4().hex[:12]}"
-        review_record = {
-            "review_id": review_id,
-            "phase_id": phase_id,
-            "phase_name": phase_name,
-            "status": "in_progress",
-            "num_reviewers": num_reviewers,  # Only counts verdict-submitting reviewers
-            "reviewers": [],
-            "verdicts": [],
-            "has_critique": True,  # This review includes a critique agent
-            "critique_agent_id": None,  # Set when critique agent is spawned
-            "critique_submitted": False,
-            "critique": None,  # Will hold critique observations when submitted
-            "created_at": datetime.now().isoformat(),
-            "review_focus": review_focus or ["completeness", "correctness", "quality"]
-        }
-
-        # Initialize reviews list if not exists
-        if 'reviews' not in registry:
-            registry['reviews'] = []
-        registry['reviews'].append(review_record)
-
-        # Transition phase to UNDER_REVIEW
-        current_phase['status'] = 'UNDER_REVIEW'
-        current_phase['review_started_at'] = datetime.now().isoformat()
-        current_phase['active_review_id'] = review_id
-
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
-
-    # Build review prompt for agents
-    focus_areas = review_focus or ["completeness", "correctness", "quality"]
-    current_phase_idx = registry.get('current_phase_index', 0)
-    review_prompt = f"""You are a REVIEWER AGENT for phase "{phase_name}" (Task: {task_id}).
-
-YOUR MISSION: Review the ACTUAL DELIVERABLES produced in this phase and submit a verdict.
-
-REVIEW FOCUS AREAS: {', '.join(focus_areas)}
-
-STEP 1 - GET TASK CONTEXT (use MCP tools):
-```
-mcp__claude-orchestrator__get_real_task_status(task_id="{task_id}")
-```
-This shows: task description, expected deliverables, success criteria, agent statuses.
-
-STEP 2 - GET AGENT FINDINGS (what agents discovered/created):
-```
-mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={current_phase_idx})
-```
-This shows: findings, key discoveries, deliverables from this phase.
-
-STEP 3 - CHECK AGENT OUTPUTS (if needed):
-```
-mcp__claude-orchestrator__get_agent_output(task_id="{task_id}", agent_id="<agent_id>", response_format="recent")
-```
-Use this to see what specific agents did.
-
-STEP 4 - VERIFY ACTUAL DELIVERABLES:
-- If files were created, use Read tool to check them
-- If code was written, verify it exists and looks correct
-- If a server was implemented, test the endpoints with curl/fetch
-- Workspace location: {workspace}
-
-CRITICAL EVALUATION RULES:
-1. IGNORE registry progress percentages - they are unreliable
-2. FOCUS ON: Do the deliverables exist and work?
-3. Check success_criteria from task status - are they met?
-
-AFTER REVIEWING, SUBMIT YOUR VERDICT:
-```
-mcp__claude-orchestrator__submit_review_verdict(
-    task_id="{task_id}",
-    review_id="{review_id}",
-    verdict="approved" | "rejected" | "needs_revision",
-    findings=[{{"type": "issue|suggestion|blocker|praise", "severity": "critical|high|medium|low", "message": "..."}}],
-    reviewer_notes="Summary of what you verified"
-)
-```
-
-VERDICT GUIDE:
-- "approved": Deliverables exist and meet success criteria
-- "needs_revision": Deliverables exist but have minor issues
-- "rejected": Critical deliverables missing or fundamentally broken
-
-═══════════════════════════════════════════════════════════════════════════════
-⚡ MANDATORY: YOU MUST SUBMIT YOUR VERDICT - REVIEW IS NOT COMPLETE WITHOUT IT ⚡
-═══════════════════════════════════════════════════════════════════════════════
-
-Your job is ONLY COMPLETE when you call submit_review_verdict.
-
-IF YOU DO NOT SUBMIT YOUR VERDICT:
-- The phase will be STUCK waiting for your review
-- The orchestrator cannot proceed
-- Your review is WASTED
-- The system will eventually mark you as failed
-
-REVIEW THE DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-    # Spawn reviewer agents (Sonnet for speed/cost)
-    spawned_agents = []
-    review_prefix = review_id.split('-')[-1][:8]  # e.g., "review-abc123..." -> "abc123"
-
-    for i in range(num_reviewers):
-        # CRITICAL FIX (v2): Agent types must be unique per-REVIEW, not just per-phase
-        agent_type = f"reviewer-{review_prefix}-{i+1}"
-        try:
-            # Use Sonnet for reviewers (faster, cheaper, sufficient for structured review tasks)
-            result = deploy_claude_tmux_agent(
-                task_id=task_id,
-                agent_type=agent_type,
-                prompt=review_prompt,
-                parent="orchestrator",
-                model="claude-sonnet-4-5"  # Sonnet for reviewers
-            )
-            if result.get('success'):
-                agent_id = result.get('agent_id')
-                spawned_agents.append(agent_id)
-
-                # Update review record with reviewer info
-                with LockedRegistryFile(registry_path) as (reg, f2):
-                    for rev in reg.get('reviews', []):
-                        if rev.get('review_id') == review_id:
-                            rev['reviewers'].append({
-                                "agent_id": agent_id,
-                                "agent_type": agent_type,
-                                "role": "reviewer",  # Distinguish from critique
-                                "spawned_at": datetime.now().isoformat(),
-                                "status": "reviewing"
-                            })
-                            break
-                    f2.seek(0)
-                    json.dump(reg, f2, indent=2)
-                    f2.truncate()
-
-                logger.info(f"Spawned Sonnet reviewer {agent_id}")
-            else:
-                logger.error(f"Failed to spawn reviewer {i+1}: {result.get('error', 'Unknown error')}")
-        except Exception as e:
-            logger.error(f"Failed to spawn reviewer {i+1}: {e}")
-
-    # Build critique prompt (senior dev birds-eye view, no verdict)
-    critique_prompt = f"""You are a SENIOR DEVELOPER CRITIQUE AGENT for phase "{phase_name}" (Task: {task_id}).
-
-YOUR ROLE IS DIFFERENT FROM REVIEWERS:
-- You do NOT submit a verdict (approve/reject)
-- You provide senior developer perspective and observations
-- Your feedback informs the orchestrator but doesn't block progress
-- Think like a tech lead doing a high-level code review
-
-REVIEW FOCUS AREAS: {', '.join(focus_areas)}
-
-YOUR MISSION: Provide birds-eye view observations, not pass/fail judgment.
-
-STEP 1 - GET TASK CONTEXT:
-```
-mcp__claude-orchestrator__get_real_task_status(task_id="{task_id}")
-```
-
-STEP 2 - GET AGENT FINDINGS:
-```
-mcp__claude-orchestrator__get_phase_handover(task_id="{task_id}", phase_index={current_phase_idx})
-```
-
-STEP 3 - EXAMINE CODE/DELIVERABLES:
-- Use Read tool to check actual files
-- Look for architectural patterns
-- Check for technical debt
-- Workspace: {workspace}
-
-WHAT TO LOOK FOR (senior dev perspective):
-1. ARCHITECTURAL: Is the approach sound? Any red flags?
-2. TECHNICAL DEBT: Are there shortcuts that will cause problems later?
-3. MAINTAINABILITY: Will this be easy to maintain/extend?
-4. BEST PRACTICES: Are coding standards followed?
-5. SUGGESTIONS: What could be improved (even if not blocking)?
-
-SUBMIT YOUR CRITIQUE (NOT a verdict):
-```
-mcp__claude-orchestrator__submit_critique(
-    task_id="{task_id}",
-    review_id="{review_id}",
-    observations=[
-        {{"type": "architectural|technical_debt|suggestion|concern|praise", "priority": "high|medium|low", "message": "...", "scope": "current_phase|future_phases|overall"}}
-    ],
-    summary="High-level assessment from senior dev perspective",
-    recommendations=["Optional list of recommendations for orchestrator"]
-)
-```
-
-═══════════════════════════════════════════════════════════════════════════════
-⚡ MANDATORY: YOU MUST SUBMIT YOUR CRITIQUE - YOUR JOB IS NOT COMPLETE WITHOUT IT ⚡
-═══════════════════════════════════════════════════════════════════════════════
-
-REMEMBER: You are providing observations and advice, NOT a pass/fail verdict.
-The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
-"""
-
-    # Spawn critique agent (Sonnet)
-    critique_agent_id = None
-    try:
-        critique_agent_type = f"critique-{review_prefix}"
-        result = deploy_claude_tmux_agent(
-            task_id=task_id,
-            agent_type=critique_agent_type,
-            prompt=critique_prompt,
-            parent="orchestrator",
-            model="claude-sonnet-4-5"  # Sonnet for critique
-        )
-        if result.get('success'):
-            critique_agent_id = result.get('agent_id')
-
-            # Update review record with critique agent
-            with LockedRegistryFile(registry_path) as (reg, f2):
-                for rev in reg.get('reviews', []):
-                    if rev.get('review_id') == review_id:
-                        rev['critique_agent_id'] = critique_agent_id
-                        break
-                f2.seek(0)
-                json.dump(reg, f2, indent=2)
-                f2.truncate()
-
-            logger.info(f"Spawned Sonnet critique agent {critique_agent_id}")
-        else:
-            logger.error(f"Failed to spawn critique: {result.get('error', 'Unknown error')}")
-    except Exception as e:
-        logger.error(f"Failed to spawn critique: {e}")
-
-    return json.dumps({
-        "success": True,
-        "review_id": review_id,
-        "phase": phase_name,
-        "status": "UNDER_REVIEW",
-        "num_reviewers": num_reviewers,
-        "spawned_reviewer_agents": spawned_agents,
-        "critique_agent_id": critique_agent_id,
-        "message": f"Spawned {len(spawned_agents)} Sonnet reviewers + 1 Sonnet critique agent"
-    }, indent=2)
+# NOTE: _should_spawn_tester() and _spawn_tester_agent() were REMOVED (Jan 2026)
+# Per-phase testing was removed in favor of a mandatory "Final Testing" phase.
+# This reduces review overhead (no tester for Investigation/Design phases) and
+# focuses testing effort where it matters most - after all implementation is complete.
+# The Final Testing phase is auto-appended to task phases in create_real_task().
+
+# NOTE: trigger_agentic_review() was REMOVED (Jan 2026)
+# This was duplicate code of _auto_spawn_phase_reviewers() with bugs:
+# - Used wrong phase_index (current_phase_idx from registry instead of actual phase)
+# - Caused reviewers to evaluate against wrong phase context
+# All review triggering now goes through _auto_spawn_phase_reviewers() which is
+# called automatically by update_agent_progress when all phase agents complete.
 
 
 @mcp.tool()
@@ -6230,6 +5863,26 @@ def submit_review_verdict(
                 if final_verdict == 'approved':
                     current_phase['status'] = 'APPROVED'
                     current_phase['approved_at'] = datetime.now().isoformat()
+
+                    # AUTO-GENERATE HANDOVER for completed phase
+                    # This ensures next phase has proper context from this phase's work
+                    try:
+                        phase_id = current_phase.get('id', f"phase-{current_idx}")
+                        phase_name = current_phase.get('name', f"Phase {current_idx + 1}")
+                        handover_doc = auto_generate_handover(
+                            task_workspace=workspace,
+                            phase_id=phase_id,
+                            phase_name=phase_name,
+                            registry=registry
+                        )
+                        save_result = save_handover(workspace, handover_doc)
+                        logger.info(f"PHASE-APPROVAL: Auto-generated handover for phase {phase_id}: {save_result.get('path', 'unknown')}")
+                        result_info['handover_generated'] = True
+                        result_info['handover_path'] = save_result.get('path')
+                    except Exception as e:
+                        logger.error(f"PHASE-APPROVAL: Failed to auto-generate handover for phase {current_idx}: {e}")
+                        result_info['handover_generated'] = False
+                        result_info['handover_error'] = str(e)
 
                     # Auto-advance to next phase if not final
                     if current_idx < len(phases) - 1:

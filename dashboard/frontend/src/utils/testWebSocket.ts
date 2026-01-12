@@ -6,7 +6,7 @@
 export function testWebSocketConnection(taskId?: string): void {
   console.log('[WebSocket Test] Starting connection test...');
 
-  const ws = new WebSocket('ws://localhost:8000/ws');
+  const ws = new WebSocket(`${import.meta.env.VITE_WS_URL || 'ws://localhost:8765'}/ws`);
 
   ws.onopen = () => {
     console.log('[WebSocket Test] ✅ Connected successfully');
