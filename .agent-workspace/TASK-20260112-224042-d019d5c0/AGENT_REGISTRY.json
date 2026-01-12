@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-20260112-224042-d019d5c0",
+  "task_description": "Debug test - reviewer spawn trace",
+  "created_at": "2026-01-12T22:40:42.348964",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260112-224042-d019d5c0",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP",
+  "status": "INITIALIZED",
+  "priority": "P2",
+  "phases": [
+    {
+      "id": "phase-4333f66b",
+      "order": 1,
+      "name": "Debug Phase",
+      "description": "Test",
+      "deliverables": [
+        "Pass"
+      ],
+      "success_criteria": [
+        "Done"
+      ],
+      "status": "ACTIVE",
+      "created_at": "2026-01-12T22:40:42.348881",
+      "started_at": "2026-01-12T22:40:42.348883"
+    },
+    {
+      "id": "phase-fb994d08",
+      "order": 2,
+      "name": "Final Testing",
+      "description": "Comprehensive testing of all implemented features. This phase uses chrome-devtools MCP for browser testing, curl for API tests, and runs any existing test suites.",
+      "deliverables": [
+        "All UI features tested via browser automation",
+        "All API endpoints tested via curl/integration tests",
+        "Existing test suites pass (if applicable)",
+        "No critical bugs or regressions found"
+      ],
+      "success_criteria": [
+        "Core user flows work end-to-end",
+        "No console errors during testing",
+        "API responses are correct and performant",
+        "Visual appearance matches expectations"
+      ],
+      "status": "PENDING",
+      "created_at": "2026-01-12T22:40:42.348923",
+      "started_at": null,
+      "auto_appended": true,
+      "tests_deliverables_from": [
+        "Debug Phase"
+      ]
+    }
+  ],
+  "current_phase_index": 0,
+  "agents": [],
+  "agent_hierarchy": {
+    "orchestrator": []
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 0,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 1
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-12T22:40:42.349009",
+    "violations": 0
+  }
+}

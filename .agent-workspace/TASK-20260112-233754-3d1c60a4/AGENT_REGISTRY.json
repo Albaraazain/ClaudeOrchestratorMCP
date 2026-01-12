@@ -1,0 +1,102 @@
+{
+  "task_id": "TASK-20260112-233754-3d1c60a4",
+  "task_description": "Complete SQLite Migration - Eliminate all remaining JSON registry usages",
+  "created_at": "2026-01-12T23:37:54.864771",
+  "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260112-233754-3d1c60a4",
+  "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace",
+  "client_cwd": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP",
+  "status": "INITIALIZED",
+  "priority": "P1",
+  "phases": [
+    {
+      "id": "phase-6192d4d8",
+      "order": 1,
+      "name": "Add Missing Imports and Functions",
+      "description": "Add uuid import to state_db.py, verify create_task_with_phases works",
+      "deliverables": [
+        "uuid import added",
+        "create_task_with_phases function complete"
+      ],
+      "success_criteria": [
+        "No import errors",
+        "Function creates tasks in SQLite"
+      ],
+      "status": "ACTIVE",
+      "created_at": "2026-01-12T23:37:54.864724",
+      "started_at": "2026-01-12T23:37:54.864728"
+    },
+    {
+      "id": "phase-14daf8a2",
+      "order": 2,
+      "name": "Migrate create_real_task",
+      "description": "Replace JSON AGENT_REGISTRY.json creation with direct SQLite writes",
+      "deliverables": [
+        "create_real_task uses state_db.create_task_with_phases",
+        "Remove JSON file creation"
+      ],
+      "success_criteria": [
+        "Tasks created without AGENT_REGISTRY.json",
+        "All existing functionality preserved"
+      ],
+      "status": "PENDING",
+      "created_at": "2026-01-12T23:37:54.864744",
+      "started_at": null
+    },
+    {
+      "id": "phase-de5e2788",
+      "order": 3,
+      "name": "Migrate health_daemon.py",
+      "description": "Replace 8 LockedRegistryFile usages with SQLite",
+      "deliverables": [
+        "All health checks use SQLite",
+        "No LockedRegistryFile in health_daemon.py"
+      ],
+      "success_criteria": [
+        "Health daemon works with SQLite only"
+      ],
+      "status": "PENDING",
+      "created_at": "2026-01-12T23:37:54.864749",
+      "started_at": null
+    },
+    {
+      "id": "phase-4b1aaf6a",
+      "order": 4,
+      "name": "Final Testing",
+      "description": "End-to-end test of task creation, agent deployment, and review flow",
+      "deliverables": [
+        "Working task creation",
+        "Working review flow",
+        "No JSON file dependencies"
+      ],
+      "success_criteria": [
+        "Full flow works without JSON files"
+      ],
+      "status": "PENDING",
+      "created_at": "2026-01-12T23:37:54.864752",
+      "started_at": null
+    }
+  ],
+  "current_phase_index": 0,
+  "agents": [],
+  "agent_hierarchy": {
+    "orchestrator": []
+  },
+  "max_agents": 45,
+  "max_depth": 5,
+  "max_concurrent": 20,
+  "total_spawned": 0,
+  "active_count": 0,
+  "completed_count": 0,
+  "reviews": [],
+  "orchestration_guidance": {
+    "min_specialization_depth": 2,
+    "recommended_child_agents_per_parent": 3,
+    "specialization_domains": [],
+    "complexity_score": 5
+  },
+  "spiral_checks": {
+    "enabled": true,
+    "last_check": "2026-01-12T23:37:54.864821",
+    "violations": 0
+  }
+}

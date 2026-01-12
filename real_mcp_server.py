@@ -943,20 +943,24 @@ def deploy_claude_tmux_agent(
     prompt: str,
     parent: str = "orchestrator",
     phase_index: Optional[int] = None,
-    model: str = "claude-opus-4-5"
+    model: str = "claude-opus-4-5",
+    agent_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Deploy a headless Claude agent using tmux for background execution.
 
-    Original deployment method using tmux sessions and claude CLI.
+    MIGRATED TO SQLITE (Jan 2026): No more nested LockedRegistryFile locks.
+    Uses state_db for atomic operations, eliminating lock contention that
+    caused reviewer spawn failures.
 
     Args:
         task_id: Task ID to deploy agent for
         agent_type: Type of agent (investigator, fixer, etc.)
         prompt: Instructions for the agent
         parent: Parent agent ID
-        phase_index: Phase index this agent belongs to (auto-set from registry if None)
+        phase_index: Phase index this agent belongs to (auto-set from SQLite if None)
         model: Claude model to use - "claude-opus-4-5" (default) or "claude-sonnet-4-5" (faster, cheaper)
+        agent_id: Optional pre-generated agent ID. If None, one will be generated.
 
     Returns:
         Agent deployment result
@@ -972,7 +976,7 @@ def deploy_claude_tmux_agent(
             "success": False,
             "error": "tmux is not available - required for background execution"
         }
-    
+
     # Find the task workspace (may be in client or server location)
     workspace = find_task_workspace(task_id)
     if not workspace:
@@ -980,101 +984,90 @@ def deploy_claude_tmux_agent(
             "success": False,
             "error": f"Task {task_id} not found in any workspace location"
         }
-    
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
 
-    # CRITICAL: Consolidate ALL registry operations under a single lock to prevent race conditions
-    # This prevents concurrent agent deployments from corrupting registry counts
-    try:
-        with LockedRegistryFile(registry_path) as (registry, registry_file):
-            # DEFENSIVE: Recalculate active_count from actual agent statuses to auto-heal inconsistencies
-            # This fixes cases where agents complete without proper decrement (e.g., reviewer bug fixed above)
-            active_statuses = ['running', 'working', 'blocked']
-            actual_active = sum(1 for a in registry.get('agents', []) if a.get('status') in active_statuses)
-            if registry.get('active_count', 0) != actual_active:
-                logger.warning(f"ACTIVE_COUNT_HEAL: Correcting active_count from {registry.get('active_count')} to {actual_active} (actual)")
-                registry['active_count'] = actual_active
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-            # Anti-spiral checks
-            if registry['active_count'] >= registry['max_concurrent']:
-                return {
-                    "success": False,
-                    "error": f"Too many active agents ({registry['active_count']}/{registry['max_concurrent']})"
-                }
+    # =========================================================================
+    # SQLITE MIGRATION: Replace nested LockedRegistryFile with SQLite checks
+    # This eliminates lock contention that caused reviewer spawn failures
+    # =========================================================================
 
-            # Check active + pending agents, not total_spawned (allows reusing slots after completion)
-            current_active = registry.get('active_count', 0)
-            if current_active >= registry['max_agents']:
-                return {
-                    "success": False,
-                    "error": f"Max active agents reached ({current_active}/{registry['max_agents']})"
-                }
+    # Get task config from SQLite (or defaults)
+    task_config = state_db.get_task_config(workspace_base=workspace_base, task_id=task_id)
+    max_concurrent = task_config.get('max_concurrent', 20)
+    max_agents = task_config.get('max_agents', 50)
+    max_depth = task_config.get('max_depth', 5)
 
-            # Check for duplicate agents (deduplication)
-            existing_agent = find_existing_agent(task_id, agent_type, registry)
-            if existing_agent:
-                logger.warning(f"Agent type '{agent_type}' already exists for task {task_id}: {existing_agent['id']}")
-                return {
-                    "success": False,
-                    "error": f"Agent of type '{agent_type}' already running for this task",
-                    "existing_agent_id": existing_agent['id'],
-                    "existing_agent_status": existing_agent['status'],
-                    "note": "Use the existing agent or wait for it to complete before spawning a new one"
-                }
+    # Check if we can spawn (atomic SQLite check - no file locks!)
+    can_spawn, error_msg, existing = state_db.check_can_spawn_agent(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        agent_type=agent_type,
+        max_concurrent=max_concurrent,
+        max_agents=max_agents
+    )
 
-            # Load global registry for unique ID verification (separate lock)
-            workspace_base = get_workspace_base_from_task_workspace(workspace)
-            global_reg_path = get_global_registry_path(workspace_base)
-
-            try:
-                with LockedRegistryFile(global_reg_path) as (global_registry, global_file):
-                    # Generate unique agent ID with collision detection
-                    try:
-                        agent_id = generate_unique_agent_id(agent_type, registry, global_registry)
-                    except RuntimeError as e:
-                        logger.error(f"Failed to generate unique agent ID: {e}")
-                        return {
-                            "success": False,
-                            "error": str(e)
-                        }
-
-                    # Keep global registry loaded for later update
-                    global_registry_snapshot = dict(global_registry)
-            except TimeoutError as e:
-                logger.error(f"Timeout acquiring global registry lock: {e}")
-                return {
-                    "success": False,
-                    "error": "Global registry locked - too many concurrent deployments"
-                }
-
-            session_name = f"agent_{agent_id}"
-
-            # Calculate agent depth based on parent (using already-loaded registry)
-            depth = 1 if parent == "orchestrator" else 2
-            if parent != "orchestrator":
-                for agent in registry['agents']:
-                    if agent['id'] == parent:
-                        depth = agent.get('depth', 1) + 1
-                        break
-
-            # Get task description for orchestration guidance (using already-loaded registry)
-            task_description = registry.get('task_description', '')
-            max_depth = registry.get('max_depth', 5)
-
-            # AUTO-SET phase_index if not provided - ensures all agents tagged to current phase
-            if phase_index is None:
-                phase_index = registry.get('current_phase_index', 0)
-                logger.info(f"Auto-assigning agent {agent_id} to phase {phase_index}")
-
-            # Store registry reference for later use (still within lock)
-            task_registry = registry
-
-    except TimeoutError as e:
-        logger.error(f"Timeout acquiring registry lock for deployment: {e}")
+    if not can_spawn:
+        if existing:
+            return {
+                "success": False,
+                "error": error_msg,
+                "existing_agent_id": existing.get('agent_id'),
+                "existing_agent_status": existing.get('status'),
+                "note": "Use the existing agent or wait for it to complete before spawning a new one"
+            }
         return {
             "success": False,
-            "error": "Registry locked - too many concurrent deployments"
+            "error": error_msg
         }
+
+    # Generate unique agent ID using UUID (no global registry lock needed!)
+    # Use pre-generated agent_id if provided, otherwise generate one
+    if not agent_id:
+        timestamp = datetime.now().strftime('%H%M%S')
+        unique_suffix = uuid.uuid4().hex[:6]
+        # Truncate agent_type to avoid excessively long IDs
+        type_prefix = agent_type[:20] if len(agent_type) > 20 else agent_type
+        agent_id = f"{type_prefix}-{timestamp}-{unique_suffix}"
+
+    session_name = f"agent_{agent_id}"
+
+    # Calculate agent depth based on parent
+    depth = 1 if parent == "orchestrator" else 2
+    if parent != "orchestrator":
+        # Check parent depth in SQLite
+        parent_agent = state_db.get_agent_by_id(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            agent_id=parent
+        )
+        if parent_agent:
+            depth = (parent_agent.get('depth') or 1) + 1
+
+    # Get task description from SQLite task snapshot
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    task_description = task_snapshot.get('description', '') if task_snapshot else ''
+
+    # AUTO-SET phase_index if not provided - get from SQLite
+    if phase_index is None:
+        if task_snapshot:
+            phase_index = task_snapshot.get('current_phase_index', 0)
+        else:
+            phase_index = 0
+        logger.info(f"Auto-assigning agent {agent_id} to phase {phase_index}")
+
+    # Build task_registry dict for prompt formatting (backward compat with format_task_enrichment_prompt)
+    task_registry = {
+        'task_description': task_description,
+        'task_context': task_config,
+        'max_depth': max_depth,
+        'current_phase_index': phase_index,
+        'phases': task_snapshot.get('phases', []) if task_snapshot else [],
+        'agents': task_snapshot.get('agents', []) if task_snapshot else [],
+    }
+
+    # Legacy registry path (still needed for some file operations)
+    registry_path = f"{workspace}/AGENT_REGISTRY.json"
 
     orchestration_prompt = create_orchestration_guidance_prompt(agent_type, task_description, depth, max_depth)
 
@@ -1338,128 +1331,48 @@ BEGIN YOUR WORK NOW!
                 "success": False,
                 "error": "Agent session terminated immediately after creation"
             }
-        
-        # CRITICAL: Atomically update BOTH registries to prevent race conditions
-        # This ensures agent deployment is all-or-nothing
-        agent_data = {
-            "id": agent_id,
-            "type": agent_type,
-            "model": model,  # Track which model this agent uses (opus/sonnet)
-            "tmux_session": session_name,
-            "parent": parent,
-            "depth": depth,  # Use the calculated depth
-            "phase_index": phase_index,  # PHASE ENFORCEMENT: Tag agent to phase for auto-completion tracking
-            "status": "running",
-            "started_at": datetime.now().isoformat(),
-            "progress": 0,
-            "last_update": datetime.now().isoformat(),
-            "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
-            "tracked_files": {
-                "prompt_file": prompt_file,
-                "log_file": log_file,
-                "progress_file": f"{workspace}/progress/{agent_id}_progress.jsonl",
-                "findings_file": f"{workspace}/findings/{agent_id}_findings.jsonl",
-                "deploy_log": f"{workspace}/logs/deploy_{agent_id}.json"
-            }
-        }
 
-        # Update local registry with atomic locking
-        try:
-            with LockedRegistryFile(registry_path) as (registry, f):
-                registry['agents'].append(agent_data)
-                registry['total_spawned'] += 1
-                registry['active_count'] += 1
+        # =========================================================================
+        # SQLITE MIGRATION: Replace LockedRegistryFile writes with SQLite
+        # Single atomic transaction - no file locks, no race conditions
+        # =========================================================================
 
-                # Update hierarchy
-                if parent not in registry['agent_hierarchy']:
-                    registry['agent_hierarchy'][parent] = []
-                registry['agent_hierarchy'][parent].append(agent_id)
+        # Deploy agent to SQLite atomically
+        deploy_result = state_db.deploy_agent_atomic(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            agent_id=agent_id,
+            agent_type=agent_type,
+            model=model,
+            parent=parent,
+            depth=depth,
+            phase_index=phase_index,
+            tmux_session=session_name,
+            prompt_preview=prompt[:200] if prompt else ""
+        )
 
-                # LIFECYCLE: Transition task to ACTIVE on first agent deployment
-                if registry['active_count'] == 1:  # This is the first active agent
-                    try:
-                        workspace_base = get_workspace_base_from_task_workspace(workspace)
-                        if state_db.transition_task_to_active(workspace_base=workspace_base, task_id=task_id):
-                            logger.info(f"[LIFECYCLE] Task {task_id} transitioned to ACTIVE on first agent deployment")
-                            registry['status'] = 'ACTIVE'  # Update registry status to match
-                    except Exception as e:
-                        logger.warning(f"[LIFECYCLE] Failed to transition task to ACTIVE: {e}")
-
-                # Write atomically
-                f.seek(0)
-                f.write(json.dumps(registry, indent=2))
-                f.truncate()
-                registry_updated = True  # Track for cleanup awareness
-        except TimeoutError as e:
-            logger.error(f"Timeout acquiring registry lock for update: {e}")
-            # Clean up tmux session since deployment failed
+        if not deploy_result.get('success'):
+            # Clean up tmux session since SQLite insert failed
             if tmux_session_created:
                 try:
                     subprocess.run(['tmux', 'kill-session', '-t', session_name],
                                  capture_output=True, timeout=5)
-                    logger.info(f"Killed orphaned tmux session after lock timeout: {session_name}")
+                    logger.info(f"Killed orphaned tmux session after SQLite insert failed: {session_name}")
                 except Exception:
                     pass
             return {
                 "success": False,
-                "error": "Registry locked - deployment failed"
+                "error": f"SQLite insert failed: {deploy_result.get('error', 'Unknown error')}"
             }
 
-        # Update global registry with atomic locking
-        workspace_base = get_workspace_base_from_task_workspace(workspace)
-        global_reg_path = get_global_registry_path(workspace_base)
-
-        try:
-            with LockedRegistryFile(global_reg_path) as (global_reg, f):
-                # MIGRATION FIX: Don't increment counts - derive from SQLite
-                # global_reg['total_agents_spawned'] += 1
-                # global_reg['active_agents'] += 1
-                global_reg['agents'][agent_id] = {
-                    'task_id': task_id,
-                    'type': agent_type,
-                    'parent': parent,
-                    'status': 'running',  # Initial status - CRITICAL for cleanup detection
-                    'started_at': datetime.now().isoformat(),
-                    'tmux_session': session_name
-                }
-
-                # MIGRATION FIX: Don't write global registry - state_db is source of truth
-                # f.seek(0)
-                # f.write(json.dumps(global_reg, indent=2))
-                # f.truncate()
-                global_registry_updated = True  # Track for cleanup awareness
-        except TimeoutError as e:
-            logger.error(f"Timeout acquiring global registry lock: {e}")
-            # Rollback local registry since global failed
+        # LIFECYCLE: Transition task to ACTIVE on first agent deployment
+        active_count = state_db.get_active_agent_count(workspace_base=workspace_base, task_id=task_id)
+        if active_count == 1:  # This is the first active agent
             try:
-                with LockedRegistryFile(registry_path) as (registry, f):
-                    # Remove the agent we just added
-                    registry['agents'] = [a for a in registry['agents'] if a['id'] != agent_id]
-                    registry['total_spawned'] -= 1
-                    registry['active_count'] -= 1
-                    if parent in registry['agent_hierarchy']:
-                        registry['agent_hierarchy'][parent].remove(agent_id)
-
-                    f.seek(0)
-                    f.write(json.dumps(registry, indent=2))
-                    f.truncate()
-                    logger.info(f"Rolled back local registry after global registry lock timeout")
-            except Exception as rollback_err:
-                logger.error(f"Failed to rollback local registry: {rollback_err}")
-
-            # Clean up tmux session
-            if tmux_session_created:
-                try:
-                    subprocess.run(['tmux', 'kill-session', '-t', session_name],
-                                 capture_output=True, timeout=5)
-                    logger.info(f"Killed orphaned tmux session after global lock timeout: {session_name}")
-                except Exception:
-                    pass
-
-            return {
-                "success": False,
-                "error": "Global registry locked - deployment failed and rolled back"
-            }
+                if state_db.transition_task_to_active(workspace_base=workspace_base, task_id=task_id):
+                    logger.info(f"[LIFECYCLE] Task {task_id} transitioned to ACTIVE on first agent deployment")
+            except Exception as e:
+                logger.warning(f"[LIFECYCLE] Failed to transition task to ACTIVE: {e}")
 
         # Log successful deployment
         log_entry = {
@@ -1470,18 +1383,14 @@ BEGIN YOUR WORK NOW!
             "tmux_session": session_name,
             "command": claude_command[:100] + "...",
             "success": True,
-            "session_creation": session_result
+            "session_creation": session_result,
+            "storage": "sqlite"  # Mark as SQLite-backed deployment
         }
-        
+
         with open(f"{workspace}/logs/deploy_{agent_id}.json", 'w') as f:
             json.dump(log_entry, f, indent=2)
 
-        # MIGRATION FIX: Sync agent to SQLite after deployment
-        try:
-            state_db.reconcile_task_workspace(workspace)
-            logger.info(f"Agent {agent_id} synced to state_db")
-        except Exception as e:
-            logger.warning(f"Failed to sync agent {agent_id} to state_db: {e}")
+        logger.info(f"Agent {agent_id} deployed to SQLite successfully")
 
         return {
             "success": True,
@@ -1556,10 +1465,13 @@ BEGIN YOUR WORK NOW!
 def get_real_task_status(task_id: str) -> Dict[str, Any]:
     """
     Get detailed status of a real task and its agents.
-    
+
+    SQLITE MIGRATION: Now reads agents from SQLite (source of truth) and updates
+    agent statuses via SQLite. No more LockedRegistryFile - SQLite handles concurrency.
+
     Args:
         task_id: Task ID to query
-    
+
     Returns:
         Complete task status
     """
@@ -1570,119 +1482,105 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
             "success": False,
             "error": f"Task {task_id} not found in any workspace location"
         }
-    
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
 
-    # CRITICAL: Use LockedRegistryFile to prevent race conditions
-    # Multiple status checks can run concurrently - without locking, we get:
-    # - Lost updates (active_count decremented multiple times for same agent)
-    # - Corrupted counters (read-modify-write races)
+    # Get workspace_base for SQLite operations
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+
+    # Load agents from SQLite (source of truth)
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    if not task_snapshot:
+        # Fall back to reading basic task info from JSON if SQLite empty
+        registry_path = f"{workspace}/AGENT_REGISTRY.json"
+        try:
+            with open(registry_path, 'r') as f:
+                registry = json.load(f)
+        except FileNotFoundError:
+            return {"success": False, "error": f"Task {task_id} not found"}
+        except json.JSONDecodeError:
+            return {"success": False, "error": f"Corrupted registry for task {task_id}"}
+    else:
+        # Use SQLite data - transform to registry format
+        registry = {
+            'task_id': task_id,
+            'task_description': task_snapshot.get('description', ''),
+            'status': task_snapshot.get('status', 'INITIALIZED'),
+            'phases': task_snapshot.get('phases', []),
+            'current_phase_index': task_snapshot.get('current_phase_index', 0),
+            'agents': task_snapshot.get('agents', []),
+            'total_spawned': task_snapshot.get('counts', {}).get('total', 0),
+            'active_count': task_snapshot.get('counts', {}).get('active', 0),
+            'completed_count': task_snapshot.get('counts', {}).get('completed', 0),
+            'agent_hierarchy': {'orchestrator': []},  # Will be populated from agent_hierarchy table if needed
+            'max_agents': 45,
+            'max_concurrent': 20,
+            'max_depth': 5,
+            'spiral_checks': {'enabled': True, 'last_check': datetime.now().isoformat(), 'violations': 0},
+        }
+
+    # SQLITE MIGRATION: Check agent completion via stream logs and tmux sessions
+    # Update SQLite directly (no JSON writes)
     agents_completed = []
-
-    # IMPORTANT: Check ALL active statuses, not just 'running'
-    # Agents change to 'working' when they start, so we must check all active states
     active_statuses_to_check = {'running', 'working', 'blocked'}
 
-    try:
-        with LockedRegistryFile(registry_path) as (registry, f):
-            # Update agent statuses - check STREAM LOGS FIRST (most authoritative), then tmux
-            for agent in registry['agents']:
-                agent_status = agent.get('status', '')
-                agent_id = agent.get('id', '')
+    for agent in registry.get('agents', []):
+        agent_status = agent.get('status', '')
+        agent_id = agent.get('agent_id') or agent.get('id', '')
 
-                # Skip if already in terminal state
-                if agent_status not in active_statuses_to_check:
-                    continue
+        # Skip if already in terminal state
+        if agent_status not in active_statuses_to_check:
+            continue
 
-                # FIRST: Check stream log for completion marker (most reliable)
-                # Claude writes {"type":"result",...} when it finishes
-                stream_log = f"{workspace}/logs/{agent_id}_stream.jsonl"
-                stream_completed = False
+        # FIRST: Check stream log for completion marker (most reliable)
+        stream_log = f"{workspace}/logs/{agent_id}_stream.jsonl"
+        stream_completed = False
+        new_status = None
+        completion_reason = None
 
-                if os.path.exists(stream_log):
-                    try:
-                        # Read last line efficiently
-                        with open(stream_log, 'rb') as sf:
-                            sf.seek(0, 2)  # End of file
-                            file_size = sf.tell()
-                            if file_size > 0:
-                                # Read last 4KB to find last line
-                                read_size = min(4096, file_size)
-                                sf.seek(-read_size, 2)
-                                last_chunk = sf.read().decode('utf-8', errors='ignore')
-                                lines = [l.strip() for l in last_chunk.split('\n') if l.strip()]
-                                if lines:
-                                    try:
-                                        last_entry = json.loads(lines[-1])
-                                        if last_entry.get('type') == 'result':
-                                            # Stream log shows completion!
-                                            is_error = last_entry.get('is_error', False)
-                                            result_msg = last_entry.get('result', '')[:200]
+        if os.path.exists(stream_log):
+            try:
+                with open(stream_log, 'rb') as sf:
+                    sf.seek(0, 2)  # End of file
+                    file_size = sf.tell()
+                    if file_size > 0:
+                        read_size = min(4096, file_size)
+                        sf.seek(-read_size, 2)
+                        last_chunk = sf.read().decode('utf-8', errors='ignore')
+                        lines = [l.strip() for l in last_chunk.split('\n') if l.strip()]
+                        if lines:
+                            try:
+                                last_entry = json.loads(lines[-1])
+                                if last_entry.get('type') == 'result':
+                                    is_error = last_entry.get('is_error', False)
+                                    new_status = 'failed' if is_error else 'completed'
+                                    completion_reason = 'stream_log_result_marker'
+                                    stream_completed = True
+                            except json.JSONDecodeError:
+                                pass
+            except Exception as e:
+                logger.debug(f"Error reading stream log for {agent_id}: {e}")
 
-                                            if is_error:
-                                                agent['status'] = 'failed'
-                                                agent['failed_at'] = datetime.now().isoformat()
-                                                agent['failure_reason'] = f'Stream log error: {result_msg}'
-                                                registry['active_count'] = max(0, registry['active_count'] - 1)
-                                                registry['failed_count'] = registry.get('failed_count', 0) + 1
-                                            else:
-                                                agent['status'] = 'completed'
-                                                agent['completed_at'] = datetime.now().isoformat()
-                                                agent['progress'] = 100
-                                                registry['active_count'] = max(0, registry['active_count'] - 1)
-                                                registry['completed_count'] = registry.get('completed_count', 0) + 1
+        # SECOND: Check tmux session (fallback)
+        tmux_session = agent.get('tmux_session', '')
+        if not stream_completed and tmux_session:
+            if not check_tmux_session_exists(tmux_session):
+                new_status = 'completed'
+                completion_reason = 'tmux_session_terminated'
 
-                                            agent['completion_reason'] = 'stream_log_result_marker'
-                                            agent['stream_result'] = result_msg
-                                            agents_completed.append(agent_id)
-                                            stream_completed = True
-                                            logger.info(f"Detected agent {agent_id} completed via stream log (is_error={is_error}, was {agent_status})")
-                                    except json.JSONDecodeError:
-                                        pass
-                    except Exception as e:
-                        logger.debug(f"Error reading stream log for {agent_id}: {e}")
-
-                # SECOND: Check tmux session (fallback if stream log check didn't find result)
-                if not stream_completed and 'tmux_session' in agent:
-                    if not check_tmux_session_exists(agent['tmux_session']):
-                        agent['status'] = 'completed'
-                        agent['completed_at'] = datetime.now().isoformat()
-                        agent['completion_reason'] = 'tmux_session_terminated'
-                        registry['active_count'] = max(0, registry['active_count'] - 1)
-                        registry['completed_count'] = registry.get('completed_count', 0) + 1
-                        agents_completed.append(agent_id)
-                        logger.info(f"Detected agent {agent_id} completed (tmux session terminated, was {agent_status})")
-
-            # Write back atomically while still holding lock
-            f.seek(0)
-            f.write(json.dumps(registry, indent=2))
-            f.truncate()
-    except TimeoutError as e:
-        logger.error(f"Timeout acquiring lock on task registry: {e}")
-        return {"success": False, "error": "Registry locked by another process"}
-    except FileNotFoundError:
-        return {"success": False, "error": f"Registry file not found: {registry_path}"}
-
-    # Update global registry for agents that completed (also with locking)
-    if agents_completed:
-        try:
-            workspace_base = get_workspace_base_from_task_workspace(workspace)
-            global_reg_path = get_global_registry_path(workspace_base)
-            if os.path.exists(global_reg_path):
-                with LockedRegistryFile(global_reg_path) as (global_reg, gf):
-                    for agent_id in agents_completed:
-                        if agent_id in global_reg.get('agents', {}):
-                            global_reg['agents'][agent_id]['status'] = 'completed'
-                            global_reg['agents'][agent_id]['completed_at'] = datetime.now().isoformat()
-                            global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
-
-                    gf.seek(0)
-                    gf.write(json.dumps(global_reg, indent=2))
-                    gf.truncate()
-
-                logger.info(f"Global registry updated: {len(agents_completed)} agents completed, active agents: {global_reg['active_agents']}")
-        except Exception as e:
-            logger.error(f"Failed to update global registry for completed agents: {e}")
+        # Update SQLite if status changed
+        if new_status:
+            try:
+                state_db.update_agent_status(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    new_status=new_status
+                )
+                agents_completed.append(agent_id)
+                logger.info(f"Detected agent {agent_id} {new_status} via {completion_reason} (was {agent_status})")
+                # Update local registry copy for response
+                agent['status'] = new_status
+            except Exception as e:
+                logger.error(f"Failed to update agent {agent_id} status in SQLite: {e}")
     
     # Enhanced progress tracking - read JSONL files  
     progress_entries = []
@@ -1736,10 +1634,17 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
     # Check phase completion status
     phase_completion = None
     if current_phase:
-        phase_id = current_phase.get('id')
-        phase_agents = [a for a in registry.get('agents', []) if a.get('phase_id') == phase_id]
+        # SQLITE MIGRATION: Filter by phase_index (SQLite) OR phase_id (legacy JSON)
+        phase_agents = [
+            a for a in registry.get('agents', [])
+            if a.get('phase_index') == current_phase_index or a.get('phase_id') == current_phase.get('id')
+        ]
         completed_agents = [a for a in phase_agents if a.get('status') in AGENT_TERMINAL_STATUSES]
-        pending_agents = [a.get('id') for a in phase_agents if a.get('status') not in AGENT_TERMINAL_STATUSES]
+        pending_agents = [
+            a.get('agent_id') or a.get('id')
+            for a in phase_agents
+            if a.get('status') not in AGENT_TERMINAL_STATUSES
+        ]
 
         all_complete = len(phase_agents) > 0 and len(completed_agents) == len(phase_agents)
         phase_completion = {
@@ -3034,6 +2939,8 @@ def get_comprehensive_coordination_info(
     Get comprehensive coordination info for enhanced agent collaboration.
     Returns ALL peer data to enable full visibility and prevent duplicate work.
 
+    SQLITE MIGRATION: Now reads agents from SQLite instead of JSON.
+
     Returns:
     - Full agent status details (who's working on what)
     - ALL findings grouped by agent (up to max_findings_per_agent per agent)
@@ -3061,26 +2968,27 @@ def get_comprehensive_coordination_info(
     if not workspace:
         return {"success": False, "error": f"Task {task_id} not found"}
 
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-    # CRITICAL: Use LockedRegistryFile to prevent race conditions
+    # SQLITE MIGRATION: Read agents from SQLite instead of JSON
     try:
-        with LockedRegistryFile(registry_path) as (registry, f):
-            # 1. Get all agents with current status
-            agents_status = []
-            for agent in registry.get('agents', []):
-                agents_status.append({
-                    "id": agent.get("id"),
-                    "type": agent.get("type"),
-                    "status": agent.get("status"),
-                    "progress": agent.get("progress", 0),
-                    "last_update": agent.get("last_update"),
-                    "parent": agent.get("parent", "orchestrator")
-                })
-    except TimeoutError:
-        return {"success": False, "error": "Registry locked - too many concurrent reads"}
+        task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+        if not task_snapshot:
+            return {"success": False, "error": f"Task {task_id} not found in SQLite"}
+
+        # 1. Get all agents with current status from SQLite
+        agents_status = []
+        for agent in task_snapshot.get('agents', []):
+            agents_status.append({
+                "id": agent.get("agent_id"),
+                "type": agent.get("type"),
+                "status": agent.get("status"),
+                "progress": agent.get("progress", 0),
+                "last_update": agent.get("last_update"),
+                "parent": agent.get("parent", "orchestrator")
+            })
     except Exception as e:
-        return {"success": False, "error": f"Failed to read registry: {e}"}
+        return {"success": False, "error": f"Failed to read from SQLite: {e}"}
 
     # 2. Get ALL findings grouped by agent
     findings_by_agent = {}
@@ -3421,13 +3329,13 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
             "success": False,
             "error": f"Task {task_id} not found in any workspace location"
         }
-    
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    
-    # Log progress update
+
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+
+    # Log progress update to JSONL (append-only log)
     progress_file = f"{workspace}/progress/{agent_id}_progress.jsonl"
     os.makedirs(f"{workspace}/progress", exist_ok=True)
-    
+
     progress_timestamp = datetime.now().isoformat()
     progress_entry = {
         "timestamp": progress_timestamp,
@@ -3436,15 +3344,34 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
         "message": message,
         "progress": progress
     }
-    
+
     with open(progress_file, 'a') as f:
         f.write(json.dumps(progress_entry) + '\n')
 
-    # Best-effort materialization: JSONL is truth, SQLite is the fast read model.
-    # Do not fail progress reporting just because the registry file is locked.
-    workspace_base = get_workspace_base_from_task_workspace(workspace)
+    # SQLITE MIGRATION: SQLite is now the source of truth
+    # No more LockedRegistryFile - SQLite handles concurrency natively
+
+    # Define status categories
+    active_statuses = ['running', 'working', 'blocked']
+    terminal_statuses = ['completed', 'terminated', 'error', 'failed']
+
+    # 1. Get agent's current status from SQLite (to track transitions)
+    previous_status = None
+    agent_phase_index = None
     try:
-        state_db.reconcile_task_workspace(workspace)
+        agent_data = state_db.get_agent(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            agent_id=agent_id
+        )
+        if agent_data:
+            previous_status = agent_data.get('status')
+            agent_phase_index = agent_data.get('phase_index')
+    except Exception as e:
+        logger.warning(f"Failed to get agent state from SQLite: {e}")
+
+    # 2. Record progress update in SQLite
+    try:
         state_db.record_progress(
             workspace_base=workspace_base,
             task_id=task_id,
@@ -3456,299 +3383,189 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
         )
     except Exception as e:
         logger.warning(f"State DB update failed for {task_id}/{agent_id}: {e}")
-    
-    # Define status categories outside the lock for reuse
-    active_statuses = ['running', 'working', 'blocked']
-    terminal_statuses = ['completed', 'terminated', 'error', 'failed']
-    previous_status = None  # Will be set inside lock
-    pending_review = None  # Will be set if phase auto-completes
-    cleanup_needed = False  # Run cleanup after lock (non-destructive)
-    agent_phase_index = None  # Used for phase enforcement outside lock
-    registry_lock_failed = False
 
-    # CRITICAL: Use LockedRegistryFile to prevent race conditions
-    # Multiple agents can update progress concurrently - without locking, we get:
-    # - Lost updates (agent status overwritten)
-    # - Corrupted counters (active_count decremented multiple times)
-    # - Validation data lost between read and write
-    try:
-        with LockedRegistryFile(registry_path) as (registry, f):
-            # Find and update agent
-            agent_found = None
-            for agent in registry['agents']:
-                if agent['id'] == agent_id:
-                    previous_status = agent.get('status')
-                    agent['last_update'] = datetime.now().isoformat()
-                    agent['status'] = status
-                    agent['progress'] = progress
-                    agent_found = agent
-                    agent_phase_index = agent.get('phase_index')
-                    break
+    # 3. Update agent status in SQLite (handles count updates atomically)
+    cleanup_needed = False
+    if previous_status != status:
+        state_db.update_agent_status(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            agent_id=agent_id,
+            new_status=status
+        )
 
-            # VALIDATION: When agent claims completion, validate the claim
-            if status == 'completed' and agent_found:
-                agent_type = agent_found.get('type', 'unknown')
+        # Check if transitioning to terminal state
+        if previous_status in active_statuses and status in terminal_statuses:
+            cleanup_needed = True
+            logger.info(
+                f"Agent {agent_id} transitioned from {previous_status} to {status}."
+            )
 
-                # Run 4-layer validation
-                validation = validate_agent_completion(workspace, agent_id, agent_type, message, registry)
+            # LIFECYCLE: Check if all agents are terminal and transition task to COMPLETED
+            try:
+                task_data = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+                if task_data:
+                    agents = task_data.get('agents', [])
+                    all_terminal = all(a.get('status') in terminal_statuses for a in agents) if agents else False
 
-                # In WARNING mode: log but don't block completion
-                if not validation['valid'] or validation['warnings']:
-                    logger.warning(f"Completion validation for {agent_id}: confidence={validation['confidence']:.2f}, "
-                                 f"warnings={len(validation['warnings'])}, blocking_issues={len(validation['blocking_issues'])}")
-                    logger.warning(f"Validation warnings: {validation['warnings']}")
-                    if validation['blocking_issues']:
-                        logger.warning(f"Blocking issues: {validation['blocking_issues']}")
-
-                # Store validation results in agent record for future reference
-                agent_found['completion_validation'] = {
-                    'confidence': validation['confidence'],
-                    'warnings': validation['warnings'],
-                    'blocking_issues': validation['blocking_issues'],
-                    'evidence_summary': validation['evidence_summary'],
-                    'validated_at': datetime.now().isoformat()
-                }
-
-                logger.info(f"Agent {agent_id} completion validated: confidence={validation['confidence']:.2f}, "
-                           f"{len(validation['warnings'])} warnings, {len(validation['blocking_issues'])} blocking issues")
-
-                # Mark completion timestamp
-                agent_found['completed_at'] = datetime.now().isoformat()
-
-            # UPDATE COUNTS: Decrement when transitioning from active -> terminal state.
-            # IMPORTANT: Do not perform slow/side-effecting work while holding the registry lock.
-            if previous_status in active_statuses and status in terminal_statuses:
-                registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
-                if status == 'completed':
-                    registry['completed_count'] = registry.get('completed_count', 0) + 1
-                logger.info(
-                    f"Agent {agent_id} transitioned from {previous_status} to {status}. "
-                    f"Active count: {registry['active_count']}"
-                )
-
-                # LIFECYCLE: Check if all agents are terminal and transition task to COMPLETED
-                all_terminal = True
-                for a in registry['agents']:
-                    if a.get('status') not in terminal_statuses:
-                        all_terminal = False
-                        break
-
-                if all_terminal and len(registry['agents']) > 0:
-                    try:
-                        workspace_base = get_workspace_base_from_task_workspace(workspace)
+                    if all_terminal and len(agents) > 0:
                         if state_db.transition_task_to_completed(workspace_base=workspace_base, task_id=task_id):
                             logger.info(f"[LIFECYCLE] Task {task_id} transitioned to COMPLETED - all agents terminal")
-                            registry['status'] = 'COMPLETED'  # Update registry status to match
-                    except Exception as e:
-                        logger.warning(f"[LIFECYCLE] Failed to transition task to COMPLETED: {e}")
+            except Exception as e:
+                logger.warning(f"[LIFECYCLE] Failed to check task completion: {e}")
 
-                # Run cleanup after we persist the registry update.
-                cleanup_needed = True
-                if agent_found:
-                    agent_found['auto_cleanup_scheduled_at'] = datetime.now().isoformat()
+    # 4. VALIDATION: When agent claims completion, validate the claim
+    if status == 'completed':
+        try:
+            # Get agent type for validation
+            agent_type = 'unknown'
+            if agent_data:
+                agent_type = agent_data.get('type', 'unknown')
 
-            # MIGRATION FIX: Don't write to registry - state_db is source of truth
-            # The state_db.record_progress call at line 3119 already persisted this update
-            # Commenting out registry write to prevent stale data accumulation
-            # f.seek(0)
-            # f.write(json.dumps(registry, indent=2))
-            # f.truncate()
+            # Run 4-layer validation (uses JSONL files, not registry)
+            validation = validate_agent_completion(workspace, agent_id, agent_type, message, None)
 
-            # Store pending auto-review info for spawning reviewers after lock release
-            pending_review = registry.get('_pending_auto_review')
+            # In WARNING mode: log but don't block completion
+            if not validation['valid'] or validation['warnings']:
+                logger.warning(f"Completion validation for {agent_id}: confidence={validation['confidence']:.2f}, "
+                             f"warnings={len(validation['warnings'])}, blocking_issues={len(validation['blocking_issues'])}")
 
-    except TimeoutError as e:
-        logger.error(f"Timeout acquiring registry lock for update_agent_progress: {e}")
-        registry_lock_failed = True
-    except Exception as e:
-        logger.error(f"Unexpected error updating registry for update_agent_progress: {e}")
-        registry_lock_failed = True
+            logger.info(f"Agent {agent_id} completion validated: confidence={validation['confidence']:.2f}")
+        except Exception as e:
+            logger.warning(f"Completion validation failed for {agent_id}: {e}")
 
-    # ===== AUTOMATIC PHASE ENFORCEMENT (SQLite/JSONL truth) =====
-    # Determine phase completion using JSONL-derived state, then transition phase in registry (best-effort).
-    def _maybe_auto_submit_phase_for_review() -> Optional[Dict[str, Any]]:
+    # 5. AUTOMATIC PHASE ENFORCEMENT (SQLite only)
+    pending_review = None
+
+    def _maybe_auto_submit_phase_for_review_sqlite() -> Optional[Dict[str, Any]]:
+        """Check if phase is complete and submit for review using SQLite only."""
         try:
             if status not in terminal_statuses:
                 return None
             if agent_phase_index is None:
                 return None
 
-            # Ensure SQLite state is up to date before evaluating.
-            state_db.reconcile_task_workspace(workspace)
+            # Check phase completion from SQLite
             phase_state = state_db.load_phase_snapshot(
                 workspace_base=workspace_base,
                 task_id=task_id,
                 phase_index=int(agent_phase_index),
             )
+
             if not phase_state.get("counts", {}).get("all_done"):
                 return None
 
-            registry_path_local = os.path.join(workspace, "AGENT_REGISTRY.json")
-            with LockedRegistryFile(registry_path_local) as (reg, rf):
-                phases = reg.get("phases", []) or []
-                current_idx = int(reg.get("current_phase_index") or 0)
-                if current_idx != int(agent_phase_index):
-                    return None
-                if current_idx >= len(phases):
-                    return None
-                current_phase = phases[current_idx]
-                if current_phase.get("status") != "ACTIVE":
-                    return None
+            # Get current phase status from SQLite
+            phase_data = state_db.get_phase(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                phase_index=int(agent_phase_index)
+            )
 
-                # Transition phase to review.
-                current_phase["status"] = "AWAITING_REVIEW"
-                current_phase["auto_submitted_at"] = datetime.now().isoformat()
-                current_phase["auto_submitted_reason"] = (
-                    f"All {phase_state['counts']['total']} agents terminal (SQLite/JSONL truth)"
-                )
+            if not phase_data or phase_data.get('status') != 'ACTIVE':
+                return None
 
-                # Store pending reviewer spawn info.
-                reg["_pending_auto_review"] = {
-                    "phase_index": int(agent_phase_index),
-                    "phase_name": current_phase.get("name", f"Phase {int(agent_phase_index) + 1}"),
-                    "task_id": task_id,
-                    "completed_agents": int(phase_state["counts"]["completed"]),
-                    "failed_agents": int(phase_state["counts"]["failed"]),
-                }
+            # Transition phase to AWAITING_REVIEW in SQLite
+            state_db.update_phase_status(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                phase_index=int(agent_phase_index),
+                new_status="AWAITING_REVIEW"
+            )
 
-                # MIGRATION FIX: Don't write to registry - state_db handles phase transitions
-                # rf.seek(0)
-                # rf.write(json.dumps(reg, indent=2))
-                # rf.truncate()
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Phase {agent_phase_index} submitted for review (SQLite)")
 
-                return reg.get("_pending_auto_review")
-        except TimeoutError:
-            # Registry lock busy - retry later (non-fatal).
-            return None
+            return {
+                "phase_index": int(agent_phase_index),
+                "phase_name": phase_data.get("name", f"Phase {int(agent_phase_index) + 1}"),
+                "task_id": task_id,
+                "completed_agents": int(phase_state["counts"]["completed"]),
+                "failed_agents": int(phase_state["counts"]["failed"]),
+            }
         except Exception as e:
             logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to evaluate/transition phase: {e}")
             return None
 
-    if not pending_review:
-        # If registry update failed, derive phase_index from SQLite so phase enforcement can still work.
-        if agent_phase_index is None:
+    # Check if phase should be submitted for review
+    if agent_phase_index is None:
+        # Try to get phase_index from SQLite if not already known
+        try:
+            agent_data = state_db.get_agent(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                agent_id=agent_id
+            )
+            if agent_data:
+                agent_phase_index = agent_data.get('phase_index')
+        except Exception:
+            pass
+
+    pending_review = _maybe_auto_submit_phase_for_review_sqlite()
+
+    # Retry in background if phase should complete but didn't
+    if not pending_review and status in terminal_statuses and agent_phase_index is not None:
+        def _review_retry_worker() -> None:
             try:
-                snap = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id) or {}
-                for a in snap.get("agents", []) or []:
-                    if a.get("agent_id") == agent_id or a.get("id") == agent_id:
-                        agent_phase_index = a.get("phase_index")
-                        break
+                import time
+                for _ in range(10):  # ~30s total
+                    pr = _maybe_auto_submit_phase_for_review_sqlite()
+                    if pr:
+                        try:
+                            logger.info(
+                                f"AUTO-PHASE-ENFORCEMENT: Retried phase transition succeeded for phase {pr.get('phase_index')}"
+                            )
+                            _auto_spawn_phase_reviewers(
+                                task_id=pr["task_id"],
+                                phase_index=pr["phase_index"],
+                                phase_name=pr["phase_name"],
+                                completed_agents=pr["completed_agents"],
+                                failed_agents=pr["failed_agents"],
+                                workspace=workspace,
+                            )
+                        except Exception as e:
+                            logger.error(f"AUTO-PHASE-ENFORCEMENT: Retry reviewer spawn failed: {e}")
+                        return
+                    time.sleep(3)
             except Exception:
-                pass
-        pending_review = _maybe_auto_submit_phase_for_review()
+                return
 
-        # If the phase is complete but the registry lock was contended, retry in the background so phases
-        # can still advance even if no further agent progress updates occur.
-        if not pending_review and status in terminal_statuses and agent_phase_index is not None:
-            def _review_retry_worker() -> None:
-                try:
-                    import time
+        threading.Thread(target=_review_retry_worker, daemon=True).start()
 
-                    for _ in range(10):  # ~30s total
-                        pr = _maybe_auto_submit_phase_for_review()
-                        if pr:
-                            try:
-                                logger.info(
-                                    f"AUTO-PHASE-ENFORCEMENT: Retried phase transition succeeded for phase {pr.get('phase_index')}"
-                                )
-                                _auto_spawn_phase_reviewers(
-                                    task_id=pr["task_id"],
-                                    phase_index=pr["phase_index"],
-                                    phase_name=pr["phase_name"],
-                                    completed_agents=pr["completed_agents"],
-                                    failed_agents=pr["failed_agents"],
-                                    workspace=workspace,
-                                )
-                            except Exception as e:
-                                logger.error(f"AUTO-PHASE-ENFORCEMENT: Retry reviewer spawn failed: {e}")
-                            return
-                        time.sleep(3)
-                except Exception:
-                    return
-
-            threading.Thread(target=_review_retry_worker, daemon=True).start()
-    
-    # UPDATE GLOBAL REGISTRY: Sync the global registry's active agent count
-    # CRITICAL: Use LockedRegistryFile here too to prevent global registry corruption
-    try:
-        workspace_base = get_workspace_base_from_task_workspace(workspace)
-        global_reg_path = get_global_registry_path(workspace_base)
-        if os.path.exists(global_reg_path):
-            with LockedRegistryFile(global_reg_path) as (global_reg, gf):
-                # Update agent status in global registry
-                if agent_id in global_reg.get('agents', {}):
-                    global_reg['agents'][agent_id]['status'] = status
-                    global_reg['agents'][agent_id]['last_update'] = datetime.now().isoformat()
-
-                    # If transitioned to terminal state, update global active count
-                    if previous_status in active_statuses and status in terminal_statuses:
-                        global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
-                        if status == 'completed':
-                            global_reg['agents'][agent_id]['completed_at'] = datetime.now().isoformat()
-                        logger.info(f"Global registry updated: Active agents: {global_reg['active_agents']}")
-
-                    # Write back atomically
-                    gf.seek(0)
-                    gf.write(json.dumps(global_reg, indent=2))
-                    gf.truncate()
-    except TimeoutError as e:
-        logger.error(f"Timeout acquiring global registry lock: {e}")
-        # Non-fatal: continue even if global registry update fails
-    except Exception as e:
-        logger.error(f"Failed to update global registry: {e}")
-
-    # ===== ASYNC NON-DESTRUCTIVE CLEANUP =====
-    # Historical bug: cleanup ran inside the registry lock and could prevent the registry update
-    # from being written, and/or kill the calling tmux session before the tool_result was received.
-    # We now persist the registry first, then do best-effort cleanup asynchronously without killing tmux.
+    # 6. ASYNC NON-DESTRUCTIVE CLEANUP (no file lock needed)
     if cleanup_needed:
         def _cleanup_worker():
             try:
                 time.sleep(2)
 
-                registry_path_local = f"{workspace}/AGENT_REGISTRY.json"
-                agent_data = None
-                try:
-                    reg = read_registry_with_lock(registry_path_local)
-                    if reg:
-                        for a in reg.get('agents', []):
-                            if a.get('id') == agent_id:
-                                agent_data = a
-                                break
-                except Exception:
-                    agent_data = None
+                # Get agent data from SQLite instead of JSON
+                agent_data_for_cleanup = state_db.get_agent(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id
+                )
 
-                if not agent_data:
+                if not agent_data_for_cleanup:
                     return
 
                 cleanup_result = cleanup_agent_resources(
                     workspace=workspace,
                     agent_id=agent_id,
-                    agent_data=agent_data,
+                    agent_data=agent_data_for_cleanup,
                     keep_logs=True,
                     kill_tmux=False,
                 )
 
-                # Persist cleanup result (separate atomic update)
-                try:
-                    with LockedRegistryFile(registry_path_local) as (reg2, f2):
-                        for a in reg2.get('agents', []):
-                            if a.get('id') == agent_id:
-                                a['auto_cleanup_result'] = cleanup_result
-                                a['auto_cleanup_timestamp'] = datetime.now().isoformat()
-                                break
-                        f2.seek(0)
-                        f2.write(json.dumps(reg2, indent=2))
-                        f2.truncate()
-                except Exception as cleanup_update_err:
-                    logger.warning(f"Could not persist cleanup result for {agent_id}: {cleanup_update_err}")
+                logger.info(f"Async cleanup completed for {agent_id}: {cleanup_result}")
             except Exception as e:
                 logger.error(f"Async cleanup failed for {agent_id}: {e}")
 
         threading.Thread(target=_cleanup_worker, daemon=True).start()
 
-    # ===== AUTO-SPAWN REVIEWERS FOR PHASE ENFORCEMENT =====
-    # If a phase just auto-completed, spawn independent reviewer agents
+    # 7. AUTO-SPAWN REVIEWERS FOR PHASE ENFORCEMENT
+    logger.info(f"[UPDATE-PROGRESS] pending_review={pending_review}")
+    # DEBUG: Write to file for tracing
+    import sys
+    print(f"[DEBUG-TRACE] pending_review={pending_review}", file=sys.stderr)
     if pending_review:
         try:
             logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawning reviewers for phase {pending_review['phase_index']}")
@@ -3793,11 +3610,7 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
             "Your work is not counted until you report completion."
         )
 
-    if registry_lock_failed:
-        response["warnings"] = response.get("warnings") or []
-        response["warnings"].append(
-            "Registry update was skipped due to lock contention; JSONL + SQLite state was updated successfully."
-        )
+    # registry_lock_failed removed - SQLite handles concurrency natively, no file locking needed
 
     return response
 
@@ -4630,259 +4443,11 @@ def check_phase_progress(task_id: str) -> str:
         indent=2,
     )
 
-    with LockedRegistryFile(registry_path) as (registry, f):
-        phases = registry.get('phases', [])
-        current_idx = registry.get('current_phase_index', 0)
 
-        if not phases or current_idx >= len(phases):
-            return json.dumps({"success": False, "error": "No current phase"})
-
-        current_phase = phases[current_idx]
-        phase_id = current_phase.get('id')
-        phase_status = current_phase.get('status')
-
-        # Get all agents bound to this phase by phase_index (NOT phase_id)
-        # Agents are tagged with phase_index when deployed
-        phase_agents = [
-            a for a in registry.get('agents', [])
-            if a.get('phase_index') == current_idx
-        ]
-
-        # Categorize by status
-        completed_agents = []
-        pending_agents = []
-        failed_agents = []
-
-        for agent in phase_agents:
-            status = agent.get('status', '')
-            agent_summary = {
-                "id": agent.get('id'),
-                "type": agent.get('type'),
-                "status": status
-            }
-            if status in {'completed', 'phase_completed'}:
-                completed_agents.append(agent_summary)
-            elif status in {'failed', 'error', 'terminated'}:
-                failed_agents.append(agent_summary)
-            else:
-                pending_agents.append(agent_summary)
-
-        all_done = len(pending_agents) == 0 and len(phase_agents) > 0
-        ready_for_review = all_done and phase_status == 'ACTIVE'
-
-        # Determine recommended action
-        if phase_status == 'APPROVED':
-            if current_idx < len(phases) - 1:
-                next_action = "Phase approved. Use advance_to_next_phase to proceed."
-            else:
-                next_action = "All phases complete. Task finished."
-        elif phase_status == 'UNDER_REVIEW':
-            next_action = "Phase under review. Wait for reviewer verdicts."
-        elif phase_status == 'AWAITING_REVIEW':
-            next_action = "Phase awaiting review. Use trigger_agentic_review to spawn reviewers."
-        elif phase_status == 'REVISING':
-            if all_done:
-                next_action = "Revisions complete. Use submit_phase_for_review to re-submit."
-            else:
-                next_action = f"Revisions in progress. {len(pending_agents)} agents still working."
-        elif ready_for_review:
-            next_action = "All agents done. Use submit_phase_for_review to request review."
-        elif len(pending_agents) > 0:
-            next_action = f"Phase in progress. {len(pending_agents)} agents still working."
-        else:
-            next_action = "No agents deployed yet. Use deploy_opus_agent to start."
-
-    return json.dumps({
-        "success": True,
-        "task_id": task_id,
-        "phase": {
-            "name": current_phase.get('name'),
-            "status": phase_status,
-            "index": current_idx,
-            "total_phases": len(phases)
-        },
-        "agents": {
-            "total": len(phase_agents),
-            "completed": len(completed_agents),
-            "pending": len(pending_agents),
-            "failed": len(failed_agents)
-        },
-        "pending_agents": pending_agents,
-        "all_agents_done": all_done,
-        "ready_for_review": ready_for_review,
-        "next_action": next_action
-    }, indent=2)
-
-
-@mcp.tool()
-def advance_to_next_phase(
-    task_id: str,
-    handover_summary: Optional[str] = None,
-    key_findings: Optional[List[str]] = None,
-    blockers: Optional[List[str]] = None,
-    recommendations: Optional[List[str]] = None
-) -> str:
-    """
-    Advance task to the next phase with optional handover document.
-
-    Creates a handover document capturing the current phase's work
-    before transitioning to the next phase.
-
-    Args:
-        task_id: Task to advance
-        handover_summary: Summary of work done in current phase
-        key_findings: Key findings/discoveries
-        blockers: Any blockers encountered
-        recommendations: Recommendations for next phase
-    """
-    workspace = find_task_workspace(task_id)
-    if not workspace:
-        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
-
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
-
-    with LockedRegistryFile(registry_path) as (registry, f):
-        phases = registry.get('phases', [])
-        current_idx = registry.get('current_phase_index', 0)
-
-        if not phases:
-            return json.dumps({"success": False, "error": "No phases defined"})
-
-        if current_idx >= len(phases) - 1:
-            return json.dumps({"success": False, "error": "Already at final phase"})
-
-        current_phase = phases[current_idx]
-        next_phase = phases[current_idx + 1]
-
-        # CRITICAL ENFORCEMENT: Phase must already be APPROVED before advancing
-        # The orchestrator CANNOT self-approve by calling this function
-        # This prevents bypassing the mandatory agentic review process
-        current_status = current_phase.get('status', 'PENDING')
-        if current_status != 'APPROVED':
-            # Generate contextual guidance for the blocked state
-            if current_status == 'ACTIVE':
-                next_action = "Deploy agents and wait for completion, then auto-submit will trigger"
-                available_actions = [
-                    "deploy_opus_agent/deploy_sonnet_agent - Add agents if needed",
-                    "check_phase_progress - Check if agents are done"
-                ]
-            elif current_status in ['AWAITING_REVIEW', 'UNDER_REVIEW']:
-                next_action = "Wait for reviewers to submit verdicts"
-                available_actions = [
-                    "get_review_status - Check review progress",
-                    "get_phase_status - View current state"
-                ]
-            elif current_status == 'REJECTED':
-                next_action = "Deploy agents to fix issues identified in review"
-                available_actions = [
-                    "get_review_status - View rejection reasons",
-                    "deploy_opus_agent/deploy_sonnet_agent - Deploy fix agents"
-                ]
-            elif current_status == 'ESCALATED':
-                next_action = "Use force approval or retry review"
-                available_actions = [
-                    "approve_phase_review(force_escalated=True) - Force approve",
-                    "trigger_agentic_review - Retry with new reviewers"
-                ]
-            else:
-                next_action = "Check phase status for details"
-                available_actions = ["get_phase_status - View current state"]
-
-            return json.dumps({
-                "success": False,
-                "error": f"PHASE_NOT_APPROVED: Cannot advance phase '{current_phase.get('name')}' with status '{current_status}'",
-                "hint": "Phase must be APPROVED by reviewers before advancement. "
-                        "Flow: deploy agents → agents complete → auto-submit for review → reviewers approve → then advance.",
-                "current_phase": current_phase.get('name'),
-                "current_status": current_status,
-                "required_status": "APPROVED",
-                "valid_statuses_for_advance": ["APPROVED"],
-                "guidance": {
-                    "current_state": f"phase_{current_status.lower()}_blocked",
-                    "next_action": next_action,
-                    "available_actions": available_actions,
-                    "warnings": None,
-                    "blocked_reason": f"Phase status is '{current_status}', must be 'APPROVED' to advance"
-                }
-            }, indent=2)
-
-        # Create handover document
-        # If no explicit handover data provided, auto-generate from phase findings
-        phase_id = current_phase.get('id', f"phase-{current_idx}")
-        phase_name_str = current_phase.get('name', f"Phase {current_idx + 1}")
-
-        if not handover_summary and not key_findings:
-            # Auto-generate handover from phase data (findings, metrics, etc.)
-            logger.info(f"ADVANCE-PHASE: No explicit handover data, auto-generating from phase {phase_id}")
-            try:
-                handover = auto_generate_handover(
-                    task_workspace=workspace,
-                    phase_id=phase_id,
-                    phase_name=phase_name_str,
-                    registry=registry
-                )
-            except Exception as e:
-                logger.error(f"ADVANCE-PHASE: Auto-generation failed, using placeholder: {e}")
-                handover = HandoverDocument(
-                    phase_id=phase_id,
-                    phase_name=phase_name_str,
-                    summary=f"Completed {phase_name_str}",
-                    key_findings=[],
-                    blockers=[],
-                    recommendations=[]
-                )
-        else:
-            # Use explicitly provided handover data
-            handover = HandoverDocument(
-                phase_id=phase_id,
-                phase_name=phase_name_str,
-                summary=handover_summary or f"Completed {phase_name_str}",
-                key_findings=key_findings or [],
-                blockers=blockers or [],
-                recommendations=recommendations or []
-            )
-
-        # Save handover (save_handover takes task_workspace, handover)
-        save_result = save_handover(workspace, handover)
-        handover_path = save_result.get('path', 'unknown')
-
-        # Phase is already APPROVED (verified above), mark as COMPLETED and advance
-        current_phase['status'] = 'COMPLETED'  # Final state after advancement
-        current_phase['completed_at'] = datetime.now().isoformat()
-        next_phase['status'] = 'ACTIVE'
-        next_phase['started_at'] = datetime.now().isoformat()
-
-        # Advance index
-        registry['current_phase_index'] = current_idx + 1
-
-        # Write back
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
-
-    next_phase_name = next_phase.get('name')
-    return json.dumps({
-        "success": True,
-        "previous_phase": current_phase.get('name'),
-        "current_phase": next_phase_name,
-        "phase_index": current_idx + 1,
-        "handover_saved": handover_path,
-        "guidance": {
-            "current_state": "phase_advanced",
-            "next_action": f"Deploy agents for '{next_phase_name}' phase using deploy_opus_agent/deploy_sonnet_agent",
-            "available_actions": [
-                f"deploy_opus_agent/deploy_sonnet_agent - Deploy agents for '{next_phase_name}'",
-                "get_phase_status - View new phase requirements",
-                "get_phase_handover - Review previous phase handover"
-            ],
-            "warnings": None,
-            "blocked_reason": None,
-            "context": {
-                "new_phase": next_phase_name,
-                "phase_index": current_idx + 1
-            }
-        }
-    }, indent=2)
+# NOTE: advance_to_next_phase was REMOVED (Jan 2026)
+# Phase advancement now happens automatically in submit_review_verdict when reviewers approve.
+# The function was redundant - by the time phase is APPROVED, auto-advance already happened.
+# Removing it eliminates confusion and prevents orchestrator from thinking manual advance is needed.
 
 
 @mcp.tool()
@@ -4890,47 +4455,50 @@ def submit_phase_for_review(task_id: str, phase_summary: Optional[str] = None) -
     """
     Submit current phase for review.
 
+    SQLITE MIGRATION: Now reads phase/agent data from SQLite (source of truth).
     Transitions phase from ACTIVE to AWAITING_REVIEW.
-    This signals that work is complete and ready for review.
     """
     workspace = find_task_workspace(task_id)
     if not workspace:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
 
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-    with LockedRegistryFile(registry_path) as (registry, f):
-        phases = registry.get('phases', [])
-        current_idx = registry.get('current_phase_index', 0)
+    # SQLITE MIGRATION: Read from SQLite instead of JSON
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    if not task_snapshot:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found in SQLite"})
 
-        if not phases or current_idx >= len(phases):
-            return json.dumps({"success": False, "error": "No current phase"})
+    phases = task_snapshot.get('phases', [])
+    current_idx = task_snapshot.get('current_phase_index', 0)
 
-        current_phase = phases[current_idx]
+    if not phases or current_idx >= len(phases):
+        return json.dumps({"success": False, "error": "No current phase"})
 
-        # Allow submit from ACTIVE (normal flow) or REVISING (after rejection)
-        if current_phase.get('status') not in ['ACTIVE', 'REVISING']:
-            return json.dumps({
-                "success": False,
-                "error": f"Phase must be ACTIVE or REVISING to submit for review. Current: {current_phase.get('status')}"
-            })
+    current_phase = phases[current_idx]
+    phase_status = current_phase.get('status', '')
 
-        # Count phase agents for reviewer context
-        phase_agents = [a for a in registry.get('agents', []) if a.get('phase_index') == current_idx]
-        completed_agents = len([a for a in phase_agents if a.get('status') == 'completed'])
-        failed_agents = len([a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']])
-        phase_name = current_phase.get('name', f'Phase {current_idx + 1}')
+    # Allow submit from ACTIVE (normal flow) or REVISING (after rejection)
+    if phase_status not in ['ACTIVE', 'REVISING']:
+        return json.dumps({
+            "success": False,
+            "error": f"Phase must be ACTIVE or REVISING to submit for review. Current: {phase_status}"
+        })
 
-        # Transition to AWAITING_REVIEW
-        current_phase['status'] = 'AWAITING_REVIEW'
-        current_phase['submitted_for_review_at'] = datetime.now().isoformat()
-        current_phase['manual_submit'] = True  # Mark as manual submission
-        if phase_summary:
-            current_phase['review_summary'] = phase_summary
+    # Count phase agents from SQLite (source of truth)
+    agents = task_snapshot.get('agents', [])
+    phase_agents = [a for a in agents if a.get('phase_index') == current_idx]
+    completed_agents = len([a for a in phase_agents if a.get('status') == 'completed'])
+    failed_agents = len([a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']])
+    phase_name = current_phase.get('name', f'Phase {current_idx + 1}')
 
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
+    # Transition to AWAITING_REVIEW in SQLite
+    state_db.update_phase_status(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        phase_index=current_idx,
+        new_status="AWAITING_REVIEW"
+    )
 
     # MANDATORY: Auto-spawn reviewers to prevent manual approval bypass
     # This ensures the orchestrator CANNOT submit and then manually approve
@@ -4983,52 +4551,62 @@ def approve_phase_review(
         force_escalated: If True, allows approval of ESCALATED phases only
     """
     # ===== CHECK FOR ESCALATED PHASE OVERRIDE =====
+    # SQLITE MIGRATION: Read from SQLite instead of JSON
     if force_escalated:
         workspace = find_task_workspace(task_id)
         if not workspace:
             return json.dumps({"success": False, "error": f"Task {task_id} not found"})
 
-        registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+        workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-        with LockedRegistryFile(registry_path) as (registry, f):
-            phases = registry.get('phases', [])
-            current_idx = registry.get('current_phase_index', 0)
+        # Read from SQLite
+        task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+        if not task_snapshot:
+            return json.dumps({"success": False, "error": f"Task {task_id} not found in SQLite"})
 
-            if not phases or current_idx >= len(phases):
-                return json.dumps({"success": False, "error": "No current phase"})
+        phases = task_snapshot.get('phases', [])
+        current_idx = task_snapshot.get('current_phase_index', 0)
 
-            current_phase = phases[current_idx]
+        if not phases or current_idx >= len(phases):
+            return json.dumps({"success": False, "error": "No current phase"})
 
-            # Only allow force approval for ESCALATED phases
-            if current_phase.get('status') != 'ESCALATED':
-                return json.dumps({
-                    "success": False,
-                    "error": f"force_escalated only works for ESCALATED phases. Current status: {current_phase.get('status')}",
-                    "hint": "This escape hatch is only for phases where all reviewers crashed."
-                })
+        current_phase = phases[current_idx]
 
-            # Perform forced approval
-            current_phase['status'] = 'APPROVED'
-            current_phase['approved_at'] = datetime.now().isoformat()
-            current_phase['forced_approval'] = True
-            current_phase['force_reason'] = 'ESCALATED phase - all reviewers crashed'
-            if reviewer_notes:
-                current_phase['reviewer_notes'] = reviewer_notes
+        # Only allow force approval for ESCALATED phases
+        if current_phase.get('status') != 'ESCALATED':
+            return json.dumps({
+                "success": False,
+                "error": f"force_escalated only works for ESCALATED phases. Current status: {current_phase.get('status')}",
+                "hint": "This escape hatch is only for phases where all reviewers crashed."
+            })
 
-            logger.warning(f"FORCE APPROVAL: Phase {current_idx} approved via force_escalated (all reviewers crashed)")
+        # Perform forced approval via SQLite
+        state_db.update_phase_status(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            phase_index=current_idx,
+            new_status='APPROVED'
+        )
 
-            # Auto-advance if requested
-            advanced = False
-            if auto_advance and current_idx < len(phases) - 1:
-                next_phase = phases[current_idx + 1]
-                next_phase['status'] = 'ACTIVE'
-                next_phase['started_at'] = datetime.now().isoformat()
-                registry['current_phase_index'] = current_idx + 1
-                advanced = True
+        logger.warning(f"FORCE APPROVAL: Phase {current_idx} approved via force_escalated (all reviewers crashed)")
 
-            f.seek(0)
-            f.write(json.dumps(registry, indent=2))
-            f.truncate()
+        # Auto-advance if requested
+        advanced = False
+        if auto_advance and current_idx < len(phases) - 1:
+            # Activate next phase
+            state_db.update_phase_status(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                phase_index=current_idx + 1,
+                new_status='ACTIVE'
+            )
+            # Update current phase index
+            state_db.update_task_phase_index(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                new_phase_index=current_idx + 1
+            )
+            advanced = True
 
         return json.dumps({
             "success": True,
@@ -5121,91 +4699,9 @@ def approve_phase_review(
     """
 
 
-@mcp.tool()
-def reject_phase_review(
-    task_id: str,
-    rejection_reason: str,
-    required_changes: Optional[List[str]] = None
-) -> str:
-    """
-    Reject the current phase review, requiring revisions.
-
-    IMPORTANT: This is BLOCKED when an auto-review is in progress.
-    The system enforces agentic review - manual rejection is not allowed
-    once reviewers have been spawned automatically.
-
-    Transitions phase to REVISING status.
-    """
-    # ===== CRITICAL PHASE ENFORCEMENT: Manual rejection ALWAYS blocked =====
-    # Per CLAUDE.md: "The orchestrator CANNOT: Self-approve, Skip phases, Bypass review"
-    # ALL rejections must go through submit_review_verdict from reviewer agents
-    return json.dumps({
-        "success": False,
-        "error": "BLOCKED: Manual rejection is not allowed. All phase decisions must come from reviewer agents.",
-        "enforcement": "mandatory_agentic_review",
-        "hint": "Phase rejections are handled automatically by the system. "
-                "Flow: agents complete → auto-submit → auto-spawn reviewers → reviewers submit verdicts → auto-approve/reject. "
-                "Use get_phase_status to check current state and guidance.",
-        "next_action": "Wait for reviewer agents to complete their review and submit verdicts via submit_review_verdict."
-    })
-
-    # NOTE: The code below is unreachable but kept for reference
-    """
-    workspace = find_task_workspace(task_id)
-    if not workspace:
-        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
-
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
-
-    with LockedRegistryFile(registry_path) as (registry, f):
-        phases = registry.get('phases', [])
-        current_idx = registry.get('current_phase_index', 0)
-
-        if not phases or current_idx >= len(phases):
-            return json.dumps({"success": False, "error": "No current phase"})
-
-        current_phase = phases[current_idx]
-
-        # ===== PHASE ENFORCEMENT: Block manual rejection when auto-review active =====
-        if current_phase.get('auto_review'):
-            return json.dumps({
-                "success": False,
-                "error": "BLOCKED: This phase has an auto-review in progress. "
-                         "Manual rejection is not allowed. Wait for reviewer agents to submit verdicts.",
-                "enforcement": "automatic_phase_control",
-                "active_review_id": current_phase.get('active_review_id'),
-                "hint": "Reviewer agents will automatically approve/reject this phase. "
-                        "Check get_review_status for progress."
-            })
-
-        if current_phase.get('status') not in ['AWAITING_REVIEW', 'UNDER_REVIEW']:
-            return json.dumps({
-                "success": False,
-                "error": f"Phase must be awaiting/under review. Current: {current_phase.get('status')}"
-            })
-
-        # Reject - move to REVISING (only if not auto-review)
-        current_phase['status'] = 'REVISING'
-        current_phase['rejected_at'] = datetime.now().isoformat()
-        current_phase['rejection_reason'] = rejection_reason
-        current_phase['required_changes'] = required_changes or []
-        current_phase['revision_count'] = current_phase.get('revision_count', 0) + 1
-        current_phase['manual_rejection'] = True  # Mark as manual
-
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
-
-    return json.dumps({
-        "success": True,
-        "phase": current_phase.get('name'),
-        "status": "REVISING",
-        "rejection_reason": rejection_reason,
-        "required_changes": required_changes or [],
-        "revision_count": current_phase.get('revision_count'),
-        "note": "Manual rejection - consider using agentic review for better quality control"
-    }, indent=2)
-    """
+# NOTE: reject_phase_review was REMOVED (Jan 2026)
+# Manual rejection is not allowed - all rejections go through submit_review_verdict from reviewer agents.
+# The function was always blocked anyway, so removing it eliminates confusion.
 
 
 # ============================================================================
@@ -5245,78 +4741,83 @@ def _auto_spawn_phase_reviewers(
     Returns:
         Dict with review_id, spawned agents, critique agent, and status
     """
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+    logger.info(f"[REVIEWER-SPAWN] Starting _auto_spawn_phase_reviewers for task={task_id}, phase={phase_index}")
+
+    # SQLITE MIGRATION: Use SQLite for all review record management
+    # No more LockedRegistryFile - SQLite handles concurrency natively
 
     # Create review record
     review_id = f"auto-review-{uuid.uuid4().hex[:12]}"
     review_focus = ["completeness", "correctness", "quality"]
 
-    with LockedRegistryFile(registry_path) as (registry, f):
-        phases = registry.get('phases', [])
-        if phase_index >= len(phases):
-            return {"success": False, "error": "Invalid phase_index"}
+    # 1. Get phase data from SQLite
+    phase_data = state_db.get_phase(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        phase_index=phase_index
+    )
+    logger.info(f"[REVIEWER-SPAWN] Phase data from SQLite: {phase_data}")
 
-        current_phase = phases[phase_index]
+    if not phase_data:
+        logger.error(f"[REVIEWER-SPAWN] Phase not found in SQLite for task={task_id}, phase_index={phase_index}")
+        return {"success": False, "error": "Invalid phase_index - phase not found in SQLite"}
 
-        # Only proceed if phase is in AWAITING_REVIEW (set by update_agent_progress)
-        if current_phase.get('status') != 'AWAITING_REVIEW':
-            return {"success": False, "error": f"Phase not awaiting review: {current_phase.get('status')}"}
+    # 2. ATOMIC CLAIM: Transition AWAITING_REVIEW -> UNDER_REVIEW
+    # This prevents race conditions where multiple threads try to spawn reviewers
+    claimed = state_db.claim_phase_for_review(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        phase_index=phase_index
+    )
 
-        # Create review record (2 reviewers + 1 critique + optional tester)
-        review_record = {
-            "review_id": review_id,
-            "phase_id": current_phase.get('id', f"phase-{phase_index}"),
-            "phase_name": phase_name,
-            "status": "in_progress",
-            "num_reviewers": num_reviewers,  # Only counts verdict-submitting reviewers (2, or 3 with tester)
-            "reviewers": [],
-            "verdicts": [],
-            "has_critique": True,  # This review includes a critique agent
-            "critique_agent_id": None,  # Set when critique agent is spawned
-            "critique_submitted": False,
-            "critique": None,  # Will hold critique observations when submitted
-            "has_tester": False,  # Set to True when tester spawns for UI testing
-            "tester_agent_id": None,  # Set to tester agent_id when spawned
-            "created_at": datetime.now().isoformat(),
-            "review_focus": review_focus,
-            "auto_triggered": True,
-            "trigger_reason": f"All {completed_agents + failed_agents} phase agents finished ({completed_agents} completed, {failed_agents} failed)"
-        }
+    if not claimed:
+        # Another thread already claimed this phase - don't spawn duplicates
+        logger.info(f"[REVIEWER-SPAWN] Phase {phase_index} already claimed by another thread - skipping duplicate spawn")
+        return {"success": False, "error": "Phase already claimed for review by another process", "duplicate_prevented": True}
 
-        if 'reviews' not in registry:
-            registry['reviews'] = []
-        registry['reviews'].append(review_record)
+    # 3. Create review record in SQLite (only after successful claim)
+    create_result = state_db.create_review_record(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        review_id=review_id,
+        phase_index=phase_index,
+        num_reviewers=num_reviewers
+    )
 
-        # Transition phase to UNDER_REVIEW
-        current_phase['status'] = 'UNDER_REVIEW'
-        current_phase['review_started_at'] = datetime.now().isoformat()
-        current_phase['active_review_id'] = review_id
-        current_phase['auto_review'] = True
+    if not create_result.get('success'):
+        return {"success": False, "error": f"Failed to create review record: {create_result.get('error')}"}
 
-        # Extract phase-specific deliverables and success criteria for reviewer context
-        phase_deliverables = current_phase.get('deliverables', [])
-        phase_success_criteria = current_phase.get('success_criteria', [])
-        phase_description = current_phase.get('description', '')
+    # Extract phase-specific deliverables and success criteria for reviewer context
+    phase_deliverables = phase_data.get('deliverables', [])
+    phase_success_criteria = phase_data.get('success_criteria', [])
+    phase_description = phase_data.get('description', '')
 
-        # Extract project_context for reviewers/testers (port, framework, test credentials)
-        project_context = registry.get('project_context', {})
+    # Get project_context from task config in SQLite
+    task_config = state_db.get_task_config(workspace_base=workspace_base, task_id=task_id)
+    project_context = {}
+    if task_config and task_config.get('project_context'):
+        try:
+            project_context = json.loads(task_config['project_context']) if isinstance(task_config['project_context'], str) else task_config['project_context']
+        except:
+            project_context = {}
 
-        # Build OUT OF SCOPE section from future phases
-        future_phases = []
-        for fp_idx, fp in enumerate(phases):
-            if fp_idx > phase_index:
-                fp_name = fp.get('name', f'Phase {fp_idx + 1}')
-                fp_desc = fp.get('description', '')
-                fp_deliverables = fp.get('deliverables', [])
-                future_phases.append({
-                    'name': fp_name,
-                    'description': fp_desc,
-                    'deliverables': fp_deliverables
-                })
+    # Get all phases from SQLite for OUT OF SCOPE section
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    phases = task_snapshot.get('phases', []) if task_snapshot else []
 
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
+    # Build OUT OF SCOPE section from future phases
+    future_phases = []
+    for fp_idx, fp in enumerate(phases):
+        if fp_idx > phase_index:
+            fp_name = fp.get('name', f'Phase {fp_idx + 1}')
+            fp_desc = fp.get('description', '')
+            fp_deliverables = fp.get('deliverables', [])
+            future_phases.append({
+                'name': fp_name,
+                'description': fp_desc,
+                'deliverables': fp_deliverables
+            })
 
     # Build phase-specific sections for reviewer prompt
     deliverables_section = ""
@@ -5452,11 +4953,13 @@ AFTER REVIEWING, SUBMIT YOUR VERDICT:
 mcp__claude-orchestrator__submit_review_verdict(
     task_id="{task_id}",
     review_id="{review_id}",
+    reviewer_agent_id="{{REVIEWER_AGENT_ID}}",
     verdict="approved" | "rejected" | "needs_revision",
     findings=[{{"type": "issue|suggestion|blocker|praise", "severity": "critical|high|medium|low", "message": "..."}}],
     reviewer_notes="Summary of what you verified against THIS phase's criteria"
 )
 ```
+NOTE: Replace {{REVIEWER_AGENT_ID}} with your actual agent ID (provided below).
 
 VERDICT GUIDE:
 - "approved": This phase's deliverables exist and meet THIS phase's success criteria
@@ -5490,7 +4993,6 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
     logger.info(f"AUTO-PHASE-ENFORCEMENT: review_prefix={review_prefix}")
     logger.info(f"AUTO-PHASE-ENFORCEMENT: num_reviewers={num_reviewers}")
     logger.info(f"AUTO-PHASE-ENFORCEMENT: workspace={workspace}")
-    logger.info(f"AUTO-PHASE-ENFORCEMENT: registry_path={registry_path}")
     logger.info(f"AUTO-PHASE-ENFORCEMENT: review_prompt length={len(review_prompt)}")
 
     for i in range(num_reviewers):
@@ -5499,36 +5001,40 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
         agent_type = f"reviewer-{review_prefix}-{i+1}"
         logger.info(f"AUTO-PHASE-ENFORCEMENT: Attempting to spawn reviewer {i+1}/{num_reviewers}: agent_type={agent_type}")
         try:
+            # Pre-generate agent_id so we can inject it into the prompt
+            timestamp = datetime.now().strftime('%H%M%S')
+            unique_suffix = uuid.uuid4().hex[:6]
+            type_prefix = agent_type[:20] if len(agent_type) > 20 else agent_type
+            pre_generated_agent_id = f"{type_prefix}-{timestamp}-{unique_suffix}"
+
+            # Inject the agent_id into the prompt
+            reviewer_prompt_with_id = review_prompt.replace(
+                "{REVIEWER_AGENT_ID}",
+                pre_generated_agent_id
+            )
+
             # Use Sonnet for reviewers (faster, cheaper, sufficient for structured review tasks)
-            logger.info(f"AUTO-PHASE-ENFORCEMENT: Calling deploy_claude_tmux_agent for {agent_type}...")
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Calling deploy_claude_tmux_agent for {agent_type} with pre-generated id {pre_generated_agent_id}...")
             result = deploy_claude_tmux_agent(
                 task_id=task_id,
                 agent_type=agent_type,
-                prompt=review_prompt,
+                prompt=reviewer_prompt_with_id,
                 parent="orchestrator",
                 phase_index=-1,  # -1 indicates reviewer agent (not part of any phase)
-                model="claude-sonnet-4-5"  # Sonnet for reviewers
+                model="claude-sonnet-4-5",  # Sonnet for reviewers
+                agent_id=pre_generated_agent_id
             )
             logger.info(f"AUTO-PHASE-ENFORCEMENT: deploy_claude_tmux_agent returned: success={result.get('success')}, error={result.get('error', 'N/A')}")
             if result.get('success'):
                 agent_id = result.get('agent_id')
                 spawned_agents.append(agent_id)
 
-                # Update review record with reviewer info
-                with LockedRegistryFile(registry_path) as (reg, f2):
-                    for rev in reg.get('reviews', []):
-                        if rev.get('review_id') == review_id:
-                            rev['reviewers'].append({
-                                "agent_id": agent_id,
-                                "agent_type": agent_type,
-                                "role": "reviewer",  # Distinguish from critique
-                                "spawned_at": datetime.now().isoformat(),
-                                "status": "reviewing"
-                            })
-                            break
-                    f2.seek(0)
-                    json.dump(reg, f2, indent=2)
-                    f2.truncate()
+                # SQLITE MIGRATION: Update review record with reviewer info in SQLite
+                state_db.add_reviewer_to_review(
+                    workspace_base=workspace_base,
+                    review_id=review_id,
+                    agent_id=agent_id
+                )
 
                 logger.info(f"AUTO-PHASE-ENFORCEMENT: Successfully spawned Sonnet reviewer {agent_id}")
             else:
@@ -5587,6 +5093,7 @@ SUBMIT YOUR CRITIQUE (NOT a verdict):
 mcp__claude-orchestrator__submit_critique(
     task_id="{task_id}",
     review_id="{review_id}",
+    critique_agent_id="{{CRITIQUE_AGENT_ID}}",
     observations=[
         {{"type": "architectural|technical_debt|suggestion|concern|praise", "priority": "high|medium|low", "message": "...", "scope": "current_phase|future_phases|overall"}}
     ],
@@ -5594,6 +5101,7 @@ mcp__claude-orchestrator__submit_critique(
     recommendations=["Optional list of recommendations for orchestrator"]
 )
 ```
+NOTE: Replace {{CRITIQUE_AGENT_ID}} with your actual agent ID (provided below).
 
 ═══════════════════════════════════════════════════════════════════════════════
 ⚡ MANDATORY: YOU MUST SUBMIT YOUR CRITIQUE - YOUR JOB IS NOT COMPLETE WITHOUT IT ⚡
@@ -5607,26 +5115,36 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
     critique_agent_id = None
     try:
         critique_agent_type = f"critique-{review_prefix}"
+
+        # Pre-generate agent_id so we can inject it into the prompt
+        timestamp = datetime.now().strftime('%H%M%S')
+        unique_suffix = uuid.uuid4().hex[:6]
+        pre_generated_critique_id = f"{critique_agent_type[:20]}-{timestamp}-{unique_suffix}"
+
+        # Inject the agent_id into the prompt
+        critique_prompt_with_id = critique_prompt.replace(
+            "{CRITIQUE_AGENT_ID}",
+            pre_generated_critique_id
+        )
+
         result = deploy_claude_tmux_agent(
             task_id=task_id,
             agent_type=critique_agent_type,
-            prompt=critique_prompt,
+            prompt=critique_prompt_with_id,
             parent="orchestrator",
             phase_index=-1,  # -1 indicates review-related agent
-            model="claude-sonnet-4-5"  # Sonnet for critique
+            model="claude-sonnet-4-5",  # Sonnet for critique
+            agent_id=pre_generated_critique_id
         )
         if result.get('success'):
             critique_agent_id = result.get('agent_id')
 
-            # Update review record with critique agent
-            with LockedRegistryFile(registry_path) as (reg, f2):
-                for rev in reg.get('reviews', []):
-                    if rev.get('review_id') == review_id:
-                        rev['critique_agent_id'] = critique_agent_id
-                        break
-                f2.seek(0)
-                json.dump(reg, f2, indent=2)
-                f2.truncate()
+            # SQLITE MIGRATION: Update review record with critique agent in SQLite
+            state_db.set_critique_agent_for_review(
+                workspace_base=workspace_base,
+                review_id=review_id,
+                critique_agent_id=critique_agent_id
+            )
 
             logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned Sonnet critique agent {critique_agent_id}")
         else:
@@ -5673,6 +5191,7 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
 def submit_review_verdict(
     task_id: str,
     review_id: str,
+    reviewer_agent_id: str,
     verdict: str,
     findings: List[Dict[str, Any]],
     reviewer_notes: Optional[str] = None
@@ -5687,6 +5206,7 @@ def submit_review_verdict(
     Args:
         task_id: Task ID
         review_id: Review ID from trigger_agentic_review
+        reviewer_agent_id: The agent ID of the reviewer submitting this verdict
         verdict: "approved", "rejected", or "needs_revision"
         findings: List of findings, each with:
             - type: "issue", "suggestion", "blocker", or "praise"
@@ -5697,7 +5217,7 @@ def submit_review_verdict(
     Returns:
         Dict with submission status and review progress
     """
-    from orchestrator.review import REVIEW_VERDICTS, calculate_aggregate_verdict
+    from orchestrator.review import REVIEW_VERDICTS
 
     # Validate verdict
     if verdict not in REVIEW_VERDICTS:
@@ -5710,199 +5230,132 @@ def submit_review_verdict(
     if not workspace:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
 
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-    with LockedRegistryFile(registry_path) as (registry, f):
-        # Find the review record
-        reviews = registry.get('reviews', [])
-        review_record = None
-        for rev in reviews:
-            if rev.get('review_id') == review_id:
-                review_record = rev
-                break
+    # SQLITE MIGRATION: Use SQLite for all verdict recording and aggregation
+    # No more LockedRegistryFile - SQLite handles concurrency natively
 
-        if not review_record:
-            return json.dumps({
-                "success": False,
-                "error": f"Review {review_id} not found"
-            })
+    # 1. Record the verdict in SQLite
+    record_result = state_db.record_review_verdict(
+        workspace_base=workspace_base,
+        review_id=review_id,
+        task_id=task_id,
+        reviewer_agent_id=reviewer_agent_id,
+        verdict=verdict,
+        findings=findings,
+        reviewer_notes=reviewer_notes
+    )
 
-        # Record the verdict
-        review_record['verdicts'].append({
-            "verdict": verdict,
-            "findings": findings,
-            "reviewer_notes": reviewer_notes or "",
-            "submitted_at": datetime.now().isoformat()
+    if not record_result.get('success'):
+        return json.dumps({
+            "success": False,
+            "error": record_result.get('error', 'Failed to record verdict')
         })
 
-        # CRITICAL FIX: Update reviewer agent status to "completed"
-        # Without this, old reviewers stay "working" and block new reviewer spawns
-        # due to find_existing_agent deduplication check
-        for agent in registry.get('agents', []):
-            # Find reviewer agents for this review (check if type starts with review prefix pattern)
-            # Also match old-style phase-based reviewers
-            if agent.get('status') in ['working', 'running']:
-                agent_type = agent.get('type', '')
-                # Match both old format (phase0-reviewer-1) and new format (review-xxx-reviewer-1)
-                is_reviewer = 'reviewer' in agent_type.lower()
-                if is_reviewer:
-                    # Check if this agent is assigned to this review
-                    for reviewer in review_record.get('reviewers', []):
-                        if reviewer.get('agent_id') == agent.get('id'):
-                            # CRITICAL FIX: Decrement active_count when marking reviewer as completed
-                            # Agent is transitioning from active status (working/running) to terminal (completed)
-                            registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
-                            registry['completed_count'] = registry.get('completed_count', 0) + 1
+    # 2. Check if all reviewers have submitted
+    is_complete, final_verdict, all_verdicts = state_db.check_review_complete(
+        workspace_base=workspace_base,
+        review_id=review_id
+    )
 
-                            agent['status'] = 'completed'
-                            agent['completed_at'] = datetime.now().isoformat()
-                            agent['final_verdict'] = verdict
-                            logger.info(f"REVIEWER STATUS UPDATE: {agent.get('id')} marked completed after verdict submission. Active count: {registry['active_count']}")
-                            break
+    result_info = {
+        "success": True,
+        "review_id": review_id,
+        "verdict_submitted": verdict,
+        "findings_count": len(findings),
+        "reviewers_submitted": record_result.get('submitted_count', 1),
+        "reviewers_expected": record_result.get('expected_count', 2),
+        "all_submitted": is_complete
+    }
 
-        # Check if all reviewers have submitted
-        num_expected = review_record.get('num_reviewers', 1)
-        num_submitted = len(review_record['verdicts'])
-        all_submitted = num_submitted >= num_expected
+    # 3. If all reviewers submitted, aggregate and finalize
+    if is_complete:
+        # Get critique info if available
+        critique_data = state_db.get_critique(workspace_base=workspace_base, review_id=review_id)
+        if critique_data:
+            result_info['critique_summary'] = critique_data.get('summary', '')
+            result_info['critique_recommendations'] = critique_data.get('recommendations', [])
 
-        result_info = {
-            "success": True,
-            "review_id": review_id,
-            "verdict_submitted": verdict,
-            "findings_count": len(findings),
-            "reviewers_submitted": num_submitted,
-            "reviewers_expected": num_expected,
-            "all_submitted": all_submitted
-        }
+        # Get review record to find phase_index
+        review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+        phase_index = review_data.get('phase_index', 0) if review_data else 0
 
-        # Check for dead/failed reviewers - if some are dead, we can proceed with partial verdicts
-        should_finalize = all_submitted
-        dead_reviewers = []
-        if not all_submitted and num_submitted > 0:
-            # Check if remaining reviewers are dead
-            reviewer_agent_ids = [r.get('agent_id') for r in review_record.get('reviewers', [])]
-            submitted_reviewer_ids = [v.get('reviewer_agent_id') for v in review_record.get('verdicts', [])]
+        # 4. Finalize the review - updates phase status atomically
+        finalize_success = state_db.finalize_review(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            review_id=review_id,
+            phase_index=phase_index,
+            final_verdict=final_verdict
+        )
 
-            for agent in registry.get('agents', []):
-                agent_id = agent.get('id')
-                if agent_id in reviewer_agent_ids and agent_id not in submitted_reviewer_ids:
-                    # This reviewer hasn't submitted yet
-                    if agent.get('status') in ['failed', 'error', 'terminated', 'killed']:
-                        dead_reviewers.append(agent_id)
-
-            # If all non-submitted reviewers are dead, proceed with partial verdicts
-            remaining_alive = num_expected - num_submitted - len(dead_reviewers)
-            if remaining_alive == 0 and num_submitted > 0:
-                logger.warning(f"Proceeding with partial verdicts: {num_submitted}/{num_expected} submitted, {len(dead_reviewers)} reviewers dead")
-                should_finalize = True
-                result_info['partial_verdict'] = True
-                result_info['dead_reviewers'] = dead_reviewers
-
-        # If all reviewers submitted (or dead), aggregate and finalize
-        if should_finalize:
-            # Aggregate verdicts from reviewers
-            all_verdicts = [v['verdict'] for v in review_record['verdicts']]
-            all_findings = []
-            for v in review_record['verdicts']:
-                all_findings.extend(v.get('findings', []))
-
-            # Verdict aggregation with balanced tie-break logic:
-            # - 2 reviewers: Specific tie-break rules
-            # - 3 reviewers (with tester): Fallback to conservative majority logic
-            # - Unanimous → use that verdict
-            # - approve + reject → needs_revision (tie-break: give chance to fix)
-            # - approve + needs_revision → needs_revision
-            # - reject + needs_revision → rejected
-            approve_count = all_verdicts.count('approved')
-            reject_count = all_verdicts.count('rejected')
-            revision_count = all_verdicts.count('needs_revision')
-
-            if len(all_verdicts) == 2:
-                # 2-reviewer specific logic
-                if approve_count == 2:
-                    final_verdict = 'approved'
-                elif reject_count == 2:
-                    final_verdict = 'rejected'
-                elif revision_count == 2:
-                    final_verdict = 'needs_revision'
-                elif approve_count == 1 and reject_count == 1:
-                    # Tie-break: one says pass, one says fail → needs_revision (middle ground)
-                    final_verdict = 'needs_revision'
-                    logger.info(f"TIE-BREAK: 1 approve + 1 reject → needs_revision")
-                elif reject_count == 1 and revision_count == 1:
-                    # One says reject, other says minor fix → reject wins
-                    final_verdict = 'rejected'
-                else:
-                    # approve + needs_revision → needs_revision
-                    final_verdict = 'needs_revision'
-            else:
-                # Fallback for other reviewer counts (1 or 3+)
-                if reject_count > approve_count and reject_count >= revision_count:
-                    final_verdict = 'rejected'
-                elif revision_count > 0 or reject_count > 0:
-                    final_verdict = 'needs_revision'
-                else:
-                    final_verdict = 'approved'
-
-            # Include critique info if available (informational, doesn't affect verdict)
-            critique_info = review_record.get('critique')
-            if critique_info:
-                result_info['critique_summary'] = critique_info.get('summary', '')
-                result_info['critique_recommendations'] = critique_info.get('recommendations', [])
-
-            review_record['status'] = 'completed'
-            review_record['final_verdict'] = final_verdict
-            review_record['completed_at'] = datetime.now().isoformat()
-
-            # Apply verdict to phase
-            phases = registry.get('phases', [])
-            current_idx = registry.get('current_phase_index', 0)
-            if current_idx < len(phases):
-                current_phase = phases[current_idx]
-
-                if final_verdict == 'approved':
-                    current_phase['status'] = 'APPROVED'
-                    current_phase['approved_at'] = datetime.now().isoformat()
-
-                    # AUTO-GENERATE HANDOVER for completed phase
-                    # This ensures next phase has proper context from this phase's work
-                    try:
-                        phase_id = current_phase.get('id', f"phase-{current_idx}")
-                        phase_name = current_phase.get('name', f"Phase {current_idx + 1}")
-                        handover_doc = auto_generate_handover(
-                            task_workspace=workspace,
-                            phase_id=phase_id,
-                            phase_name=phase_name,
-                            registry=registry
-                        )
-                        save_result = save_handover(workspace, handover_doc)
-                        logger.info(f"PHASE-APPROVAL: Auto-generated handover for phase {phase_id}: {save_result.get('path', 'unknown')}")
-                        result_info['handover_generated'] = True
-                        result_info['handover_path'] = save_result.get('path')
-                    except Exception as e:
-                        logger.error(f"PHASE-APPROVAL: Failed to auto-generate handover for phase {current_idx}: {e}")
-                        result_info['handover_generated'] = False
-                        result_info['handover_error'] = str(e)
-
-                    # Auto-advance to next phase if not final
-                    if current_idx < len(phases) - 1:
-                        next_phase = phases[current_idx + 1]
-                        next_phase['status'] = 'ACTIVE'
-                        next_phase['started_at'] = datetime.now().isoformat()
-                        registry['current_phase_index'] = current_idx + 1
-                        result_info['advanced_to_phase'] = next_phase.get('name')
-                else:
-                    current_phase['status'] = 'REVISING'
-                    current_phase['revision_required_at'] = datetime.now().isoformat()
-                    current_phase['revision_count'] = current_phase.get('revision_count', 0) + 1
-
+        if finalize_success:
             result_info['final_verdict'] = final_verdict
             result_info['review_completed'] = True
-            result_info['phase_status'] = current_phase.get('status') if current_idx < len(phases) else None
+            result_info['phase_index'] = phase_index
 
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
+            # Get updated phase status
+            phase_data = state_db.get_phase(workspace_base=workspace_base, task_id=task_id, phase_index=phase_index)
+            if phase_data:
+                result_info['phase_status'] = phase_data.get('status')
+                result_info['phase_name'] = phase_data.get('name')
+
+            # Check if next phase was activated
+            next_phase = state_db.get_phase(workspace_base=workspace_base, task_id=task_id, phase_index=phase_index + 1)
+            if next_phase and next_phase.get('status') == 'ACTIVE':
+                result_info['advanced_to_phase'] = next_phase.get('name')
+
+            # Auto-generate handover for approved phases
+            if final_verdict == 'approved':
+                try:
+                    phase_name_for_handover = result_info.get('phase_name', f"Phase {phase_index + 1}")
+                    phase_id = f"phase-{phase_index}"
+
+                    # Get agent findings from SQLite for handover generation
+                    agent_findings = state_db.get_agent_findings(
+                        workspace_base=workspace_base,
+                        task_id=task_id
+                    )
+
+                    # Build handover document
+                    handover_doc = {
+                        "phase_id": phase_id,
+                        "phase_name": phase_name_for_handover,
+                        "completed_at": datetime.now().isoformat(),
+                        "status": "approved",
+                        "summary": f"Phase '{phase_name_for_handover}' completed and approved by reviewers",
+                        "key_findings": [f.get('message', '') for f in agent_findings[:10]],
+                        "recommendations": [],
+                        "blockers_resolved": []
+                    }
+                    save_result = save_handover(workspace, handover_doc)
+                    logger.info(f"PHASE-APPROVAL: Auto-generated handover for phase {phase_id}: {save_result.get('path', 'unknown')}")
+                    result_info['handover_generated'] = True
+                    result_info['handover_path'] = save_result.get('path')
+                except Exception as e:
+                    logger.error(f"PHASE-APPROVAL: Failed to auto-generate handover: {e}")
+                    result_info['handover_generated'] = False
+                    result_info['handover_error'] = str(e)
+        else:
+            result_info['finalize_error'] = "Failed to finalize review"
+
+    # 5. Update reviewer agent status to completed in SQLite
+    # Find which agent submitted this verdict and mark them done
+    try:
+        # Get review record to find reviewer agents
+        review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+        if review_data:
+            reviewer_agents = review_data.get('reviewer_agent_ids', [])
+            # Mark all reviewer agents for this review as completed if they're still active
+            for agent_id in reviewer_agents:
+                state_db.update_agent_status(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    new_status='completed'
+                )
+    except Exception as e:
+        logger.warning(f"VERDICT: Failed to update reviewer agent status: {e}")
 
     return json.dumps(result_info, indent=2)
 
@@ -5911,6 +5364,7 @@ def submit_review_verdict(
 def submit_critique(
     task_id: str,
     review_id: str,
+    critique_agent_id: str,
     observations: List[Dict[str, Any]],
     summary: str,
     recommendations: Optional[List[str]] = None
@@ -5924,6 +5378,7 @@ def submit_critique(
     Args:
         task_id: Task ID
         review_id: Review ID from the review process
+        critique_agent_id: The agent ID of the critique agent submitting this
         observations: List of observations, each with:
             - type: "architectural", "technical_debt", "suggestion", "concern", "praise"
             - priority: "high", "medium", "low" (how important to address)
@@ -5939,70 +5394,65 @@ def submit_critique(
     if not workspace:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
 
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-    with LockedRegistryFile(registry_path) as (registry, f):
-        # Find the review record
-        reviews = registry.get('reviews', [])
-        review_record = None
-        for rev in reviews:
-            if rev.get('review_id') == review_id:
-                review_record = rev
-                break
+    # SQLITE MIGRATION: Use SQLite for critique recording
+    # No more LockedRegistryFile - SQLite handles concurrency natively
 
-        if not review_record:
-            return json.dumps({
-                "success": False,
-                "error": f"Review {review_id} not found"
-            })
+    # 1. Record the critique in SQLite
+    record_result = state_db.record_critique(
+        workspace_base=workspace_base,
+        review_id=review_id,
+        task_id=task_id,
+        critique_agent_id=critique_agent_id,
+        observations=observations,
+        summary=summary,
+        recommendations=recommendations
+    )
 
-        # Record the critique
-        review_record['critique'] = {
-            "observations": observations,
-            "summary": summary,
-            "recommendations": recommendations or [],
-            "submitted_at": datetime.now().isoformat()
-        }
-        review_record['critique_submitted'] = True
+    if not record_result.get('success'):
+        return json.dumps({
+            "success": False,
+            "error": record_result.get('error', 'Failed to record critique')
+        })
 
-        # Update critique agent status to completed
-        critique_agent_id = review_record.get('critique_agent_id')
-        if critique_agent_id:
-            for agent in registry.get('agents', []):
-                if agent.get('id') == critique_agent_id:
-                    if agent.get('status') in ['working', 'running']:
-                        registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
-                        registry['completed_count'] = registry.get('completed_count', 0) + 1
-                    agent['status'] = 'completed'
-                    agent['completed_at'] = datetime.now().isoformat()
-                    logger.info(f"CRITIQUE STATUS UPDATE: {critique_agent_id} marked completed")
-                    break
+    # 2. Get review status to check if ready to finalize
+    review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
 
-        # Check if review can be finalized (2 verdicts + 1 critique)
-        num_verdicts = len(review_record.get('verdicts', []))
-        num_expected_reviewers = review_record.get('num_reviewers', 2)
-        critique_done = review_record.get('critique_submitted', False)
+    num_expected_reviewers = 2
+    num_verdicts = 0
 
-        result_info = {
-            "success": True,
-            "review_id": review_id,
-            "critique_submitted": True,
-            "observations_count": len(observations),
-            "verdicts_submitted": num_verdicts,
-            "verdicts_expected": num_expected_reviewers,
-            "ready_to_finalize": num_verdicts >= num_expected_reviewers and critique_done
-        }
+    if review_data:
+        num_expected_reviewers = review_data.get('num_reviewers', 2)
+        # Count verdicts from SQLite
+        verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=review_id)
+        num_verdicts = len(verdicts) if verdicts else 0
 
-        # If all submissions complete, trigger finalization check
-        # (finalization happens in submit_review_verdict when last verdict comes in)
-        if num_verdicts >= num_expected_reviewers and critique_done:
-            result_info['message'] = "Critique received. Review is ready for verdict aggregation."
-        else:
-            result_info['message'] = f"Critique received. Waiting for {num_expected_reviewers - num_verdicts} more verdict(s)."
+    result_info = {
+        "success": True,
+        "review_id": review_id,
+        "critique_submitted": True,
+        "observations_count": len(observations),
+        "verdicts_submitted": num_verdicts,
+        "verdicts_expected": num_expected_reviewers,
+        "ready_to_finalize": num_verdicts >= num_expected_reviewers
+    }
 
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
+    # 3. Update critique agent status to completed
+    if review_data and review_data.get('critique_agent_id'):
+        critique_agent_id = review_data['critique_agent_id']
+        state_db.update_agent_status(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            agent_id=critique_agent_id,
+            new_status='completed'
+        )
+        logger.info(f"CRITIQUE STATUS UPDATE: {critique_agent_id} marked completed")
+
+    if num_verdicts >= num_expected_reviewers:
+        result_info['message'] = "Critique received. Review is ready for verdict aggregation."
+    else:
+        result_info['message'] = f"Critique received. Waiting for {num_expected_reviewers - num_verdicts} more verdict(s)."
 
     return json.dumps(result_info, indent=2)
 
@@ -6011,6 +5461,8 @@ def submit_critique(
 def get_review_status(task_id: str, review_id: Optional[str] = None) -> str:
     """
     Get status of agentic review(s) for a task.
+
+    SQLITE MIGRATION: Now reads reviews from SQLite instead of JSON.
 
     Args:
         task_id: Task ID
@@ -6023,23 +5475,30 @@ def get_review_status(task_id: str, review_id: Optional[str] = None) -> str:
     if not workspace:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
 
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
-    reviews = registry.get('reviews', [])
+    # SQLITE MIGRATION: Read reviews from SQLite
+    reviews = state_db.get_reviews_for_task(workspace_base=workspace_base, task_id=task_id)
 
     if review_id:
         # Find specific review
         for rev in reviews:
             if rev.get('review_id') == review_id:
+                # Get verdicts for this review
+                verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=review_id)
+                rev['verdicts'] = verdicts
                 return json.dumps({
                     "success": True,
                     "review": rev
                 }, indent=2)
         return json.dumps({"success": False, "error": f"Review {review_id} not found"})
 
-    # Return all reviews
+    # Return all reviews with verdict counts
+    for rev in reviews:
+        verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=rev.get('review_id', ''))
+        rev['verdicts_submitted'] = len(verdicts)
+        rev['verdicts'] = verdicts
+
     return json.dumps({
         "success": True,
         "total_reviews": len(reviews),
@@ -6055,6 +5514,8 @@ def abort_stalled_review(
 ) -> str:
     """
     Abort a stalled review when reviewer(s) crash or fail to submit verdicts.
+
+    SQLITE MIGRATION: Now reads/writes reviews and agents via SQLite.
 
     Use this when:
     - A reviewer agent crashes without submitting a verdict
@@ -6078,91 +5539,95 @@ def abort_stalled_review(
     if not workspace:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
 
-    registry_path = os.path.join(workspace, 'AGENT_REGISTRY.json')
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
 
+    # SQLITE MIGRATION: Read review from SQLite
+    target_review = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+    if not target_review:
+        return json.dumps({"success": False, "error": f"Review {review_id} not found"})
+
+    if target_review.get('status') == 'completed':
+        return json.dumps({
+            "success": False,
+            "error": "Cannot abort a completed review",
+            "hint": "Use submit_phase_for_review to start a new review cycle"
+        })
+
+    # Get verdicts count before abort
+    verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=review_id)
+    verdicts_received = len(verdicts)
+
+    # Abort the review in SQLite
+    state_db.abort_review(
+        workspace_base=workspace_base,
+        review_id=review_id,
+        reason=reason
+    )
+
+    # Get task snapshot for phase info
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    phases = task_snapshot.get('phases', []) if task_snapshot else []
+    current_idx = task_snapshot.get('current_phase_index', 0) if task_snapshot else 0
+
+    # Determine new phase status
+    new_phase_status = 'ACTIVE'
+    if current_idx < len(phases):
+        current_phase = phases[current_idx]
+        current_status = current_phase.get('status')
+
+        if current_status == 'ESCALATED':
+            new_phase_status = 'AWAITING_REVIEW'
+            logger.info(f"Phase {current_idx} reset from ESCALATED to AWAITING_REVIEW")
+        elif current_phase.get('revision_count', 0) > 0:
+            new_phase_status = 'REVISING'
+
+        # Update phase status in SQLite
+        state_db.update_phase_status(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            phase_index=current_idx,
+            new_status=new_phase_status
+        )
+
+    # Kill any running reviewer agents from this review
     killed_agents = []
+    reviewer_agent_ids = target_review.get('reviewer_agent_ids', [])
+    if isinstance(reviewer_agent_ids, str):
+        try:
+            reviewer_agent_ids = json.loads(reviewer_agent_ids)
+        except:
+            reviewer_agent_ids = []
 
-    with LockedRegistryFile(registry_path) as (registry, f):
-        reviews = registry.get('reviews', [])
-
-        # Find the review
-        target_review = None
-        for rev in reviews:
-            if rev.get('review_id') == review_id:
-                target_review = rev
-                break
-
-        if not target_review:
-            return json.dumps({"success": False, "error": f"Review {review_id} not found"})
-
-        if target_review.get('status') == 'completed':
-            return json.dumps({
-                "success": False,
-                "error": "Cannot abort a completed review",
-                "hint": "Use submit_phase_for_review to start a new review cycle"
-            })
-
-        # Mark review as aborted
-        target_review['status'] = 'aborted'
-        target_review['aborted_at'] = datetime.now().isoformat()
-        target_review['abort_reason'] = reason
-        target_review['verdicts_received'] = len(target_review.get('verdicts', []))
-
-        # Find and return phase to appropriate state
-        phases = registry.get('phases', [])
-        current_idx = registry.get('current_phase_index', 0)
-
-        if current_idx < len(phases):
-            current_phase = phases[current_idx]
-            if current_phase.get('active_review_id') == review_id or current_phase.get('status') == 'ESCALATED':
-                # Determine target state based on current phase status
-                current_status = current_phase.get('status')
-
-                if current_status == 'ESCALATED':
-                    # ESCALATED phases go to AWAITING_REVIEW so they can be retried
-                    current_phase['status'] = 'AWAITING_REVIEW'
-                    logger.info(f"Phase {current_idx} reset from ESCALATED to AWAITING_REVIEW")
-                elif current_phase.get('revision_count', 0) > 0:
-                    # Re-reviews go to REVISING
-                    current_phase['status'] = 'REVISING'
-                else:
-                    # Normal abort goes to ACTIVE
-                    current_phase['status'] = 'ACTIVE'
-
-                current_phase['review_aborted_at'] = datetime.now().isoformat()
-                current_phase['last_abort_reason'] = reason
-
-        # Kill any running reviewer agents from this review
-        reviewer_agent_ids = [r.get('agent_id') for r in target_review.get('reviewers', [])]
-        for agent in registry.get('agents', []):
-            if agent.get('id') in reviewer_agent_ids and agent.get('status') in ['running', 'working']:
-                tmux_session = agent.get('tmux_session')
-                if tmux_session:
-                    try:
-                        subprocess.run(
-                            ['tmux', 'kill-session', '-t', tmux_session],
-                            capture_output=True, timeout=5
-                        )
-                        killed_agents.append(agent.get('id'))
-                        agent['status'] = 'terminated'
-                        agent['terminated_reason'] = f"Review aborted: {reason}"
-                        if registry.get('active_count', 0) > 0:
-                            registry['active_count'] -= 1
-                    except Exception as e:
-                        logger.warning(f"Failed to kill reviewer {agent.get('id')}: {e}")
-
-        f.seek(0)
-        json.dump(registry, f, indent=2)
-        f.truncate()
+    agents = task_snapshot.get('agents', []) if task_snapshot else []
+    for agent in agents:
+        agent_id = agent.get('agent_id')
+        if agent_id in reviewer_agent_ids and agent.get('status') in ['running', 'working']:
+            tmux_session = agent.get('tmux_session')
+            if tmux_session:
+                try:
+                    subprocess.run(
+                        ['tmux', 'kill-session', '-t', tmux_session],
+                        capture_output=True, timeout=5
+                    )
+                    killed_agents.append(agent_id)
+                    # Update agent status in SQLite
+                    state_db.update_agent_status(
+                        workspace_base=workspace_base,
+                        task_id=task_id,
+                        agent_id=agent_id,
+                        new_status='terminated'
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to kill reviewer {agent_id}: {e}")
 
     return json.dumps({
         "success": True,
         "review_id": review_id,
         "status": "aborted",
         "reason": reason,
-        "verdicts_received_before_abort": target_review.get('verdicts_received', 0),
+        "verdicts_received_before_abort": verdicts_received,
         "killed_reviewers": killed_agents,
-        "phase_returned_to": "REVISING" if phases[current_idx].get('revision_count', 0) > 0 else "ACTIVE",
+        "phase_returned_to": new_phase_status,
         "next_action": "Use submit_phase_for_review to spawn new reviewers, or deploy fix agents first"
     }, indent=2)
 
@@ -6339,22 +5804,19 @@ def trigger_health_scan(task_id: Optional[str] = None) -> str:
 
 def cleanup_dead_agents_from_global_registry() -> Dict[str, Any]:
     """
-    Scan the global registry and clean up agents with dead tmux sessions.
+    SQLITE MIGRATION: Now scans SQLite for active agents with dead tmux sessions.
 
     This function:
-    1. Reads all agents from the global registry
+    1. Reads all active agents from SQLite (across all tasks)
     2. Checks if their tmux sessions are still running
-    3. Marks agents with dead tmux sessions as 'failed'
-    4. Decrements active_agents counter for each dead agent found
+    3. Marks agents with dead tmux sessions as 'failed' via SQLite
+
+    Note: SQLite doesn't use a counter - active count is derived from agent statuses.
 
     Returns:
         Dict with cleanup statistics
     """
     workspace_base = resolve_workspace_variables(WORKSPACE_BASE)
-    global_reg_path = get_global_registry_path(workspace_base)
-
-    if not os.path.exists(global_reg_path):
-        return {"success": False, "error": "Global registry not found"}
 
     # Get list of running tmux sessions
     try:
@@ -6370,83 +5832,56 @@ def cleanup_dead_agents_from_global_registry() -> Dict[str, Any]:
         running_sessions = set()
 
     dead_agents = []
-    cleaned_count = 0
-    already_terminal_count = 0
     still_running_count = 0
     missing_tmux_field = 0
 
-    active_statuses = {'running', 'working', 'blocked'}
-    terminal_statuses = {'completed', 'failed', 'error', 'terminated', 'killed'}
-
     try:
-        with LockedRegistryFile(global_reg_path) as (global_reg, f):
-            agents = global_reg.get('agents', {})
+        # Get all active agents from SQLite
+        active_agents = state_db.get_all_active_agents(workspace_base=workspace_base)
 
-            for agent_id, agent_data in agents.items():
-                status = agent_data.get('status')
-                tmux_session = agent_data.get('tmux_session')
+        for agent in active_agents:
+            agent_id = agent.get('agent_id')
+            tmux_session = agent.get('tmux_session')
+            task_id = agent.get('task_id')
 
-                # Skip if already in terminal state
-                if status in terminal_statuses:
-                    already_terminal_count += 1
-                    continue
-
-                # No tmux session field - legacy agent without status tracking
-                if not tmux_session:
-                    # Mark as failed if it has no status or active status but no tmux session
-                    if status is None or status in active_statuses:
-                        agent_data['status'] = 'failed'
-                        agent_data['failed_at'] = datetime.now().isoformat()
-                        agent_data['failure_reason'] = 'Global registry cleanup: no tmux session tracked'
-                        dead_agents.append(agent_id)
-                        cleaned_count += 1
-                    missing_tmux_field += 1
-                    continue
-
-                # Check if tmux session is running
-                if tmux_session in running_sessions:
-                    still_running_count += 1
-                    continue
-
-                # Tmux session is dead - mark agent as failed
-                previous_status = agent_data.get('status')
-                agent_data['status'] = 'failed'
-                agent_data['failed_at'] = datetime.now().isoformat()
-                agent_data['failure_reason'] = f'Global registry cleanup: tmux session dead ({tmux_session})'
-
-                # Decrement active_agents if was in active status or had no status (was counted as active)
-                if previous_status is None or previous_status in active_statuses:
-                    global_reg['active_agents'] = max(0, global_reg.get('active_agents', 0) - 1)
-
+            # No tmux session field
+            if not tmux_session:
+                missing_tmux_field += 1
                 dead_agents.append(agent_id)
-                cleaned_count += 1
-                logger.info(f"Cleaned up dead agent: {agent_id} (tmux: {tmux_session}, prev_status: {previous_status})")
+                continue
 
-            # Recalculate active_agents to fix any counter drift
-            actual_active = sum(1 for a in agents.values() if a.get('status') in active_statuses)
-            counter_drift = global_reg.get('active_agents', 0) - actual_active
-            if counter_drift != 0:
-                logger.warning(f"Active agents counter drift detected: counter={global_reg.get('active_agents', 0)}, actual={actual_active}, drift={counter_drift}")
-                global_reg['active_agents'] = actual_active
+            # Check if tmux session is running
+            if tmux_session in running_sessions:
+                still_running_count += 1
+                continue
 
-            # Write back if any changes
-            if cleaned_count > 0 or counter_drift != 0:
-                f.seek(0)
-                f.write(json.dumps(global_reg, indent=2))
-                f.truncate()
-                logger.info(f"Global registry cleanup: {cleaned_count} dead agents marked as failed, active_agents corrected to: {global_reg.get('active_agents', 0)}")
+            # Tmux session is dead - mark agent as failed
+            dead_agents.append(agent_id)
+            logger.info(f"Found dead agent: {agent_id} (task: {task_id}, tmux: {tmux_session})")
 
+        # Batch update dead agents
+        cleaned_count = 0
+        if dead_agents:
+            cleaned_count = state_db.mark_agents_as_failed_batch(
+                workspace_base=workspace_base,
+                agent_ids=dead_agents,
+                reason='Global cleanup: tmux session dead'
+            )
+            logger.info(f"Global registry cleanup: {cleaned_count} dead agents marked as failed via SQLite")
+
+        # Get final active count from SQLite
+        # Note: This is an estimate - we don't have a global count, just per-task
+        # For now we just report successful cleanup
         return {
             "success": True,
             "cleaned_count": cleaned_count,
-            "counter_drift_fixed": counter_drift if counter_drift != 0 else None,
-            "active_agents_after": actual_active,
             "still_running": still_running_count,
-            "already_terminal": already_terminal_count,
             "missing_tmux_field": missing_tmux_field,
             "dead_agents": dead_agents[:20],  # Limit to first 20 for readability
             "running_sessions_detected": len(running_sessions),
-            "message": f"Cleaned up {cleaned_count} dead agents from global registry" + (f", fixed counter drift of {counter_drift}" if counter_drift != 0 else "")
+            "total_active_checked": len(active_agents),
+            "storage": "sqlite",
+            "message": f"Cleaned up {cleaned_count} dead agents via SQLite"
         }
 
     except Exception as e:
