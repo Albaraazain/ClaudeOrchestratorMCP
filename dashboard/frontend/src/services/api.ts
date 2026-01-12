@@ -4,8 +4,8 @@ import type { Task, Agent, Finding, LogMessage } from '../types';
 import { getBackendUrl, getWsUrl, isTauri, waitForBackend } from '../lib/tauri';
 
 // Default URLs for web mode
-const DEFAULT_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const DEFAULT_WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const DEFAULT_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8765';
+const DEFAULT_WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8765';
 
 class ApiService {
   private baseUrl: string;

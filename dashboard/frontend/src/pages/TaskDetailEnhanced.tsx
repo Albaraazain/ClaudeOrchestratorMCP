@@ -79,7 +79,7 @@ const TaskDetailEnhanced: React.FC = () => {
     const fetchTask = async () => {
       try {
         setLoading(true);
-        const response = await axios.get<TaskDetails>(`http://localhost:8000/api/tasks/${taskId}`);
+        const response = await axios.get<TaskDetails>(`${import.meta.env.VITE_API_URL || 'http://localhost:8765'}/api/tasks/${taskId}`);
         setTask(response.data);
         setError(null);
       } catch (err) {

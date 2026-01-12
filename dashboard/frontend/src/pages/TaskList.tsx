@@ -33,7 +33,7 @@ const TaskList: React.FC = () => {
     const fetchTasks = async () => {
       try {
         setLoading(true);
-        const response = await axios.get<TaskSummary[]>('http://localhost:8000/api/tasks');
+        const response = await axios.get<TaskSummary[]>(`${import.meta.env.VITE_API_URL || 'http://localhost:8765'}/api/tasks`);
         setTasks(response.data);
         setError(null);
       } catch (err) {
@@ -49,7 +49,7 @@ const TaskList: React.FC = () => {
 
   // Setup WebSocket for real-time updates
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/ws');
+    const ws = new WebSocket(`${import.meta.env.VITE_WS_URL || 'ws://localhost:8765'}/ws`);
 
     ws.onopen = () => {
       console.log('WebSocket connected');
