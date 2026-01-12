@@ -171,3 +171,4 @@ phases = [
     {"name": "Testing & QA", ...}  # Won't auto-append another
 ]
 ```
+- migrate all registory json files to sqlite database registeries, both global and local. ultrathink

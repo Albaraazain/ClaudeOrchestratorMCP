@@ -15,12 +15,16 @@ Enhancements:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 ALLOWED_AGENT_STATUSES = {
@@ -187,6 +191,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
           created_at TEXT,
           completed_at TEXT,
           reviewer_notes TEXT,
+          reviewer_agent_ids TEXT, -- JSON array of reviewer agent IDs
+          critique_agent_id TEXT, -- ID of the critique agent
           FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
         );
 
@@ -291,6 +297,109 @@ def _init_db(conn: sqlite3.Connection) -> None:
                 print(f"[STATE_DB] Phase migration error: {e}", file=sys.stderr)
                 raise
 
+    # =========================================================================
+    # NEW TABLES FOR FULL SQLITE MIGRATION (Jan 2026)
+    # These replace JSON registry file operations with SQLite transactions
+    # =========================================================================
+
+    conn.executescript(
+        """
+        -- Individual reviewer verdicts (replaces JSON reviews[].verdicts array)
+        CREATE TABLE IF NOT EXISTS review_verdicts (
+            verdict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            reviewer_agent_id TEXT,
+            verdict TEXT NOT NULL,  -- approved, rejected, needs_revision
+            findings TEXT,          -- JSON array of findings
+            reviewer_notes TEXT,
+            submitted_at TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_verdicts_review ON review_verdicts(review_id);
+        CREATE INDEX IF NOT EXISTS idx_verdicts_task ON review_verdicts(task_id);
+
+        -- Critique submissions (replaces JSON reviews[].critique object)
+        CREATE TABLE IF NOT EXISTS critique_submissions (
+            critique_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            critique_agent_id TEXT,
+            observations TEXT,      -- JSON array of observations
+            summary TEXT,
+            recommendations TEXT,   -- JSON array
+            submitted_at TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_critique_review ON critique_submissions(review_id);
+
+        -- Task configuration (replaces JSON max_agents, max_concurrent, project_context, etc.)
+        CREATE TABLE IF NOT EXISTS task_config (
+            task_id TEXT PRIMARY KEY,
+            max_agents INTEGER DEFAULT 50,
+            max_concurrent INTEGER DEFAULT 20,
+            max_depth INTEGER DEFAULT 5,
+            project_context TEXT,       -- JSON for dev_server_port, test_url, framework, etc.
+            constraints TEXT,           -- JSON array
+            relevant_files TEXT,        -- JSON array
+            conversation_history TEXT,  -- JSON array (last 15 messages)
+            background_context TEXT,
+            expected_deliverables TEXT, -- JSON array
+            success_criteria TEXT,      -- JSON array
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+
+        -- Agent parent-child relationships (for spawn hierarchy tracking)
+        CREATE TABLE IF NOT EXISTS agent_hierarchy (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            parent_agent_id TEXT,       -- NULL or "orchestrator" for root agents
+            child_agent_id TEXT NOT NULL,
+            spawned_at TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, child_agent_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_hierarchy_parent ON agent_hierarchy(parent_agent_id);
+        CREATE INDEX IF NOT EXISTS idx_hierarchy_child ON agent_hierarchy(child_agent_id);
+        """
+    )
+
+    # Add num_reviewers and auto_spawned columns to reviews table if missing
+    cursor = conn.execute("PRAGMA table_info(reviews)")
+    review_columns = {row[1] for row in cursor.fetchall()}
+
+    review_migrations = []
+    if 'num_reviewers' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN num_reviewers INTEGER DEFAULT 2;")
+    if 'auto_spawned' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN auto_spawned INTEGER DEFAULT 0;")
+    if 'phase_name' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN phase_name TEXT;")
+
+    for migration in review_migrations:
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                import sys
+                print(f"[STATE_DB] Review migration error: {e}", file=sys.stderr)
+                raise
+
+    # Add review_id and final_verdict columns to agents table if missing
+    if 'review_id' not in columns:
+        try:
+            conn.execute("ALTER TABLE agents ADD COLUMN review_id TEXT;")
+        except sqlite3.OperationalError:
+            pass
+    if 'final_verdict' not in columns:
+        try:
+            conn.execute("ALTER TABLE agents ADD COLUMN final_verdict TEXT;")
+        except sqlite3.OperationalError:
+            pass
+
 
 def _read_json_safely(path: str, max_attempts: int = 3) -> Optional[Dict[str, Any]]:
     for _ in range(max_attempts):
@@ -344,6 +453,100 @@ def ensure_db(workspace_base: str) -> str:
 # NEW CRUD FUNCTIONS FOR LIFECYCLE MANAGEMENT AND DASHBOARD INTEGRATION
 # ============================================================================
 
+
+def create_task_with_phases(
+    *,
+    workspace_base: str,
+    task_id: str,
+    workspace: str,
+    description: str,
+    priority: str = "P2",
+    client_cwd: Optional[str] = None,
+    phases: List[Dict[str, Any]],
+    project_context: Optional[Dict[str, Any]] = None,
+    max_agents: int = 45,
+    max_concurrent: int = 20,
+    max_depth: int = 5
+) -> Dict[str, Any]:
+    """
+    Create a new task with its phases directly in SQLite.
+
+    SQLITE MIGRATION: Replaces JSON-based task creation.
+    This is the primary entry point for task creation - no JSON files needed.
+
+    Returns:
+        Dict with success status and task_id
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            # Insert task record
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, workspace, workspace_base, description, status, priority,
+                    client_cwd, created_at, updated_at, current_phase_index
+                ) VALUES (?, ?, ?, ?, 'INITIALIZED', ?, ?, ?, ?, 0)
+                """,
+                (task_id, workspace, workspace_base, description, priority, client_cwd, now, now)
+            )
+
+            # Insert phase records
+            for idx, phase in enumerate(phases):
+                phase_id = phase.get('id') or f"phase-{uuid.uuid4().hex[:8]}"
+                phase_status = 'ACTIVE' if idx == 0 else 'PENDING'
+
+                conn.execute(
+                    """
+                    INSERT INTO phases (
+                        task_id, phase_index, phase_id, name, description,
+                        deliverables, success_criteria, status, created_at, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        idx,
+                        phase_id,
+                        phase.get('name', f'Phase {idx + 1}'),
+                        phase.get('description', ''),
+                        json.dumps(phase.get('deliverables', [])),
+                        json.dumps(phase.get('success_criteria', [])),
+                        phase_status,
+                        now,
+                        now if idx == 0 else None  # Only first phase starts immediately
+                    )
+                )
+
+            # Insert task config
+            conn.execute(
+                """
+                INSERT INTO task_config (
+                    task_id, max_agents, max_concurrent, max_depth, project_context
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (task_id, max_agents, max_concurrent, max_depth,
+                 json.dumps(project_context) if project_context else None)
+            )
+
+            conn.execute("COMMIT")
+
+            logger.info(f"[SQLITE] Created task {task_id} with {len(phases)} phases")
+            return {"success": True, "task_id": task_id}
+
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.error(f"[SQLITE] Failed to create task {task_id}: {e}")
+            return {"success": False, "error": str(e)}
+
+    finally:
+        conn.close()
+
+
 def update_task_status(*, workspace_base: str, task_id: str, new_status: str) -> bool:
     """Update task status for lifecycle transitions."""
     if new_status not in TASK_STATUSES:
@@ -373,6 +576,25 @@ def update_task_status(*, workspace_base: str, task_id: str, new_status: str) ->
                 (now, task_id)
             )
 
+        return result.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_task_phase_index(*, workspace_base: str, task_id: str, new_phase_index: int) -> bool:
+    """Update the current phase index for a task."""
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+        result = conn.execute(
+            """
+            UPDATE tasks
+            SET current_phase_index = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (new_phase_index, now, task_id)
+        )
         return result.rowcount > 0
     finally:
         conn.close()
@@ -1070,6 +1292,35 @@ def update_review(
             params
         )
 
+        return result.rowcount > 0
+    finally:
+        conn.close()
+
+
+def abort_review(
+    *,
+    workspace_base: str,
+    review_id: str,
+    reason: str = "Review aborted"
+) -> bool:
+    """Abort a review and record the reason.
+
+    Sets status to 'aborted', records completion time, and stores reason in reviewer_notes.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+        result = conn.execute(
+            """
+            UPDATE reviews
+            SET status = 'aborted',
+                completed_at = ?,
+                reviewer_notes = COALESCE(reviewer_notes || ' | ', '') || ?
+            WHERE review_id = ?
+            """,
+            (now, f"ABORTED: {reason}", review_id)
+        )
         return result.rowcount > 0
     finally:
         conn.close()
@@ -1788,5 +2039,1093 @@ def get_agent_by_id(*, workspace_base: str, task_id: str, agent_id: str) -> Opti
             except Exception:
                 agent['tracked_files'] = {}
         return agent
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# FULL SQLITE MIGRATION - ATOMIC OPERATIONS (Jan 2026)
+# These functions replace LockedRegistryFile JSON operations with SQLite
+# ============================================================================
+
+
+def check_can_spawn_agent(
+    *,
+    workspace_base: str,
+    task_id: str,
+    agent_type: str,
+    max_concurrent: int = 20,
+    max_agents: int = 50
+) -> Tuple[bool, Optional[str], Optional[Dict]]:
+    """
+    Check if a new agent can be spawned (atomic check without lock contention).
+
+    Returns:
+        Tuple of (can_spawn, error_message, existing_agent_if_duplicate)
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        # Check active count
+        active_count = conn.execute(
+            "SELECT COUNT(*) FROM agents WHERE task_id=? AND status IN ('running', 'working', 'blocked', 'reviewing')",
+            (task_id,)
+        ).fetchone()[0]
+
+        if active_count >= max_concurrent:
+            return False, f"Too many active agents ({active_count}/{max_concurrent})", None
+
+        # Check total agents
+        total_count = conn.execute(
+            "SELECT COUNT(*) FROM agents WHERE task_id=?",
+            (task_id,)
+        ).fetchone()[0]
+
+        if total_count >= max_agents:
+            return False, f"Max agents reached ({total_count}/{max_agents})", None
+
+        # Check for duplicate agent type (deduplication)
+        existing = conn.execute(
+            "SELECT agent_id, status FROM agents WHERE task_id=? AND type=? AND status IN ('running', 'working', 'blocked', 'reviewing')",
+            (task_id, agent_type)
+        ).fetchone()
+
+        if existing:
+            return False, f"Agent of type '{agent_type}' already running", {
+                "agent_id": existing[0],
+                "status": existing[1]
+            }
+
+        return True, None, None
+    finally:
+        conn.close()
+
+
+def deploy_agent_atomic(
+    *,
+    workspace_base: str,
+    task_id: str,
+    agent_id: str,
+    agent_type: str,
+    model: str,
+    parent: str,
+    depth: int,
+    phase_index: int,
+    tmux_session: str,
+    prompt_preview: str = ""
+) -> Dict[str, Any]:
+    """
+    Atomically deploy an agent to SQLite (replaces nested LockedRegistryFile pattern).
+
+    This function:
+    1. Inserts agent record
+    2. Records hierarchy (if parent is not orchestrator)
+    3. Updates task timestamp
+    4. All in a single transaction
+
+    Returns:
+        Dict with success status and any error
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        # Use BEGIN IMMEDIATE for exclusive write lock from start
+        conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            # Insert agent record
+            conn.execute(
+                """
+                INSERT INTO agents (
+                    agent_id, task_id, type, model, tmux_session, parent, depth,
+                    phase_index, status, progress, started_at, last_update, prompt_preview
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, ?, ?)
+                """,
+                (agent_id, task_id, agent_type, model, tmux_session, parent, depth,
+                 phase_index, now, now, prompt_preview[:200] if prompt_preview else "")
+            )
+
+            # Record hierarchy if has parent
+            if parent and parent != "orchestrator":
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO agent_hierarchy (task_id, parent_agent_id, child_agent_id, spawned_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, parent, agent_id, now)
+                )
+
+            # Update task timestamp
+            conn.execute(
+                "UPDATE tasks SET updated_at=? WHERE task_id=?",
+                (now, task_id)
+            )
+
+            conn.execute("COMMIT")
+
+            return {"success": True, "agent_id": agent_id}
+
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            return {"success": False, "error": str(e)}
+
+    finally:
+        conn.close()
+
+
+def get_task_config(*, workspace_base: str, task_id: str) -> Dict[str, Any]:
+    """
+    Get task configuration from SQLite.
+
+    Returns config dict with defaults if not found.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM task_config WHERE task_id=?",
+            (task_id,)
+        ).fetchone()
+
+        if row:
+            config = dict(row)
+            # Parse JSON fields
+            for field in ['project_context', 'constraints', 'relevant_files',
+                         'conversation_history', 'expected_deliverables', 'success_criteria']:
+                if config.get(field):
+                    try:
+                        config[field] = json.loads(config[field])
+                    except Exception:
+                        pass
+            return config
+
+        # Return defaults
+        return {
+            "task_id": task_id,
+            "max_agents": 50,
+            "max_concurrent": 20,
+            "max_depth": 5,
+            "project_context": {},
+            "constraints": [],
+            "relevant_files": [],
+            "conversation_history": [],
+            "background_context": "",
+            "expected_deliverables": [],
+            "success_criteria": []
+        }
+    finally:
+        conn.close()
+
+
+def save_task_config(
+    *,
+    workspace_base: str,
+    task_id: str,
+    max_agents: int = 50,
+    max_concurrent: int = 20,
+    max_depth: int = 5,
+    project_context: Optional[Dict] = None,
+    constraints: Optional[List] = None,
+    relevant_files: Optional[List] = None,
+    conversation_history: Optional[List] = None,
+    background_context: Optional[str] = None,
+    expected_deliverables: Optional[List] = None,
+    success_criteria: Optional[List] = None
+) -> bool:
+    """
+    Save task configuration to SQLite.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO task_config (
+                task_id, max_agents, max_concurrent, max_depth,
+                project_context, constraints, relevant_files,
+                conversation_history, background_context,
+                expected_deliverables, success_criteria
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id, max_agents, max_concurrent, max_depth,
+                json.dumps(project_context) if project_context else None,
+                json.dumps(constraints) if constraints else None,
+                json.dumps(relevant_files) if relevant_files else None,
+                json.dumps(conversation_history) if conversation_history else None,
+                background_context,
+                json.dumps(expected_deliverables) if expected_deliverables else None,
+                json.dumps(success_criteria) if success_criteria else None
+            )
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def record_review_verdict(
+    *,
+    workspace_base: str,
+    review_id: str,
+    task_id: str,
+    reviewer_agent_id: str,
+    verdict: str,
+    findings: List[Dict],
+    reviewer_notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Record a reviewer's verdict in SQLite.
+
+    Returns dict with verdict_id and whether all reviewers have submitted.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            # Insert verdict
+            cursor = conn.execute(
+                """
+                INSERT INTO review_verdicts (
+                    review_id, task_id, reviewer_agent_id, verdict,
+                    findings, reviewer_notes, submitted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (review_id, task_id, reviewer_agent_id, verdict,
+                 json.dumps(findings), reviewer_notes, now)
+            )
+            verdict_id = cursor.lastrowid
+
+            # Mark reviewer agent as completed
+            conn.execute(
+                """
+                UPDATE agents SET status='completed', completed_at=?, final_verdict=?
+                WHERE agent_id=? AND task_id=?
+                """,
+                (now, verdict, reviewer_agent_id, task_id)
+            )
+
+            conn.execute("COMMIT")
+
+            return {
+                "success": True,
+                "verdict_id": verdict_id,
+                "submitted_at": now
+            }
+
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            return {"success": False, "error": str(e)}
+
+    finally:
+        conn.close()
+
+
+def check_review_complete(
+    *,
+    workspace_base: str,
+    review_id: str
+) -> Tuple[bool, Optional[str], List[Dict]]:
+    """
+    Check if all reviewers have submitted verdicts and determine final verdict.
+
+    Returns:
+        Tuple of (is_complete, final_verdict, all_verdicts)
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        # Get expected reviewer count
+        review_row = conn.execute(
+            "SELECT num_reviewers FROM reviews WHERE review_id=?",
+            (review_id,)
+        ).fetchone()
+
+        if not review_row:
+            return False, None, []
+
+        num_expected = review_row[0] or 2  # Default to 2 reviewers
+
+        # Get all submitted verdicts
+        verdicts = conn.execute(
+            "SELECT verdict, reviewer_agent_id, findings, reviewer_notes, submitted_at FROM review_verdicts WHERE review_id=?",
+            (review_id,)
+        ).fetchall()
+
+        verdict_list = [dict(v) for v in verdicts]
+
+        if len(verdicts) < num_expected:
+            return False, None, verdict_list
+
+        # Aggregate verdicts
+        approve_count = sum(1 for v in verdicts if v[0] == 'approved')
+        reject_count = sum(1 for v in verdicts if v[0] == 'rejected')
+
+        # Majority wins, ties go to approved
+        if approve_count >= reject_count:
+            final_verdict = 'approved'
+        else:
+            final_verdict = 'rejected'
+
+        return True, final_verdict, verdict_list
+
+    finally:
+        conn.close()
+
+
+def finalize_review(
+    *,
+    workspace_base: str,
+    task_id: str,
+    review_id: str,
+    phase_index: int,
+    final_verdict: str,
+    reviewer_notes: Optional[str] = None
+) -> bool:
+    """
+    Finalize a review and update phase status accordingly.
+
+    This is called after all reviewers have submitted verdicts.
+
+    RACE CONDITION FIX: Uses atomic check-and-update to prevent double-finalization.
+    Only updates if review is not already completed.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            # RACE CONDITION FIX: Check if already finalized before updating
+            existing = conn.execute(
+                "SELECT status FROM reviews WHERE review_id=?",
+                (review_id,)
+            ).fetchone()
+
+            if existing and existing[0] == 'completed':
+                # Already finalized by another concurrent call - not an error, just skip
+                conn.execute("ROLLBACK")
+                return True  # Still return True since finalization is done
+
+            # Update review record (only if not already completed)
+            result = conn.execute(
+                """
+                UPDATE reviews SET status='completed', verdict=?, completed_at=?, reviewer_notes=?
+                WHERE review_id=? AND status != 'completed'
+                """,
+                (final_verdict, now, reviewer_notes, review_id)
+            )
+
+            # If no rows updated, another call already finalized
+            if result.rowcount == 0:
+                conn.execute("ROLLBACK")
+                return True  # Still return True since finalization is done
+
+            # Update phase status based on verdict
+            new_phase_status = 'APPROVED' if final_verdict == 'approved' else 'REVISING'
+            conn.execute(
+                """
+                UPDATE phases SET status=?, completed_at=?
+                WHERE task_id=? AND phase_index=?
+                """,
+                (new_phase_status, now if final_verdict == 'approved' else None, task_id, phase_index)
+            )
+
+            # If approved and there's a next phase, activate it
+            if final_verdict == 'approved':
+                conn.execute(
+                    """
+                    UPDATE phases SET status='ACTIVE', started_at=?
+                    WHERE task_id=? AND phase_index=? AND status='PENDING'
+                    """,
+                    (now, task_id, phase_index + 1)
+                )
+
+                # Update task's current phase index
+                conn.execute(
+                    """
+                    UPDATE tasks SET current_phase_index=?, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (phase_index + 1, now, task_id)
+                )
+
+            conn.execute("COMMIT")
+            return True
+
+        except Exception:
+            conn.execute("ROLLBACK")
+            return False
+
+    finally:
+        conn.close()
+
+
+def record_critique(
+    *,
+    workspace_base: str,
+    review_id: str,
+    task_id: str,
+    critique_agent_id: str,
+    observations: List[Dict],
+    summary: str,
+    recommendations: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Record a critique submission in SQLite.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        cursor = conn.execute(
+            """
+            INSERT INTO critique_submissions (
+                review_id, task_id, critique_agent_id,
+                observations, summary, recommendations, submitted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (review_id, task_id, critique_agent_id,
+             json.dumps(observations), summary,
+             json.dumps(recommendations) if recommendations else None, now)
+        )
+
+        # Mark critique agent as completed
+        conn.execute(
+            """
+            UPDATE agents SET status='completed', completed_at=?
+            WHERE agent_id=? AND task_id=?
+            """,
+            (now, critique_agent_id, task_id)
+        )
+
+        return {
+            "success": True,
+            "critique_id": cursor.lastrowid,
+            "submitted_at": now
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_review_verdicts(*, workspace_base: str, review_id: str) -> List[Dict]:
+    """
+    Get all verdicts for a review.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT verdict_id, reviewer_agent_id, verdict, findings, reviewer_notes, submitted_at
+            FROM review_verdicts WHERE review_id=?
+            ORDER BY submitted_at
+            """,
+            (review_id,)
+        ).fetchall()
+
+        result = []
+        for row in rows:
+            v = dict(row)
+            if v.get('findings'):
+                try:
+                    v['findings'] = json.loads(v['findings'])
+                except Exception:
+                    pass
+            result.append(v)
+        return result
+    finally:
+        conn.close()
+
+
+def get_reviews_for_task(*, workspace_base: str, task_id: str) -> List[Dict]:
+    """
+    Get all reviews for a task.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT review_id, task_id, phase_index, status, verdict, created_at,
+                   completed_at, reviewer_notes, num_reviewers, reviewer_agent_ids,
+                   critique_agent_id, phase_name
+            FROM reviews WHERE task_id=?
+            ORDER BY created_at DESC
+            """,
+            (task_id,)
+        ).fetchall()
+
+        result = []
+        for row in rows:
+            r = dict(row)
+            # Parse JSON fields
+            if r.get('reviewer_agent_ids'):
+                try:
+                    r['reviewer_agent_ids'] = json.loads(r['reviewer_agent_ids'])
+                except Exception:
+                    pass
+            result.append(r)
+        return result
+    finally:
+        conn.close()
+
+
+def get_critique(*, workspace_base: str, review_id: str) -> Optional[Dict]:
+    """
+    Get critique submission for a review.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM critique_submissions WHERE review_id=?
+            """,
+            (review_id,)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        result = dict(row)
+        for field in ['observations', 'recommendations']:
+            if result.get(field):
+                try:
+                    result[field] = json.loads(result[field])
+                except Exception:
+                    pass
+        return result
+    finally:
+        conn.close()
+
+
+def create_review_for_phase(
+    *,
+    workspace_base: str,
+    task_id: str,
+    review_id: str,
+    phase_index: int,
+    phase_name: str,
+    num_reviewers: int = 2,
+    auto_spawned: bool = True
+) -> bool:
+    """
+    Create a review record for a phase (called when spawning reviewers).
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        conn.execute(
+            """
+            INSERT INTO reviews (
+                review_id, task_id, phase_index, phase_name,
+                status, num_reviewers, auto_spawned, created_at
+            ) VALUES (?, ?, ?, ?, 'in_progress', ?, ?, ?)
+            """,
+            (review_id, task_id, phase_index, phase_name, num_reviewers, 1 if auto_spawned else 0, now)
+        )
+
+        # Update phase status to UNDER_REVIEW
+        conn.execute(
+            """
+            UPDATE phases SET status='UNDER_REVIEW'
+            WHERE task_id=? AND phase_index=?
+            """,
+            (task_id, phase_index)
+        )
+
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def get_existing_agent_by_type(
+    *,
+    workspace_base: str,
+    task_id: str,
+    agent_type: str
+) -> Optional[Dict]:
+    """
+    Find an existing agent of a given type that is still active.
+    Used for deduplication checks.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT agent_id, type, status, started_at
+            FROM agents
+            WHERE task_id=? AND type=? AND status IN ('running', 'working', 'blocked', 'reviewing')
+            LIMIT 1
+            """,
+            (task_id, agent_type)
+        ).fetchone()
+
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_review(
+    *,
+    workspace_base: str,
+    review_id: str
+) -> Optional[Dict]:
+    """
+    Get a review record by review_id.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT review_id, task_id, phase_index, status, verdict,
+                   reviewer_agent_ids, critique_agent_id, reviewer_notes,
+                   created_at, completed_at
+            FROM reviews
+            WHERE review_id=?
+            """,
+            (review_id,)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        result = dict(row)
+        # Parse JSON fields
+        if result.get('reviewer_agent_ids'):
+            try:
+                result['reviewer_agent_ids'] = json.loads(result['reviewer_agent_ids'])
+            except:
+                result['reviewer_agent_ids'] = []
+
+        return result
+    finally:
+        conn.close()
+
+
+def update_agent_status(
+    *,
+    workspace_base: str,
+    task_id: str,
+    agent_id: str,
+    new_status: str
+) -> bool:
+    """
+    Update an agent's status. Used to mark agents as completed, failed, etc.
+    Also updates counts atomically.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        # Get current status first
+        row = conn.execute(
+            "SELECT status FROM agents WHERE task_id=? AND agent_id=?",
+            (task_id, agent_id)
+        ).fetchone()
+
+        if not row:
+            return False
+
+        old_status = row['status']
+
+        # Only update if status is actually changing
+        if old_status == new_status:
+            return True
+
+        # Determine if this is a terminal status
+        terminal_statuses = {'completed', 'failed', 'error', 'terminated', 'killed'}
+        active_statuses = {'running', 'working', 'blocked', 'reviewing'}
+
+        # Update the agent
+        if new_status in terminal_statuses:
+            conn.execute(
+                """
+                UPDATE agents
+                SET status=?, completed_at=?
+                WHERE task_id=? AND agent_id=?
+                """,
+                (new_status, now, task_id, agent_id)
+            )
+
+            # Update task counts if transitioning from active to terminal
+            if old_status in active_statuses:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET active_count = MAX(0, active_count - 1),
+                        completed_count = completed_count + 1
+                    WHERE task_id=?
+                    """,
+                    (task_id,)
+                )
+        else:
+            conn.execute(
+                """
+                UPDATE agents
+                SET status=?
+                WHERE task_id=? AND agent_id=?
+                """,
+                (new_status, task_id, agent_id)
+            )
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"update_agent_status error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def claim_phase_for_review(
+    *,
+    workspace_base: str,
+    task_id: str,
+    phase_index: int
+) -> bool:
+    """
+    ATOMIC: Claim a phase for review by transitioning AWAITING_REVIEW -> UNDER_REVIEW.
+
+    This prevents race conditions where multiple threads try to spawn reviewers.
+    Returns True ONLY if this call successfully transitioned the phase.
+    Returns False if phase was already claimed or not in AWAITING_REVIEW.
+
+    MUST be called before create_review_record to prevent duplicate reviews.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        # Atomic check-and-update: only succeeds if status is AWAITING_REVIEW
+        result = conn.execute(
+            """
+            UPDATE phases
+            SET status = 'UNDER_REVIEW', started_at = ?
+            WHERE task_id = ? AND phase_index = ? AND status = 'AWAITING_REVIEW'
+            """,
+            (now, task_id, phase_index)
+        )
+        conn.commit()
+
+        # rowcount > 0 means WE claimed it, rowcount = 0 means someone else did
+        claimed = result.rowcount > 0
+        if claimed:
+            logger.info(f"[CLAIM-PHASE] Successfully claimed phase {phase_index} for review (task={task_id})")
+        else:
+            logger.info(f"[CLAIM-PHASE] Phase {phase_index} already claimed or not awaiting review (task={task_id})")
+
+        return claimed
+    except Exception as e:
+        logger.error(f"claim_phase_for_review error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def create_review_record(
+    *,
+    workspace_base: str,
+    task_id: str,
+    review_id: str,
+    phase_index: int,
+    num_reviewers: int = 2,
+    reviewer_agent_ids: Optional[List[str]] = None
+) -> Dict:
+    """
+    Create a new review record in SQLite.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+        reviewer_ids_json = json.dumps(reviewer_agent_ids or [])
+
+        conn.execute(
+            """
+            INSERT INTO reviews (review_id, task_id, phase_index, status, num_reviewers, reviewer_agent_ids, created_at)
+            VALUES (?, ?, ?, 'in_progress', ?, ?, ?)
+            """,
+            (review_id, task_id, phase_index, num_reviewers, reviewer_ids_json, now)
+        )
+        conn.commit()
+
+        return {"success": True, "review_id": review_id}
+    except Exception as e:
+        logger.error(f"create_review_record error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def add_reviewer_to_review(
+    *,
+    workspace_base: str,
+    review_id: str,
+    agent_id: str
+) -> bool:
+    """
+    Add a reviewer agent ID to an existing review.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        # Get current reviewer list
+        row = conn.execute(
+            "SELECT reviewer_agent_ids FROM reviews WHERE review_id=?",
+            (review_id,)
+        ).fetchone()
+
+        if not row:
+            return False
+
+        current_ids = []
+        if row['reviewer_agent_ids']:
+            try:
+                current_ids = json.loads(row['reviewer_agent_ids'])
+            except:
+                current_ids = []
+
+        if agent_id not in current_ids:
+            current_ids.append(agent_id)
+            conn.execute(
+                "UPDATE reviews SET reviewer_agent_ids=? WHERE review_id=?",
+                (json.dumps(current_ids), review_id)
+            )
+            conn.commit()
+
+        return True
+    except Exception as e:
+        logger.error(f"add_reviewer_to_review error: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_agent(
+    *,
+    workspace_base: str,
+    task_id: str,
+    agent_id: str
+) -> Optional[Dict]:
+    """
+    Get a single agent's data from SQLite.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT agent_id, task_id, type, model, status, phase_index,
+                   parent, depth, tmux_session, started_at, completed_at, progress
+            FROM agents
+            WHERE task_id=? AND agent_id=?
+            """,
+            (task_id, agent_id)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        result = dict(row)
+        # Normalize field names
+        result['id'] = result.pop('agent_id', None)
+        return result
+    finally:
+        conn.close()
+
+
+def get_phase(
+    *,
+    workspace_base: str,
+    task_id: str,
+    phase_index: int
+) -> Optional[Dict]:
+    """
+    Get a single phase's data from SQLite.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT phase_index, name, description, status, deliverables,
+                   success_criteria, started_at, completed_at
+            FROM phases
+            WHERE task_id=? AND phase_index=?
+            """,
+            (task_id, phase_index)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        result = dict(row)
+        # Parse JSON fields
+        for json_field in ['deliverables', 'success_criteria']:
+            if result.get(json_field):
+                try:
+                    result[json_field] = json.loads(result[json_field])
+                except:
+                    result[json_field] = []
+
+        return result
+    finally:
+        conn.close()
+
+
+def get_active_agent_count(
+    *,
+    workspace_base: str,
+    task_id: str
+) -> int:
+    """
+    Get the count of active agents for a task.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM agents
+            WHERE task_id=? AND status IN ('running', 'working', 'blocked', 'reviewing')
+            """,
+            (task_id,)
+        ).fetchone()
+
+        return row['count'] if row else 0
+    finally:
+        conn.close()
+
+
+def get_total_agent_count(
+    *,
+    workspace_base: str,
+    task_id: str
+) -> int:
+    """
+    Get the total count of agents for a task.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) as count FROM agents WHERE task_id=?",
+            (task_id,)
+        ).fetchone()
+
+        return row['count'] if row else 0
+    finally:
+        conn.close()
+
+
+def get_all_active_agents(
+    *,
+    workspace_base: str
+) -> List[Dict]:
+    """
+    Get all agents across all tasks that are in active status.
+    Used by global cleanup to find dead tmux sessions.
+
+    Returns:
+        List of agent dicts with agent_id, task_id, status, tmux_session
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        active_statuses = ('running', 'working', 'blocked', 'reviewing')
+        rows = conn.execute(
+            """
+            SELECT agent_id, task_id, status, tmux_session, type
+            FROM agents
+            WHERE status IN (?, ?, ?, ?)
+            """,
+            active_statuses
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def mark_agents_as_failed_batch(
+    *,
+    workspace_base: str,
+    agent_ids: List[str],
+    reason: str
+) -> int:
+    """
+    Mark multiple agents as failed in a single transaction.
+    Used by global cleanup for dead tmux sessions.
+
+    Returns:
+        Number of agents updated
+    """
+    if not agent_ids:
+        return 0
+
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+        placeholders = ','.join('?' * len(agent_ids))
+        result = conn.execute(
+            f"""
+            UPDATE agents
+            SET status = 'failed',
+                completed_at = ?,
+                last_update = ?
+            WHERE agent_id IN ({placeholders})
+            """,
+            (now, now, *agent_ids)
+        )
+        return result.rowcount
+    finally:
+        conn.close()
+
+
+def set_critique_agent_for_review(
+    *,
+    workspace_base: str,
+    review_id: str,
+    critique_agent_id: str
+) -> bool:
+    """
+    Set the critique agent ID for a review.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE reviews SET critique_agent_id=? WHERE review_id=?",
+            (critique_agent_id, review_id)
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"set_critique_agent_for_review error: {e}")
+        return False
     finally:
         conn.close()
