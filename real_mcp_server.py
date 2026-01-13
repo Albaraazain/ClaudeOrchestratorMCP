@@ -731,15 +731,40 @@ def create_real_task(
         registry['project_context'] = project_context
         logger.info(f"TASK-CREATION: project_context stored: {list(project_context.keys())}")
 
+    # SQLITE MIGRATION: Create task directly in SQLite (source of truth)
+    # This replaces the JSON-first-then-sync approach
+    try:
+        sqlite_result = state_db.create_task_with_phases(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            workspace=workspace,
+            description=description,
+            priority=priority,
+            client_cwd=client_cwd,
+            phases=enriched_phases,
+            project_context=project_context,
+            max_agents=DEFAULT_MAX_AGENTS,
+            max_concurrent=DEFAULT_MAX_CONCURRENT,
+            max_depth=DEFAULT_MAX_DEPTH,
+            constraints=task_context.get('constraints') if has_enhanced_context else None,
+            relevant_files=task_context.get('relevant_files') if has_enhanced_context else None,
+            conversation_history=task_context.get('conversation_history') if has_enhanced_context else None,
+            background_context=background_context,
+            expected_deliverables=task_context.get('expected_deliverables') if has_enhanced_context else None
+        )
+        if sqlite_result.get('success'):
+            logger.info(f"Task {task_id} created directly in SQLite (source of truth)")
+        else:
+            logger.error(f"Failed to create task in SQLite: {sqlite_result.get('error')}")
+            return {"success": False, "error": f"SQLite creation failed: {sqlite_result.get('error')}"}
+    except Exception as e:
+        logger.error(f"Exception creating task in SQLite: {e}")
+        return {"success": False, "error": f"SQLite creation exception: {e}"}
+
+    # BACKWARD COMPAT: Keep JSON file for components still reading from it
+    # TODO: Remove this once all AGENT_REGISTRY.json reads are migrated to SQLite
     with open(f"{workspace}/AGENT_REGISTRY.json", 'w') as f:
         json.dump(registry, f, indent=2)
-
-    # MIGRATION FIX: Immediately sync task to SQLite after creating registry
-    try:
-        state_db.reconcile_task_workspace(workspace)
-        logger.info(f"Task {task_id} synced to state_db")
-    except Exception as e:
-        logger.warning(f"Failed to sync task {task_id} to state_db: {e}")
 
     # Register in global SQLite registry for cross-project discovery
     # This replaces the buggy JSON-based cross-project registration
@@ -1912,23 +1937,13 @@ def get_agent_output(
             "error": f"Task {task_id} not found in any workspace location"
         }
 
-    # Load agent registry
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-    try:
-        with open(registry_path, 'r') as f:
-            registry = json.load(f)
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Failed to read agent registry: {e}"
-        }
-
-    # Find agent in list
-    agent = None
-    for a in registry['agents']:
-        if a['id'] == agent_id:
-            agent = a
-            break
+    # SQLITE MIGRATION: Get agent from SQLite instead of JSON registry
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+    agent = state_db.get_agent_by_id(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        agent_id=agent_id
+    )
 
     if not agent:
         return {
@@ -2216,143 +2231,13 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
             "error": f"Task {task_id} not found in any workspace location"
         }
 
-    # =========================================================================
-    # SQLite-backed status path (JSONL is the source of truth)
-    # =========================================================================
-    # This avoids registry lock contention and eliminates drift from mutable counters.
+    # SQLITE MIGRATION: Get agent from SQLite instead of JSON registry
     workspace_base = get_workspace_base_from_task_workspace(workspace)
-    try:
-        state_db.reconcile_task_workspace(workspace)
-    except Exception as e:
-        logger.warning(f"State DB reconcile failed for {task_id}: {e}")
-
-    snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id) or {}
-    phases = snapshot.get("phases", []) or []
-    current_phase_index = int(snapshot.get("current_phase_index") or 0)
-    current_phase = phases[current_phase_index] if current_phase_index < len(phases) else None
-    phase_status = (current_phase or {}).get("status", "UNKNOWN")
-
-    phase_state = state_db.load_phase_snapshot(
+    agent = state_db.get_agent_by_id(
         workspace_base=workspace_base,
         task_id=task_id,
-        phase_index=current_phase_index,
+        agent_id=agent_id
     )
-    phase_completion = {
-        "ready_for_review": bool(phase_state.get("counts", {}).get("all_done")) and phase_status == "ACTIVE",
-        "pending_agents": int(phase_state.get("counts", {}).get("pending", 0)),
-        "completed_agents": int(phase_state.get("counts", {}).get("completed", 0)),
-        "failed_agents": int(phase_state.get("counts", {}).get("failed", 0)),
-    }
-
-    # Best-effort registry read for non-critical fields (hierarchy/spiral/limits).
-    registry = {}
-    try:
-        with open(f"{workspace}/AGENT_REGISTRY.json", "r", encoding="utf-8", errors="ignore") as f:
-            registry = json.load(f) or {}
-    except Exception:
-        registry = {}
-
-    if phase_status == "ACTIVE":
-        if int(phase_state.get("counts", {}).get("total", 0)) == 0:
-            guidance = {
-                "current_state": "phase_active_no_agents",
-                "next_action": "No agents deployed. Use deploy_opus_agent/deploy_sonnet_agent to start work.",
-                "available_actions": ["deploy_opus_agent/deploy_sonnet_agent - Deploy agents for current phase"],
-                "warnings": None,
-                "blocked_reason": None,
-            }
-        elif phase_completion["pending_agents"] > 0:
-            guidance = {
-                "current_state": "phase_active_working",
-                "next_action": f"Wait for {phase_completion['pending_agents']} agents to complete",
-                "available_actions": [
-                    "get_agent_output - Monitor agent progress",
-                    "check_phase_progress - Check if ready for review",
-                ],
-                "warnings": None,
-                "blocked_reason": None,
-            }
-        else:
-            guidance = {
-                "current_state": "phase_active_ready_for_review",
-                "next_action": "All agents terminal. System will auto-submit for review when registry lock is available.",
-                "available_actions": [
-                    "check_phase_progress - Verify phase completion",
-                    "get_phase_status - View phase details",
-                ],
-                "warnings": None,
-                "blocked_reason": None,
-            }
-    else:
-        guidance = {
-            "current_state": f"phase_{str(phase_status).lower()}",
-            "next_action": "Check phase status for details",
-            "available_actions": ["get_phase_status - View current phase state"],
-            "warnings": None,
-            "blocked_reason": None,
-        }
-
-    try:
-        recent_updates = state_db.load_recent_progress_latest(
-            workspace_base=workspace_base, task_id=task_id, limit=10
-        )
-    except Exception:
-        recent_updates = []
-
-    counts = snapshot.get("counts") or {}
-    agents_list = snapshot.get("agents") or []
-    total_spawned = max(int(registry.get("total_spawned", 0) or 0), int(counts.get("total", 0) or 0))
-
-    return {
-        "success": True,
-        "task_id": task_id,
-        "description": (snapshot.get("description") or registry.get("task_description") or ""),
-        "status": (snapshot.get("status") or registry.get("status") or "INITIALIZED"),
-        "workspace": workspace,
-        "phases": {
-            "total": len(phases),
-            "current_index": current_phase_index,
-            "current_phase": current_phase.get("name") if current_phase else None,
-            "current_status": phase_status,
-            "completion": phase_completion,
-            "all_phases": [{"name": p.get("name"), "status": p.get("status")} for p in phases],
-        },
-        "agents": {
-            "total_spawned": total_spawned,
-            "active": int(counts.get("active", 0) or 0),
-            "completed": int(counts.get("completed", 0) or 0),
-            "agents_list": agents_list,
-        },
-        "hierarchy": registry.get("agent_hierarchy", {}) or {},
-        "enhanced_progress": {
-            "recent_updates": recent_updates,
-            "total_progress_entries": len(recent_updates),
-        },
-        "spiral_status": registry.get("spiral_checks", {}) or {},
-        "limits": {
-            "max_agents": registry.get("max_agents", 45),
-            "max_concurrent": registry.get("max_concurrent", DEFAULT_MAX_CONCURRENT),
-            "max_depth": registry.get("max_depth", DEFAULT_MAX_DEPTH),
-        },
-        "guidance": guidance,
-        "notes": {
-            "source_of_truth": "JSONL",
-            "materialized_state": "SQLite (WAL)",
-            "registry_role": "best-effort metadata cache",
-        },
-    }
-
-    registry_path = f"{workspace}/AGENT_REGISTRY.json"
-
-    # Read registry with file locking to prevent race conditions
-    registry = read_registry_with_lock(registry_path)
-
-    # Find agent
-    agent = None
-    for a in registry['agents']:
-        if a['id'] == agent_id:
-            agent = a
-            break
 
     if not agent:
         return {
@@ -2412,15 +2297,9 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
         except Exception as e:
             logger.warning(f"Failed to append termination progress entry for {agent_id}: {e}")
         
-        # Only decrement if agent was in active status
-        active_statuses = ['running', 'working', 'blocked']
-        if previous_status in active_statuses:
-            registry['active_count'] = max(0, registry['active_count'] - 1)
-
-        # MIGRATION FIX: Use state_db instead of write_registry_with_lock
-        # Mark agent as terminal in SQLite (this is the source of truth)
+        # SQLITE MIGRATION: Mark agent as terminal in SQLite (source of truth)
+        # Active count is computed from SQLite, no need to track separately
         try:
-            workspace_base = get_workspace_base_from_task_workspace(workspace)
             state_db.mark_agent_terminal(
                 workspace_base=workspace_base,
                 agent_id=agent_id,
@@ -2428,12 +2307,9 @@ def kill_real_agent(task_id: str, agent_id: str, reason: str = "Manual terminati
                 reason=reason,
                 auto_rollup=True  # Check if task should transition
             )
-            # Note: We don't write to registry JSON anymore - SQLite is source of truth
             logger.info(f"Agent {agent_id} marked as terminated in state_db")
         except Exception as e:
             logger.error(f"Failed to mark agent terminal in state_db: {e}")
-            # Fall back to registry write if state_db fails
-            write_registry_with_lock(registry_path, registry)
 
         # MIGRATION FIX: Global registry is deprecated - state_db handles all state
         # The global registry update is no longer needed as state_db tracks all agents

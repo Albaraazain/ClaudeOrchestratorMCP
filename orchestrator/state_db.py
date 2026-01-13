@@ -320,6 +320,10 @@ def _init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_verdicts_review ON review_verdicts(review_id);
         CREATE INDEX IF NOT EXISTS idx_verdicts_task ON review_verdicts(task_id);
 
+        -- BUG FIX: Prevent duplicate verdicts from same reviewer
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_verdicts_unique_reviewer
+            ON review_verdicts(review_id, reviewer_agent_id);
+
         -- Critique submissions (replaces JSON reviews[].critique object)
         CREATE TABLE IF NOT EXISTS critique_submissions (
             critique_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -466,7 +470,13 @@ def create_task_with_phases(
     project_context: Optional[Dict[str, Any]] = None,
     max_agents: int = 45,
     max_concurrent: int = 20,
-    max_depth: int = 5
+    max_depth: int = 5,
+    # Additional task context fields
+    constraints: Optional[List[str]] = None,
+    relevant_files: Optional[List[str]] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    background_context: Optional[str] = None,
+    expected_deliverables: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Create a new task with its phases directly in SQLite.
@@ -522,15 +532,24 @@ def create_task_with_phases(
                     )
                 )
 
-            # Insert task config
+            # Insert task config with all context fields
             conn.execute(
                 """
                 INSERT INTO task_config (
-                    task_id, max_agents, max_concurrent, max_depth, project_context
-                ) VALUES (?, ?, ?, ?, ?)
+                    task_id, max_agents, max_concurrent, max_depth, project_context,
+                    constraints, relevant_files, conversation_history,
+                    background_context, expected_deliverables
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, max_agents, max_concurrent, max_depth,
-                 json.dumps(project_context) if project_context else None)
+                (
+                    task_id, max_agents, max_concurrent, max_depth,
+                    json.dumps(project_context) if project_context else None,
+                    json.dumps(constraints) if constraints else None,
+                    json.dumps(relevant_files) if relevant_files else None,
+                    json.dumps(conversation_history) if conversation_history else None,
+                    background_context,
+                    json.dumps(expected_deliverables) if expected_deliverables else None
+                )
             )
 
             conn.execute("COMMIT")
@@ -576,6 +595,7 @@ def update_task_status(*, workspace_base: str, task_id: str, new_status: str) ->
                 (now, task_id)
             )
 
+        conn.commit()  # CRITICAL: Must commit to persist task status change
         return result.rowcount > 0
     finally:
         conn.close()
@@ -595,6 +615,7 @@ def update_task_phase_index(*, workspace_base: str, task_id: str, new_phase_inde
             """,
             (new_phase_index, now, task_id)
         )
+        conn.commit()  # CRITICAL: Must commit to persist phase index change
         return result.rowcount > 0
     finally:
         conn.close()
@@ -648,6 +669,7 @@ def update_phase_status(*, workspace_base: str, task_id: str, phase_index: int, 
             (now, task_id)
         )
 
+        conn.commit()  # CRITICAL: Must commit to persist phase status change
         return result.rowcount > 0
     finally:
         conn.close()
@@ -697,6 +719,7 @@ def record_agent_finding(
                 now
             )
         )
+        conn.commit()  # CRITICAL: Must commit to persist finding
 
         return cursor.lastrowid
     finally:
@@ -846,6 +869,7 @@ def cleanup_stale_agents(*, workspace_base: str, task_id: str, stale_threshold_m
             """,
             (task_id, task_id, now.isoformat())
         )
+        conn.commit()  # CRITICAL: Must commit stale agent cleanup
 
         return result.rowcount
     finally:
@@ -936,6 +960,7 @@ def record_progress(
             "UPDATE tasks SET updated_at=? WHERE task_id=?",
             (ts, task_id),
         )
+        conn.commit()  # CRITICAL: Must commit progress recording
     finally:
         conn.close()
 
@@ -1245,6 +1270,7 @@ def create_review(
             """,
             (review_id, task_id, phase_index, now)
         )
+        conn.commit()  # CRITICAL: Must commit review record creation
         return True
     except sqlite3.IntegrityError:
         return False
@@ -1291,6 +1317,7 @@ def update_review(
             f"UPDATE reviews SET {', '.join(updates)} WHERE review_id = ?",
             params
         )
+        conn.commit()  # CRITICAL: Must commit review update
 
         return result.rowcount > 0
     finally:
@@ -1321,6 +1348,7 @@ def abort_review(
             """,
             (now, f"ABORTED: {reason}", review_id)
         )
+        conn.commit()  # CRITICAL: Must commit review abort
         return result.rowcount > 0
     finally:
         conn.close()
@@ -1416,6 +1444,7 @@ def create_handover(
                 now
             )
         )
+        conn.commit()  # CRITICAL: Must commit handover creation
 
         return cursor.lastrowid
     finally:
@@ -1489,6 +1518,7 @@ def transition_task_to_active(*, workspace_base: str, task_id: str) -> bool:
             "UPDATE tasks SET status='ACTIVE', updated_at=? WHERE task_id=?",
             (timestamp, task_id)
         )
+        conn.commit()  # CRITICAL: Must commit to persist task activation
 
         # Log the transition
         print(f"[STATE_DB] Task {task_id} transitioned from {current_status} to ACTIVE")
@@ -1542,6 +1572,7 @@ def transition_task_to_completed(*, workspace_base: str, task_id: str) -> bool:
             "UPDATE tasks SET status=?, updated_at=? WHERE task_id=?",
             (final_status, timestamp, task_id)
         )
+        conn.commit()  # CRITICAL: Must commit to persist task completion
 
         # Log the transition
         print(f"[STATE_DB] Task {task_id} transitioned from {current_status} to {final_status}")
@@ -2290,6 +2321,21 @@ def record_review_verdict(
         conn.execute("BEGIN IMMEDIATE")
 
         try:
+            # BUG FIX: Check if verdict already exists (duplicate prevention)
+            existing = conn.execute(
+                "SELECT verdict_id FROM review_verdicts WHERE review_id=? AND reviewer_agent_id=?",
+                (review_id, reviewer_agent_id)
+            ).fetchone()
+
+            if existing:
+                conn.execute("ROLLBACK")
+                return {
+                    'success': False,
+                    'error': f'Reviewer {reviewer_agent_id} has already submitted a verdict for review {review_id}',
+                    'duplicate': True,
+                    'existing_verdict_id': existing[0]
+                }
+
             # Insert verdict
             cursor = conn.execute(
                 """
@@ -2365,14 +2411,20 @@ def check_review_complete(
             return False, None, verdict_list
 
         # Aggregate verdicts
+        # BUG FIX: Count 'needs_revision' as a rejection, not neutral
+        # Only 'approved' counts as approval, everything else (rejected, needs_revision) counts as rejection
         approve_count = sum(1 for v in verdicts if v[0] == 'approved')
-        reject_count = sum(1 for v in verdicts if v[0] == 'rejected')
+        reject_count = sum(1 for v in verdicts if v[0] in ('rejected', 'needs_revision'))
 
-        # Majority wins, ties go to approved
-        if approve_count >= reject_count:
+        # Approval requires MAJORITY (not just tie) - ties now go to rejected
+        # This ensures if 1 reviewer says 'needs_revision' and 1 says 'approved', it's not auto-approved
+        if approve_count > reject_count:
             final_verdict = 'approved'
-        else:
+        elif reject_count > approve_count:
             final_verdict = 'rejected'
+        else:
+            # Tie: default to needs_revision for safety
+            final_verdict = 'needs_revision'
 
         return True, final_verdict, verdict_list
 
@@ -2431,7 +2483,13 @@ def finalize_review(
                 return True  # Still return True since finalization is done
 
             # Update phase status based on verdict
-            new_phase_status = 'APPROVED' if final_verdict == 'approved' else 'REVISING'
+            # BUG FIX: Handle all three verdict types explicitly
+            if final_verdict == 'approved':
+                new_phase_status = 'APPROVED'
+            elif final_verdict == 'needs_revision':
+                new_phase_status = 'REVISING'
+            else:  # rejected
+                new_phase_status = 'REJECTED'
             conn.execute(
                 """
                 UPDATE phases SET status=?, completed_at=?
@@ -2508,6 +2566,7 @@ def record_critique(
             """,
             (now, critique_agent_id, task_id)
         )
+        conn.commit()  # CRITICAL: Must commit critique submission
 
         return {
             "success": True,
@@ -2648,6 +2707,7 @@ def create_review_for_phase(
             """,
             (task_id, phase_index)
         )
+        conn.commit()  # CRITICAL: Must commit review creation and phase status update
 
         return True
     except Exception:

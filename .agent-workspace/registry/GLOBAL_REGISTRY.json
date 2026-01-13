@@ -525,6 +525,14 @@
       "has_enhanced_context": false,
       "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260112-233754-3d1c60a4",
       "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260113-115259-3b48d679": {
+      "description": "SELF-DIAGNOSIS: Investigate the Claude Orchestrator MCP for bugs, race conditions, and improvements. Focus on: (1) SQLite migration completeness, (2) Review flow reliability, (3) Agent lifecycle edge cases, (4) Phase enforcement gaps.",
+      "created_at": "2026-01-13T11:52:59.972745",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260113-115259-3b48d679",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
     }
   },
   "agents": {
