@@ -17,13 +17,13 @@ from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 from collections import deque
 
-from .registry import LockedRegistryFile
+from .registry import LockedRegistryFile  # Still needed for global registry updates
 from .workspace import find_task_workspace, get_workspace_base_from_task_workspace, get_global_registry_path
 
-logger = logging.getLogger(__name__)
-
-# SQLite materialized state (JSONL remains source of truth)
+# SQLite state_db is the source of truth for agent/task data
 import orchestrator.state_db as state_db
+
+logger = logging.getLogger(__name__)
 
 # Agent statuses
 AGENT_TERMINAL_STATUSES = {'completed', 'failed', 'error', 'terminated', 'killed'}
@@ -195,43 +195,43 @@ class HealthDaemon:
             self.unregister_task(task_id)
             return
 
-        registry_path = os.path.join(workspace, "AGENT_REGISTRY.json")
-        if not os.path.exists(registry_path):
-            logger.warning(f"Registry not found for task {task_id}, unregistering")
-            self.unregister_task(task_id)
-            return
+        # Get workspace_base for SQLite operations
+        workspace_base = get_workspace_base_from_task_workspace(workspace)
 
         # Track agents that need status updates
         agents_to_fail = []
 
         try:
-            # Read registry to get active agents (snapshot for reconciliation + health checks)
-            with LockedRegistryFile(registry_path) as (registry, f):
-                active_agents = [
-                    {
-                        "id": a.get("id"),
-                        "status": a.get("status"),
-                        "last_update": a.get("last_update"),
-                        "progress": a.get("progress", 0),
-                    }
-                    for a in registry.get("agents", [])
-                    if a.get("status") in AGENT_ACTIVE_STATUSES
-                ]
+            # SQLITE MIGRATION: Read active agents directly from SQLite (source of truth)
+            all_agents = state_db.get_agents_for_task(
+                workspace_base=workspace_base,
+                task_id=task_id
+            )
+            active_agents = [
+                {
+                    "id": a.get("agent_id"),  # SQLite uses agent_id, not id
+                    "status": a.get("status"),
+                    "last_update": a.get("last_progress_at") or a.get("started_at"),
+                    "progress": a.get("progress", 0),
+                }
+                for a in all_agents
+                if a.get("status") in AGENT_ACTIVE_STATUSES
+            ]
 
         except Exception as e:
-            logger.error(f"Error reading registry for task {task_id}: {e}")
+            logger.error(f"Error reading agents from SQLite for task {task_id}: {e}")
             return
 
         # FIRST: Check stream logs for completion markers (most authoritative signal)
         # This detects agents that completed but didn't call update_agent_progress
-        stream_reconciled_ids = self._reconcile_agents_from_stream_logs(task_id, workspace, registry_path, active_agents)
+        stream_reconciled_ids = self._reconcile_agents_from_stream_logs(task_id, workspace, workspace_base, active_agents)
 
         # Filter out already reconciled agents for progress check
         remaining_active = [a for a in active_agents if a.get("id") not in stream_reconciled_ids]
 
         # SECOND: Reconcile terminal progress updates that may not have been written to the registry
         # (e.g., tool call killed agent or cleanup blocked registry write).
-        progress_reconciled_ids = self._reconcile_agents_from_progress(task_id, workspace, registry_path, remaining_active)
+        progress_reconciled_ids = self._reconcile_agents_from_progress(task_id, workspace, workspace_base, remaining_active)
 
         # Combine all reconciled IDs
         reconciled_ids = stream_reconciled_ids | progress_reconciled_ids
@@ -242,10 +242,13 @@ class HealthDaemon:
             if not agent_id or agent_id in reconciled_ids:
                 continue
 
-            # Reload the full agent record (best-effort) for health check details
+            # SQLITE MIGRATION: Get full agent record from SQLite
             try:
-                with LockedRegistryFile(registry_path) as (registry, f):
-                    agent = next((a for a in registry.get("agents", []) if a.get("id") == agent_id), None)
+                agent = state_db.get_agent_by_id(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id
+                )
             except Exception:
                 agent = None
 
@@ -340,11 +343,13 @@ class HealthDaemon:
         self,
         task_id: str,
         workspace: str,
-        registry_path: str,
+        workspace_base: str,
         active_agents: List[Dict[str, Any]],
     ) -> set:
         """
-        Check stream logs for completion markers and reconcile registry.
+        Check stream logs for completion markers and reconcile SQLite.
+
+        SQLITE MIGRATION: Now updates SQLite directly instead of JSON registry.
 
         This detects agents that completed but didn't call update_agent_progress.
         The stream log's {"type":"result",...} entry is the definitive completion signal.
@@ -389,49 +394,24 @@ class HealthDaemon:
             return set()
 
         reconciled: set[str] = set()
-        try:
-            with LockedRegistryFile(registry_path) as (registry, f):
-                for upd in updates:
-                    agent_id = upd["agent_id"]
-                    agent = next((x for x in registry.get("agents", []) if x.get("id") == agent_id), None)
-                    if not agent:
-                        continue
+        for upd in updates:
+            agent_id = upd["agent_id"]
 
-                    prev_status = agent.get("status")
+            try:
+                # SQLITE MIGRATION: Update agent status directly in SQLite
+                # state_db.update_agent_status handles counts atomically
+                success = state_db.update_agent_status(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    new_status=upd["status"]
+                )
 
-                    # Skip if already in terminal state
-                    if prev_status in AGENT_TERMINAL_STATUSES:
-                        continue
-
-                    agent["status"] = upd["status"]
-                    agent["progress"] = upd["progress"]
-                    agent["last_update"] = upd["timestamp"]
-                    agent["completion_reason"] = upd.get("completion_reason", "")
-                    agent["stream_log_result"] = upd.get("stream_log_result", "")
-
-                    if upd["status"] == "completed":
-                        agent["completed_at"] = upd["timestamp"]
-                    elif upd["status"] == "failed":
-                        agent["failed_at"] = upd["timestamp"]
-                        agent["failure_reason"] = upd.get("completion_reason", "Stream log error")
-
-                    # Update counters
-                    if prev_status in AGENT_ACTIVE_STATUSES:
-                        registry["active_count"] = max(0, registry.get("active_count", 0) - 1)
-                        if upd["status"] == "completed":
-                            registry["completed_count"] = registry.get("completed_count", 0) + 1
-                        else:
-                            registry["failed_count"] = registry.get("failed_count", 0) + 1
-
+                if success:
                     reconciled.add(agent_id)
-                    logger.info(f"Reconciled agent {agent_id} from stream log: {prev_status} -> {upd['status']}")
-
-                f.seek(0)
-                f.write(json.dumps(registry, indent=2))
-                f.truncate()
-
-        except Exception as e:
-            logger.warning(f"Failed to reconcile agents from stream logs for task {task_id}: {e}")
+                    logger.info(f"Reconciled agent {agent_id} from stream log to SQLite: -> {upd['status']}")
+            except Exception as e:
+                logger.warning(f"Failed to reconcile agent {agent_id} from stream log: {e}")
 
         return reconciled
 
@@ -439,12 +419,14 @@ class HealthDaemon:
         self,
         task_id: str,
         workspace: str,
-        registry_path: str,
+        workspace_base: str,
         active_agents: List[Dict[str, Any]],
     ) -> set:
         """
-        If an agent has a terminal progress entry newer than its registry last_update,
-        update the registry to match and avoid false 'failed' transitions.
+        If an agent has a terminal progress entry newer than its SQLite last_update,
+        update SQLite to match and avoid false 'failed' transitions.
+
+        SQLITE MIGRATION: Now updates SQLite directly instead of JSON registry.
 
         Returns:
             Set of agent_ids that were reconciled to a terminal state.
@@ -495,37 +477,24 @@ class HealthDaemon:
             return set()
 
         reconciled: set[str] = set()
-        try:
-            with LockedRegistryFile(registry_path) as (registry, f):
-                active_statuses = AGENT_ACTIVE_STATUSES
-                for upd in updates:
-                    agent_id = upd["agent_id"]
-                    agent = next((x for x in registry.get("agents", []) if x.get("id") == agent_id), None)
-                    if not agent:
-                        continue
+        for upd in updates:
+            agent_id = upd["agent_id"]
 
-                    prev_status = agent.get("status")
-                    agent["status"] = upd["status"]
-                    agent["progress"] = upd["progress"]
-                    agent["last_update"] = upd["timestamp"]
-                    if upd["status"] == "completed":
-                        agent.setdefault("completed_at", upd["timestamp"])
+            try:
+                # SQLITE MIGRATION: Update agent status directly in SQLite
+                # state_db.update_agent_status handles counts atomically
+                success = state_db.update_agent_status(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    new_status=upd["status"]
+                )
 
-                    if prev_status in active_statuses and upd["status"] in AGENT_TERMINAL_STATUSES:
-                        registry["active_count"] = max(0, registry.get("active_count", 0) - 1)
-                        if upd["status"] == "completed":
-                            registry["completed_count"] = registry.get("completed_count", 0) + 1
-                        elif upd["status"] in {"failed", "error", "terminated", "killed"}:
-                            registry["failed_count"] = registry.get("failed_count", 0) + 1
-
+                if success:
                     reconciled.add(agent_id)
-                    logger.info(f"Reconciled agent {agent_id} from progress: {prev_status} -> {upd['status']}")
-
-                f.seek(0)
-                f.write(json.dumps(registry, indent=2))
-                f.truncate()
-        except Exception as e:
-            logger.warning(f"Failed to reconcile agents from progress for task {task_id}: {e}")
+                    logger.info(f"Reconciled agent {agent_id} from progress to SQLite: -> {upd['status']}")
+            except Exception as e:
+                logger.warning(f"Failed to reconcile agent {agent_id} from progress: {e}")
 
         return reconciled
 
@@ -648,160 +617,121 @@ class HealthDaemon:
 
     def _mark_agents_failed(self, task_id: str, workspace: str, failed_agents: List[Dict[str, Any]]):
         """
-        Mark unhealthy agents as failed in registry.
+        Mark unhealthy agents as failed in SQLite.
         Also triggers phase enforcement check if all phase agents are now done.
+
+        SQLITE MIGRATION: Now uses SQLite as the primary source of truth.
 
         Args:
             task_id: Task ID
             workspace: Task workspace path
             failed_agents: List of agents to mark as failed with reasons
         """
-        registry_path = os.path.join(workspace, "AGENT_REGISTRY.json")
+        workspace_base = get_workspace_base_from_task_workspace(workspace)
         pending_phase_check = None  # Will be set if phase needs enforcement check
 
         try:
-            # Update local registry
-            with LockedRegistryFile(registry_path) as (registry, f):
-                for failed_info in failed_agents:
-                    agent = failed_info['agent']
-                    agent_id = agent['id']
+            for failed_info in failed_agents:
+                agent = failed_info['agent']
+                agent_id = agent.get('agent_id') or agent.get('id')  # Handle both SQLite and legacy formats
 
-                    # Find and update agent in registry
-                    for reg_agent in registry.get('agents', []):
-                        if reg_agent['id'] == agent_id:
-                            previous_status = reg_agent.get('status')
+                # Check progress file first - don't override completed status
+                progress_path = os.path.join(workspace, "progress", f"{agent_id}_progress.jsonl")
+                last = self._read_last_jsonl_entry(progress_path)
+                if last and last.get("status") == "completed":
+                    # Agent completed successfully, update to completed not failed
+                    state_db.update_agent_status(
+                        workspace_base=workspace_base,
+                        task_id=task_id,
+                        agent_id=agent_id,
+                        new_status="completed"
+                    )
+                    logger.info(f"Health daemon: preserved completion for {agent_id} based on progress file")
+                    continue
 
-                            # If progress already indicates completion, don't override it as failed.
-                            progress_path = os.path.join(workspace, "progress", f"{agent_id}_progress.jsonl")
-                            last = self._read_last_jsonl_entry(progress_path)
-                            if last and last.get("status") == "completed":
-                                reg_agent["status"] = "completed"
-                                reg_agent["progress"] = int(last.get("progress") or 100)
-                                reg_agent["last_update"] = last.get("timestamp") or datetime.now().isoformat()
-                                reg_agent.setdefault("completed_at", reg_agent["last_update"])
-                                if previous_status in AGENT_ACTIVE_STATUSES:
-                                    registry["active_count"] = max(0, registry.get("active_count", 0) - 1)
-                                    registry["completed_count"] = registry.get("completed_count", 0) + 1
-                                logger.info(f"Health daemon: preserved completion for {agent_id} based on progress file")
-                                break
+                # Mark as failed in SQLite
+                state_db.update_agent_status(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    new_status="failed"
+                )
 
-                            # Mark as failed
-                            reg_agent['status'] = 'failed'
-                            reg_agent['failed_at'] = datetime.now().isoformat()
-                            reg_agent['failure_reason'] = f"Health check failed: {failed_info['reason']}"
-                            reg_agent['failure_details'] = failed_info.get('details', {})
+                # Also write progress entry for audit trail
+                try:
+                    os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+                    progress_entry = {
+                        "timestamp": datetime.now().isoformat(),
+                        "agent_id": agent_id,
+                        "status": "failed",
+                        "message": f"Health check failed: {failed_info['reason']}",
+                        "progress": int(agent.get("progress", 0) or 0),
+                    }
+                    with open(progress_path, "a", encoding="utf-8") as pf:
+                        pf.write(json.dumps(progress_entry) + "\n")
+                except Exception as e:
+                    logger.warning(f"Health daemon: failed to append progress entry for {agent_id}: {e}")
 
-                            # JSONL is the source of truth: append a terminal progress entry.
-                            try:
-                                progress_path = os.path.join(workspace, "progress", f"{agent_id}_progress.jsonl")
-                                os.makedirs(os.path.dirname(progress_path), exist_ok=True)
-                                progress_entry = {
-                                    "timestamp": datetime.now().isoformat(),
-                                    "agent_id": agent_id,
-                                    "status": "failed",
-                                    "message": f"Health check failed: {failed_info['reason']}",
-                                    "progress": int(reg_agent.get("progress", 0) or 0),
-                                }
-                                with open(progress_path, "a", encoding="utf-8") as pf:
-                                    pf.write(json.dumps(progress_entry) + "\n")
-                                # Materialize terminal status into SQLite for consistent reads.
-                                try:
-                                    workspace_base = get_workspace_base_from_task_workspace(workspace)
-                                    state_db.reconcile_task_workspace(workspace)
-                                    state_db.record_progress(
-                                        workspace_base=workspace_base,
-                                        task_id=task_id,
-                                        agent_id=agent_id,
-                                        timestamp=progress_entry["timestamp"],
-                                        status=progress_entry["status"],
-                                        message=progress_entry["message"],
-                                        progress=progress_entry["progress"],
-                                    )
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Health daemon: state DB update failed for {task_id}/{agent_id}: {e}"
-                                    )
-                            except Exception as e:
-                                logger.warning(f"Health daemon: failed to append progress entry for {agent_id}: {e}")
+                logger.info(f"Marked agent {agent_id} as failed: {failed_info['reason']}")
 
-                            # Update counters
-                            if previous_status in AGENT_ACTIVE_STATUSES:
-                                registry['active_count'] = max(0, registry.get('active_count', 0) - 1)
-                                registry['failed_count'] = registry.get('failed_count', 0) + 1
+            # ===== AUTOMATIC PHASE ENFORCEMENT =====
+            # Check if ALL agents in current phase are now in terminal state
+            try:
+                task_data = state_db.get_task(workspace_base=workspace_base, task_id=task_id)
+                current_phase_idx = task_data.get('current_phase_index', 0) if task_data else 0
 
-                            logger.info(f"Marked agent {agent_id} as failed: {failed_info['reason']}")
-                            break
+                phase_state = state_db.load_phase_snapshot(
+                    workspace_base=workspace_base, task_id=task_id, phase_index=current_phase_idx
+                )
 
-                # ===== AUTOMATIC PHASE ENFORCEMENT =====
-                # Check if ALL agents in current phase are now in terminal state
-                # This mirrors the logic in update_agent_progress
-                phases = registry.get('phases', [])
-                current_phase_idx = registry.get('current_phase_index', 0)
+                if phase_state and phase_state.get('status') == 'ACTIVE':
+                    counts = phase_state.get("counts", {}) or {}
+                    total_agents = int(counts.get("total", 0))
+                    completed_count = int(counts.get("completed", 0))
+                    failed_count = int(counts.get("failed", 0))
 
-                if current_phase_idx < len(phases):
-                    current_phase = phases[current_phase_idx]
+                    logger.info(
+                        f"Phase {current_phase_idx} health check (SQLite): "
+                        f"{completed_count}/{total_agents} completed, {failed_count} failed"
+                    )
 
-                    # Only auto-trigger if phase is ACTIVE (not already in review)
-                    if current_phase.get('status') == 'ACTIVE':
-                        # JSONL/SQLite truth: determine phase completion from materialized agent state.
-                        try:
-                            workspace_base = get_workspace_base_from_task_workspace(workspace)
-                            state_db.reconcile_task_workspace(workspace)
-                            phase_state = state_db.load_phase_snapshot(
-                                workspace_base=workspace_base, task_id=task_id, phase_index=current_phase_idx
-                            )
-                        except Exception as e:
-                            logger.warning(f"Health daemon: phase state read failed for {task_id}: {e}")
-                            phase_state = {
-                                "counts": {"total": 0, "completed": 0, "failed": 0, "pending": 0, "all_done": False}
-                            }
-
-                        counts = phase_state.get("counts", {}) or {}
-                        total_agents = int(counts.get("total", 0))
-                        completed_count = int(counts.get("completed", 0))
-                        failed_count = int(counts.get("failed", 0))
-
-                        logger.info(
-                            f"Phase {current_phase_idx} health check (SQLite): "
-                            f"{completed_count}/{total_agents} completed, {failed_count} failed"
+                    # All agents in terminal state?
+                    if total_agents > 0 and bool(counts.get("all_done")):
+                        # AUTO-SUBMIT PHASE FOR REVIEW - update phase status in SQLite
+                        state_db.update_phase_status(
+                            workspace_base=workspace_base,
+                            task_id=task_id,
+                            phase_index=current_phase_idx,
+                            new_status='AWAITING_REVIEW'
                         )
 
-                        # All agents in terminal state?
-                        if total_agents > 0 and bool(counts.get("all_done")):
-                            # AUTO-SUBMIT PHASE FOR REVIEW
-                            current_phase['status'] = 'AWAITING_REVIEW'
-                            current_phase['auto_submitted_at'] = datetime.now().isoformat()
-                            current_phase['auto_submitted_reason'] = (
-                                f"All {total_agents} agents terminal (health daemon / SQLite truth) "
-                                f"(health daemon detected)"
-                            )
+                        pending_phase_check = {
+                            'task_id': task_id,
+                            'phase_index': current_phase_idx,
+                            'phase_name': phase_state.get('name', f'Phase {current_phase_idx + 1}'),
+                            'completed_agents': completed_count,
+                            'failed_agents': failed_count,
+                            'workspace': workspace
+                        }
 
-                            # Store pending review info for spawning reviewers
-                            pending_phase_check = {
-                                'task_id': task_id,
-                                'phase_index': current_phase_idx,
-                                'phase_name': current_phase.get('name', f'Phase {current_phase_idx + 1}'),
-                                'completed_agents': completed_count,
-                                'failed_agents': failed_count,
-                                'workspace': workspace
-                            }
+                        logger.info(
+                            f"PHASE-ENFORCEMENT (health daemon): Phase {current_phase_idx} "
+                            f"({phase_state.get('name')}) auto-submitted for review"
+                        )
 
-                            logger.info(
-                                f"PHASE-ENFORCEMENT (health daemon): Phase {current_phase_idx} "
-                                f"({current_phase.get('name')}) auto-submitted for review"
-                            )
+            except Exception as e:
+                logger.warning(f"Health daemon: phase enforcement check failed for {task_id}: {e}")
 
-                # Write back atomically
-                f.seek(0)
-                f.write(json.dumps(registry, indent=2))
-                f.truncate()
-
-            # Update global registry
+            # Update global registry (still uses JSON for cross-project UI)
             self._update_global_registry(workspace, failed_agents)
 
             # ===== CHECK FOR STALLED REVIEWS =====
             # If any failed agents are reviewers, check if review can be finalized with partial verdicts
-            reviewer_agent_ids = [f['agent']['id'] for f in failed_agents if 'reviewer' in f['agent'].get('type', '').lower()]
+            reviewer_agent_ids = [
+                f['agent'].get('agent_id') or f['agent'].get('id')
+                for f in failed_agents
+                if 'reviewer' in (f['agent'].get('agent_type') or f['agent'].get('type', '')).lower()
+            ]
             if reviewer_agent_ids:
                 self._check_stalled_reviews(task_id, workspace, reviewer_agent_ids)
 
