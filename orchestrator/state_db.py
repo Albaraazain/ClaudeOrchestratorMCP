@@ -191,6 +191,9 @@ def _init_db(conn: sqlite3.Connection) -> None:
           created_at TEXT,
           completed_at TEXT,
           reviewer_notes TEXT,
+          num_reviewers INTEGER DEFAULT 2,
+          auto_spawned INTEGER DEFAULT 0,
+          phase_name TEXT,
           reviewer_agent_ids TEXT, -- JSON array of reviewer agent IDs
           critique_agent_id TEXT, -- ID of the critique agent
           FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
@@ -376,6 +379,19 @@ def _init_db(conn: sqlite3.Connection) -> None:
     review_columns = {row[1] for row in cursor.fetchall()}
 
     review_migrations = []
+    # Backfill missing columns from older review schemas (pre-agentic reviewers JSON list)
+    if 'reviewer_agent_ids' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN reviewer_agent_ids TEXT;")
+    if 'critique_agent_id' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN critique_agent_id TEXT;")
+    if 'reviewer_notes' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN reviewer_notes TEXT;")
+    if 'verdict' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN verdict TEXT;")
+    if 'created_at' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN created_at TEXT;")
+    if 'completed_at' not in review_columns:
+        review_migrations.append("ALTER TABLE reviews ADD COLUMN completed_at TEXT;")
     if 'num_reviewers' not in review_columns:
         review_migrations.append("ALTER TABLE reviews ADD COLUMN num_reviewers INTEGER DEFAULT 2;")
     if 'auto_spawned' not in review_columns:
@@ -2631,11 +2647,14 @@ def get_reviews_for_task(*, workspace_base: str, task_id: str) -> List[Dict]:
         for row in rows:
             r = dict(row)
             # Parse JSON fields
-            if r.get('reviewer_agent_ids'):
+            raw_reviewer_ids = r.get('reviewer_agent_ids')
+            if raw_reviewer_ids:
                 try:
-                    r['reviewer_agent_ids'] = json.loads(r['reviewer_agent_ids'])
+                    r['reviewer_agent_ids'] = json.loads(raw_reviewer_ids)
                 except Exception:
-                    pass
+                    r['reviewer_agent_ids'] = []
+            else:
+                r['reviewer_agent_ids'] = []
             result.append(r)
         return result
     finally:
@@ -2771,11 +2790,14 @@ def get_review(
 
         result = dict(row)
         # Parse JSON fields
-        if result.get('reviewer_agent_ids'):
+        raw_reviewer_ids = result.get('reviewer_agent_ids')
+        if raw_reviewer_ids:
             try:
-                result['reviewer_agent_ids'] = json.loads(result['reviewer_agent_ids'])
-            except:
+                result['reviewer_agent_ids'] = json.loads(raw_reviewer_ids)
+            except Exception:
                 result['reviewer_agent_ids'] = []
+        else:
+            result['reviewer_agent_ids'] = []
 
         return result
     finally:
