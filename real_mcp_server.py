@@ -1302,15 +1302,16 @@ BEGIN YOUR WORK NOW!
         calling_project_dir = client_project_dir
         claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'npx -y @anthropic-ai/claude-code')
         # Build claude flags with dynamic model selection (opus=best reasoning, sonnet=faster/cheaper)
-        base_flags = '--print --output-format stream-json --verbose --dangerously-skip-permissions'
+        #
+        # IMPORTANT: pass the prompt via stdin to avoid OS/shell argument-length limits.
+        # Review prompts can be very large; passing them as a single CLI argument can cause the
+        # tmux session to terminate immediately (agent never gets recorded/spawned).
+        base_flags = '--print --output-format stream-json --input-format text --verbose --dangerously-skip-permissions'
         claude_flags = f'{base_flags} --model {model}'
         logger.info(f"Deploying agent {agent_id} with model: {model}")
 
         # JSONL log file path - unique per agent_id
         log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
-
-        # Escape the prompt for shell and pass as argument (not stdin redirection)
-        escaped_prompt = agent_prompt.replace("'", "'\"'\"'")
 
         # Completion notifier script - called immediately when Claude exits
         # This ensures registry is updated the moment the agent finishes
@@ -1320,7 +1321,7 @@ BEGIN YOUR WORK NOW!
         # The notifier reads the stream log and updates registry immediately
         claude_command = (
             f"cd '{calling_project_dir}' && "
-            f"{claude_executable} {claude_flags} '{escaped_prompt}' | tee '{log_file}'; "
+            f"cat '{prompt_file}' | {claude_executable} {claude_flags} | tee '{log_file}'; "
             f"python3 '{notifier_script}' '{task_id}' '{agent_id}' '{workspace}' '{log_file}'"
         )
         

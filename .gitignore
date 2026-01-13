@@ -211,6 +211,10 @@ log/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Configuration files with sensitive data
 config.ini
