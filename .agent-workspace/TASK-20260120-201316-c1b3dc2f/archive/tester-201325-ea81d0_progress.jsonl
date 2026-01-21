@@ -1,0 +1,2 @@
+{"timestamp": "2026-01-20T20:13:42.998467", "agent_id": "tester-201325-ea81d0", "status": "working", "message": "Starting test", "progress": 10}
+{"timestamp": "2026-01-20T20:13:43.059946", "agent_id": "tester-201325-ea81d0", "status": "completed", "message": "Test complete - reported one finding", "progress": 100}

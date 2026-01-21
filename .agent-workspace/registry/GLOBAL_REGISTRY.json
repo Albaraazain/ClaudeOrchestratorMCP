@@ -533,6 +533,38 @@
       "has_enhanced_context": false,
       "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260113-115259-3b48d679",
       "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260120-201316-c1b3dc2f": {
+      "description": "TEST: Verify context accumulator phase_outcomes population",
+      "created_at": "2026-01-20T20:13:16.880664",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-201316-c1b3dc2f",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260120-202512-cc547f31": {
+      "description": "TEST-2: Auto-populate phase_outcomes verification",
+      "created_at": "2026-01-20T20:25:12.261865",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-202512-cc547f31",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260120-203627-81314c69": {
+      "description": "Debug test for phase outcomes - simple investigation",
+      "created_at": "2026-01-20T20:36:27.266923",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-203627-81314c69",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260120-203904-837c63e4": {
+      "description": "Fix verification test - checking phase_outcomes population",
+      "created_at": "2026-01-20T20:39:04.311158",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-203904-837c63e4",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
     }
   },
   "agents": {

@@ -1,0 +1,1630 @@
+{
+  "phase_id": "phase-0",
+  "generated_at": "2026-01-14T18:11:42.235683",
+  "total_findings": 32,
+  "findings_by_severity": {
+    "critical": [
+      {
+        "timestamp": "2026-01-13T11:58:46.970255",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "recommendation",
+        "severity": "critical",
+        "message": "REVIEW FLOW AUDIT SUMMARY - 5 bugs found: (1) CRITICAL: needs_revision verdict ignored in aggregation - always approved (state_db.py:2382-2390); (2) HIGH: Duplicate verdicts allowed - no UNIQUE constraint (state_db.py:308-318); (3) HIGH: No reviewer authorization check (real_mcp_server.py:5253-5268); (4) MEDIUM: abort_stalled_review uses stale phase data (real_mcp_server.py:5593-5615); (5) MEDIUM: finalize_review never uses REJECTED status, only REVISING (state_db.py:2449)",
+        "data": {
+          "priority_fixes": [
+            "1. Fix check_review_complete to count needs_revision as rejection",
+            "2. Add UNIQUE(review_id, reviewer_agent_id) to review_verdicts table",
+            "3. Add reviewer authorization check before recording verdict",
+            "4. Re-fetch phase data after abort_review call",
+            "5. Decide REJECTED vs REVISING semantics and be consistent"
+          ]
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:17.196329",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "recommendation",
+        "severity": "critical",
+        "message": "RACE CONDITION FIX SUMMARY: (1) TOCTOU in deploy - merge check_can_spawn_agent and deploy_agent_atomic into single transaction with INSERT...SELECT WHERE; (2) TOCTOU in phase review - merge get_phase + update_phase_status into atomic claim like claim_phase_for_review; (3) NESTED LOCKS in lifecycle.py - refactor to single lock or migrate to SQLite; (4) GLOBAL REGISTRY - migrate remaining LockedRegistryFile usages in health_daemon.py to SQLite; (5) REVIEW FINALIZATION - add claim_review_finalization() to prevent double finalize.",
+        "data": {
+          "total_issues": 7,
+          "critical": 1,
+          "high": 4,
+          "medium": 2,
+          "fix_pattern": "Atomic check-and-modify operations using SQLite transactions or fcntl-based claims"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:04.898507",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "recommendation",
+        "severity": "critical",
+        "message": "MIGRATION PRIORITY SUMMARY: Found 14 AGENT_REGISTRY.json references. CRITICAL migrations needed: (1) Line 1941 kill_real_agent, (2) Line 4667 approve_phase_review. HIGH priority: Lines 1518, 2370, 2798, 5675, 5743. MEDIUM: Lines 2915. LOW/Intentional: Lines 766, 2275, 4047, 4121, 4399. All SQLite equivalents exist in state_db.py.",
+        "data": {
+          "total_references": 14,
+          "critical": 2,
+          "high": 5,
+          "medium": 1,
+          "low_intentional": 5,
+          "already_migrated": 1,
+          "migration_blockers": "None - all SQLite functions exist",
+          "estimated_effort": "2-3 hours for critical+high migrations"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:37.342940",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "Line 4667-4677: FULL READ+WRITE with LockedRegistryFile in approve_phase_review. This is a critical phase transition operation using JSON file locking. MUST migrate to SQLite update_phase_status (state_db.py:618) for atomic phase approval.",
+        "data": {
+          "line": 4667,
+          "operation": "READ+WRITE",
+          "status": "needs-migration",
+          "sqlite_equivalent": "update_phase_status (state_db.py:618)",
+          "priority": "CRITICAL - phase transitions must be atomic in SQLite"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:47.238997",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "Line 1941-1949: FULL READ in kill_real_agent. Reads entire AGENT_REGISTRY.json to find agent by ID. This MUST be migrated to SQLite get_agent_by_id which already exists in state_db.py line 2038.",
+        "data": {
+          "line": 1941,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agent_by_id (state_db.py:2038)",
+          "priority": "CRITICAL - core operation, SQLite function already exists"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:41.498320",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "BUG: 'needs_revision' verdict ignored in aggregation (state_db.py:2382-2390). check_review_complete() only counts 'approved' and 'rejected' verdicts. If both reviewers submit 'needs_revision', final verdict becomes 'approved' (0 approve >= 0 reject = ties go to approved). This bypasses the entire revision flow.",
+        "data": {
+          "file": "orchestrator/state_db.py",
+          "function": "check_review_complete",
+          "lines": "2382-2390",
+          "impact": "If reviewers use 'needs_revision' verdict, the phase is incorrectly approved instead of requiring revisions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:24.964569",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "TOCTOU Race Condition in deploy_claude_tmux_agent (real_mcp_server.py:1027-1033 vs 1155+): check_can_spawn_agent() checks constraints BUT returns BEFORE agent is inserted. Between check (line 1027-1033) and INSERT (via deploy_agent_atomic called later around line 1155+), another concurrent request can pass the same check. Both will think they can spawn, causing duplicate agents that violate max_concurrent/max_agents limits.",
+        "data": {
+          "file": "real_mcp_server.py + state_db.py",
+          "pattern": "TOCTOU",
+          "check_location": "real_mcp_server.py:1027-1033",
+          "insert_location": "deploy_agent_atomic in state_db.py:2144-2190",
+          "risk": "duplicate_agents_beyond_limits"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      }
+    ],
+    "medium": [
+      {
+        "timestamp": "2026-01-13T11:58:34.072389",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "insight",
+        "severity": "medium",
+        "message": "POSITIVE: SQLite transaction handling is GOOD. All BEGIN IMMEDIATE blocks properly paired with COMMIT/ROLLBACK in except handlers (state_db.py:491-559, 2150-2187, 2305-2343, 2420-2485). No leaked transactions or missing rollbacks found. The SQLite layer has proper atomic operation handling.",
+        "data": {
+          "verified_functions": [
+            "create_task_sqlite (491-559)",
+            "record_agent_sqlite (2150-2187)",
+            "record_review_verdict (2305-2343)",
+            "finalize_review_and_advance (2420-2485)"
+          ],
+          "pattern": "BEGIN IMMEDIATE \u2192 try/except \u2192 COMMIT on success, ROLLBACK on exception",
+          "assessment": "SQLite operations have robust error handling",
+          "note": "This is a strength of the codebase - the database layer is well-designed"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:27.203820",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "INCONSISTENCY: finalize_review never sets REJECTED status (state_db.py:2449). When final_verdict='rejected', finalize_review sets phase to 'REVISING', but health_daemon.py:997 sets to 'REJECTED'. The state machine defines REJECTED as valid (line 62), but normal flow never uses it. May confuse state tracking.",
+        "data": {
+          "file1": "orchestrator/state_db.py",
+          "line1": "2449",
+          "file2": "orchestrator/health_daemon.py",
+          "line2": "997",
+          "impact": "Phase state inconsistency between review paths",
+          "suggestion": "Decide if REJECTED should exist - if yes, use it in finalize_review; if no, remove from state machine"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:11.948375",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "health_daemon.py:271-291 _read_last_jsonl_entry duplicates same pattern as state_db.py - returns None on ALL exceptions. Also at line 252 catches Exception and sets agent=None silently, then continues loop. This masks real errors like permission denied or corrupted files in health checks.",
+        "data": {
+          "affected_functions": [
+            "health_daemon.py:271-291 (_read_last_jsonl_entry)",
+            "health_daemon.py:252-253 (get_agent exception handler)"
+          ],
+          "pattern": "catch Exception \u2192 return None or continue",
+          "impact": "Health monitoring silently fails without alerting operators",
+          "recommendation": "Log specific exception types before returning None, distinguish between expected (file not found) vs unexpected (corruption) errors"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:05.630749",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Potential race in submit_review_verdict (real_mcp_server.py:5271-5305): check_review_complete is called AFTER record_review_verdict's transaction commits. If two reviewers submit at same time, both could see is_complete=True and both could call finalize_review. While SQLite likely handles this via transactions, the finalize_review could be called twice. Should verify finalize_review is idempotent or add atomic claim mechanism like claim_phase_for_review.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "submit_review_verdict",
+          "lines": "5271-5305",
+          "pattern": "double_finalization",
+          "risk": "duplicate_phase_transitions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:28.121182",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "list_real_tasks (real_mcp_server.py:3936-3937) reads GLOBAL_REGISTRY.json without any locking. Concurrent writes to this file (by health_daemon or lifecycle.py) can cause partial reads, resulting in JSON parse errors or inconsistent data. Should migrate to SQLite or use LockedRegistryFile for reads too.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "list_real_tasks",
+          "lines": "3936-3937",
+          "pattern": "unlocked_read",
+          "risk": "partial_read_corruption"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:20.078091",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "BUG: abort_stalled_review reads stale data (real_mcp_server.py:5593-5601). After aborting review in SQLite (line 5586), it reads task_snapshot from SQLite for phase info but accesses 'phases' which contains stale status. The abort_review() doesn't update task_snapshot, so current_phase status check at line 5603 uses old data.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "abort_stalled_review",
+          "lines": "5593-5615",
+          "impact": "Phase status determination after abort may use pre-abort status"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:17.442308",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Line 2915-2929: READ in update_agent_progress for peer coordination. Reads registry to show peer progress/findings. This is coordination data, could migrate to SQLite load_recent_progress_latest (state_db.py:1222) but current implementation works.",
+        "data": {
+          "line": 2915,
+          "operation": "READ",
+          "status": "could-migrate",
+          "sqlite_equivalent": "load_recent_progress_latest (state_db.py:1222)",
+          "priority": "MEDIUM - works but could be more efficient"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:17.420459",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Functions returning None/empty data on any exception - makes debugging impossible. state_db.py:405-417 (_read_json_with_retries), 420-439 (_read_last_jsonl_entry) catch ALL exceptions and return None. Cannot distinguish file-not-found vs corrupted-file vs permission-denied. Callers receive None and proceed with empty data, masking real errors.",
+        "data": {
+          "affected_functions": [
+            "_read_json_with_retries (state_db.py:405-417)",
+            "_read_last_jsonl_entry (state_db.py:420-439)"
+          ],
+          "pattern": "catch Exception \u2192 return None",
+          "impact": "Silent data loss, impossible to debug file access issues, corrupted state goes unnoticed",
+          "recommendation": "Return Result type or raise specific exceptions for different failure modes"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:35.004730",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Line 766: BACKWARD COMPAT write to AGENT_REGISTRY.json in create_real_task. This is intentional for legacy components still reading JSON, but marked with TODO for removal. SQLite equivalent: create_task_with_phases in state_db.py already handles the real write.",
+        "data": {
+          "line": 766,
+          "operation": "WRITE",
+          "status": "intentional-compat",
+          "sqlite_equivalent": "create_task_with_phases",
+          "priority": "LOW - marked with TODO for future cleanup"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:03.239898",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "health_daemon.py:788,837,897 - LockedRegistryFile still used for global registry updates. These JSON file locks are NOT migrated to SQLite despite the migration effort. Can cause lock contention when health daemon runs concurrently with MCP server operations.",
+        "data": {
+          "file": "orchestrator/health_daemon.py",
+          "lines": "788, 837, 897",
+          "pattern": "json_file_locks",
+          "risk": "lock_contention"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      }
+    ],
+    "high": [
+      {
+        "timestamp": "2026-01-13T11:58:23.601525",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "recommendation",
+        "severity": "high",
+        "message": "ARCHITECTURE: Mixed error handling strategy causes inconsistency. Some functions raise exceptions (good), others return {\"success\": False, \"error\": str} dicts (acceptable for MCP tools), others return None (bad). No consistent Result type or error hierarchy. Recommendation: (1) Define Result[T, E] type for fallible operations, (2) Replace bare 'except:' with 'except Exception:', (3) Always log exception details before swallowing, (4) Document which functions raise vs return errors",
+        "data": {
+          "patterns_found": {
+            "raising": "Migration functions, some SQLite ops",
+            "returning_dict": "MCP tool functions, some utility functions",
+            "returning_none": "File readers, helper functions"
+          },
+          "consistency_score": "3/10 - very inconsistent",
+          "recommendation_priority": "HIGH - establish consistent error handling conventions before more code is written",
+          "suggested_approach": "Use Result type pattern from Rust/TypeScript for fallible operations, reserve exceptions for truly exceptional conditions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:07.918667",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "SECURITY: No validation of reviewer authorization (real_mcp_server.py:5253-5268, state_db.py:2305-2320). submit_review_verdict and record_review_verdict don't verify: (1) review_id exists in reviews table, (2) reviewer_agent_id is in that review's reviewer_agent_ids. Any agent can submit verdicts to any review.",
+        "data": {
+          "file1": "real_mcp_server.py",
+          "function1": "submit_review_verdict",
+          "file2": "orchestrator/state_db.py",
+          "function2": "record_review_verdict",
+          "impact": "Unauthorized agents can manipulate review outcomes",
+          "fix": "Add validation: SELECT review_id FROM reviews WHERE review_id=? AND reviewer_agent_ids LIKE ?"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:53.637963",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "BUG: Duplicate verdicts possible - no unique constraint (state_db.py:308-318). review_verdicts table has no UNIQUE(review_id, reviewer_agent_id) constraint. Same reviewer can submit multiple verdicts, inflating verdict counts. check_review_complete() line 2379 just counts all verdicts, so 1 reviewer submitting 2x = looks like 2 reviewers.",
+        "data": {
+          "file": "orchestrator/state_db.py",
+          "function": "CREATE TABLE review_verdicts",
+          "lines": "308-318",
+          "fix": "Add UNIQUE(review_id, reviewer_agent_id) constraint to table schema"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:48.978325",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 5743-5751: FULL READ in get_health_status. Reads entire registry to get agents list for health monitoring. Should migrate to get_agents_for_task (state_db.py:2014) which queries SQLite agents table directly.",
+        "data": {
+          "line": 5743,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agents_for_task (state_db.py:2014)",
+          "priority": "HIGH - health monitoring reads entire registry frequently"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:43.630355",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 5675-5689: FULL READ in get_phase_handover. Reads entire registry to access phases array and get phase_id. Should migrate to get_phase (state_db.py:2974) which retrieves phase data directly from SQLite.",
+        "data": {
+          "line": 5675,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_phase (state_db.py:2974)",
+          "priority": "HIGH - handover is critical for phase transitions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:10.643299",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 2798-2809: FULL READ in get_task_findings. Reads entire registry then iterates agents to collect findings. Should migrate to get_agent_findings (state_db.py:1344) which queries SQLite directly with filters.",
+        "data": {
+          "line": 2798,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agent_findings (state_db.py:1344)",
+          "priority": "HIGH - inefficient full registry read, SQLite has filtered query"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:05.424715",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Multiple paths calling _auto_spawn_phase_reviewers can race (real_mcp_server.py:3532-3542 + 3587-3594): Both the main path (line 3587) and the retry worker thread (line 3532) can call _auto_spawn_phase_reviewers. While claim_phase_for_review() prevents duplicate spawns WITHIN this function, the retry worker checks _maybe_auto_submit_phase_for_review_sqlite() first (which has its own race condition reported earlier). Multiple agents completing + retry workers = multiple code paths trying to transition/spawn.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "lines": "3532, 3587",
+          "pattern": "multiple_spawn_paths",
+          "risk": "concurrent_spawn_attempts"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:59.513121",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 2370-2379: FULL READ with LockedRegistryFile in get_agent_output. Reads registry to find agent by ID. Should migrate to SQLite get_agent_by_id (state_db.py:2038) which is atomic and doesn't require file locking.",
+        "data": {
+          "line": 2370,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agent_by_id (state_db.py:2038)",
+          "priority": "HIGH - uses file locking, SQLite is lock-free"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:53.114717",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "TOCTOU in _maybe_auto_submit_phase_for_review_sqlite (real_mcp_server.py:3463-3488): Reads phase status at line 3474-3480 (get_phase), then updates status at 3484-3488 (update_phase_status). Race window exists where two concurrent agents completing could both read 'ACTIVE' status, both pass the check, and both try to update to 'AWAITING_REVIEW'. This can cause duplicate reviewer spawn attempts.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "_maybe_auto_submit_phase_for_review_sqlite",
+          "lines": "3463-3488",
+          "pattern": "TOCTOU",
+          "risk": "duplicate_review_submissions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:41.320732",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 1518-1525: FALLBACK READ in deploy_claude_tmux_agent. When SQLite load_task_snapshot fails, falls back to reading AGENT_REGISTRY.json. This should be migrated - if SQLite is empty, the task doesn't exist, not a valid fallback scenario.",
+        "data": {
+          "line": 1518,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "load_task_snapshot should be authoritative",
+          "priority": "HIGH - fallback defeats SQLite as source of truth"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:21.255525",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "30+ bare 'except:' blocks that catch ALL exceptions including KeyboardInterrupt and SystemExit. These prevent proper error propagation and debugging. Critical locations: orchestrator/status.py:229,236 (silent pass), orchestrator/lifecycle.py:479,595,520,628,653 (returns generic errors), real_mcp_server.py:2920,2834,2853,2940 (continue on failure), orchestrator/state_db.py:2732,2922,3005 (fallback to empty data)",
+        "data": {
+          "bare_except_locations": [
+            "orchestrator/status.py:229,236",
+            "orchestrator/lifecycle.py:479,595,520,628,653,758,780",
+            "orchestrator/coordination.py:267",
+            "orchestrator/workspace.py:375",
+            "orchestrator/prompts.py:159",
+            "orchestrator/state_db.py:2732,2922,3005",
+            "orchestrator/registry.py:995,1054,1070",
+            "orchestrator/health_daemon.py:327",
+            "real_mcp_server.py:1629,1647,2193,2834,2853,2920,2940,3036,3061,3160,3182,3983,4001,4827,5623"
+          ],
+          "risk": "Catches KeyboardInterrupt, SystemExit, MemoryError - prevents graceful shutdown and proper debugging",
+          "recommendation": "Replace with 'except Exception as e:' and log the exception details"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:55:57.409954",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "lifecycle.py:990-1118 - NESTED LockedRegistryFile pattern still in use. Main lock at line 990, then NESTED locks at lines 1085 and 1100 for cleanup result updates. If cleanup fails, inner lock acquisition at 1100 can deadlock if same process already holds outer lock (reentrant lock scenario depends on fcntl implementation).",
+        "data": {
+          "file": "orchestrator/lifecycle.py",
+          "lines": "990, 1085, 1100, 1118",
+          "pattern": "nested_locks",
+          "risk": "potential_deadlock"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      }
+    ],
+    "low": [
+      {
+        "timestamp": "2026-01-13T11:57:31.386994",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "insight",
+        "severity": "low",
+        "message": "Lines 4121, 4399: SQLITE-BACKED reads in get_phase_status and check_phase_progress. These functions read registry_path for existence check but comment says \"SQLite-backed phase view (JSONL truth)\". The registry path is used for validation but data comes from SQLite. Already migrated.",
+        "data": {
+          "lines": [
+            4121,
+            4399
+          ],
+          "operation": "READ",
+          "status": "already-migrated",
+          "sqlite_equivalent": "load_task_snapshot, get_phase",
+          "priority": "NONE - already using SQLite"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:23.477125",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "low",
+        "message": "Line 4047-4049: DISCOVERY READ in health monitoring daemon. Scans workspace for AGENT_REGISTRY.json files to find all tasks. This is a discovery operation, acceptable for health daemon background scanning.",
+        "data": {
+          "line": 4047,
+          "operation": "READ",
+          "status": "intentional-discovery",
+          "sqlite_equivalent": "Could use global registry but glob is acceptable",
+          "priority": "LOW - health daemon background task"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:53.671685",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "low",
+        "message": "Line 2275-2278: BEST-EFFORT READ in get_phase_status. Used only for non-critical fields (hierarchy/spiral/limits). Has proper try-catch fallback to empty dict. This is acceptable as documented best-effort metadata cache.",
+        "data": {
+          "line": 2275,
+          "operation": "READ",
+          "status": "intentional-best-effort",
+          "sqlite_equivalent": "Not needed - metadata only",
+          "priority": "LOW - documented as best-effort cache"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      }
+    ]
+  },
+  "findings_by_type": {
+    "recommendation": [
+      {
+        "timestamp": "2026-01-13T11:58:46.970255",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "recommendation",
+        "severity": "critical",
+        "message": "REVIEW FLOW AUDIT SUMMARY - 5 bugs found: (1) CRITICAL: needs_revision verdict ignored in aggregation - always approved (state_db.py:2382-2390); (2) HIGH: Duplicate verdicts allowed - no UNIQUE constraint (state_db.py:308-318); (3) HIGH: No reviewer authorization check (real_mcp_server.py:5253-5268); (4) MEDIUM: abort_stalled_review uses stale phase data (real_mcp_server.py:5593-5615); (5) MEDIUM: finalize_review never uses REJECTED status, only REVISING (state_db.py:2449)",
+        "data": {
+          "priority_fixes": [
+            "1. Fix check_review_complete to count needs_revision as rejection",
+            "2. Add UNIQUE(review_id, reviewer_agent_id) to review_verdicts table",
+            "3. Add reviewer authorization check before recording verdict",
+            "4. Re-fetch phase data after abort_review call",
+            "5. Decide REJECTED vs REVISING semantics and be consistent"
+          ]
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:23.601525",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "recommendation",
+        "severity": "high",
+        "message": "ARCHITECTURE: Mixed error handling strategy causes inconsistency. Some functions raise exceptions (good), others return {\"success\": False, \"error\": str} dicts (acceptable for MCP tools), others return None (bad). No consistent Result type or error hierarchy. Recommendation: (1) Define Result[T, E] type for fallible operations, (2) Replace bare 'except:' with 'except Exception:', (3) Always log exception details before swallowing, (4) Document which functions raise vs return errors",
+        "data": {
+          "patterns_found": {
+            "raising": "Migration functions, some SQLite ops",
+            "returning_dict": "MCP tool functions, some utility functions",
+            "returning_none": "File readers, helper functions"
+          },
+          "consistency_score": "3/10 - very inconsistent",
+          "recommendation_priority": "HIGH - establish consistent error handling conventions before more code is written",
+          "suggested_approach": "Use Result type pattern from Rust/TypeScript for fallible operations, reserve exceptions for truly exceptional conditions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:17.196329",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "recommendation",
+        "severity": "critical",
+        "message": "RACE CONDITION FIX SUMMARY: (1) TOCTOU in deploy - merge check_can_spawn_agent and deploy_agent_atomic into single transaction with INSERT...SELECT WHERE; (2) TOCTOU in phase review - merge get_phase + update_phase_status into atomic claim like claim_phase_for_review; (3) NESTED LOCKS in lifecycle.py - refactor to single lock or migrate to SQLite; (4) GLOBAL REGISTRY - migrate remaining LockedRegistryFile usages in health_daemon.py to SQLite; (5) REVIEW FINALIZATION - add claim_review_finalization() to prevent double finalize.",
+        "data": {
+          "total_issues": 7,
+          "critical": 1,
+          "high": 4,
+          "medium": 2,
+          "fix_pattern": "Atomic check-and-modify operations using SQLite transactions or fcntl-based claims"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:04.898507",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "recommendation",
+        "severity": "critical",
+        "message": "MIGRATION PRIORITY SUMMARY: Found 14 AGENT_REGISTRY.json references. CRITICAL migrations needed: (1) Line 1941 kill_real_agent, (2) Line 4667 approve_phase_review. HIGH priority: Lines 1518, 2370, 2798, 5675, 5743. MEDIUM: Lines 2915. LOW/Intentional: Lines 766, 2275, 4047, 4121, 4399. All SQLite equivalents exist in state_db.py.",
+        "data": {
+          "total_references": 14,
+          "critical": 2,
+          "high": 5,
+          "medium": 1,
+          "low_intentional": 5,
+          "already_migrated": 1,
+          "migration_blockers": "None - all SQLite functions exist",
+          "estimated_effort": "2-3 hours for critical+high migrations"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      }
+    ],
+    "insight": [
+      {
+        "timestamp": "2026-01-13T11:58:34.072389",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "insight",
+        "severity": "medium",
+        "message": "POSITIVE: SQLite transaction handling is GOOD. All BEGIN IMMEDIATE blocks properly paired with COMMIT/ROLLBACK in except handlers (state_db.py:491-559, 2150-2187, 2305-2343, 2420-2485). No leaked transactions or missing rollbacks found. The SQLite layer has proper atomic operation handling.",
+        "data": {
+          "verified_functions": [
+            "create_task_sqlite (491-559)",
+            "record_agent_sqlite (2150-2187)",
+            "record_review_verdict (2305-2343)",
+            "finalize_review_and_advance (2420-2485)"
+          ],
+          "pattern": "BEGIN IMMEDIATE \u2192 try/except \u2192 COMMIT on success, ROLLBACK on exception",
+          "assessment": "SQLite operations have robust error handling",
+          "note": "This is a strength of the codebase - the database layer is well-designed"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:31.386994",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "insight",
+        "severity": "low",
+        "message": "Lines 4121, 4399: SQLITE-BACKED reads in get_phase_status and check_phase_progress. These functions read registry_path for existence check but comment says \"SQLite-backed phase view (JSONL truth)\". The registry path is used for validation but data comes from SQLite. Already migrated.",
+        "data": {
+          "lines": [
+            4121,
+            4399
+          ],
+          "operation": "READ",
+          "status": "already-migrated",
+          "sqlite_equivalent": "load_task_snapshot, get_phase",
+          "priority": "NONE - already using SQLite"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      }
+    ],
+    "issue": [
+      {
+        "timestamp": "2026-01-13T11:58:27.203820",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "INCONSISTENCY: finalize_review never sets REJECTED status (state_db.py:2449). When final_verdict='rejected', finalize_review sets phase to 'REVISING', but health_daemon.py:997 sets to 'REJECTED'. The state machine defines REJECTED as valid (line 62), but normal flow never uses it. May confuse state tracking.",
+        "data": {
+          "file1": "orchestrator/state_db.py",
+          "line1": "2449",
+          "file2": "orchestrator/health_daemon.py",
+          "line2": "997",
+          "impact": "Phase state inconsistency between review paths",
+          "suggestion": "Decide if REJECTED should exist - if yes, use it in finalize_review; if no, remove from state machine"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:11.948375",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "health_daemon.py:271-291 _read_last_jsonl_entry duplicates same pattern as state_db.py - returns None on ALL exceptions. Also at line 252 catches Exception and sets agent=None silently, then continues loop. This masks real errors like permission denied or corrupted files in health checks.",
+        "data": {
+          "affected_functions": [
+            "health_daemon.py:271-291 (_read_last_jsonl_entry)",
+            "health_daemon.py:252-253 (get_agent exception handler)"
+          ],
+          "pattern": "catch Exception \u2192 return None or continue",
+          "impact": "Health monitoring silently fails without alerting operators",
+          "recommendation": "Log specific exception types before returning None, distinguish between expected (file not found) vs unexpected (corruption) errors"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:07.918667",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "SECURITY: No validation of reviewer authorization (real_mcp_server.py:5253-5268, state_db.py:2305-2320). submit_review_verdict and record_review_verdict don't verify: (1) review_id exists in reviews table, (2) reviewer_agent_id is in that review's reviewer_agent_ids. Any agent can submit verdicts to any review.",
+        "data": {
+          "file1": "real_mcp_server.py",
+          "function1": "submit_review_verdict",
+          "file2": "orchestrator/state_db.py",
+          "function2": "record_review_verdict",
+          "impact": "Unauthorized agents can manipulate review outcomes",
+          "fix": "Add validation: SELECT review_id FROM reviews WHERE review_id=? AND reviewer_agent_ids LIKE ?"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:58:05.630749",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Potential race in submit_review_verdict (real_mcp_server.py:5271-5305): check_review_complete is called AFTER record_review_verdict's transaction commits. If two reviewers submit at same time, both could see is_complete=True and both could call finalize_review. While SQLite likely handles this via transactions, the finalize_review could be called twice. Should verify finalize_review is idempotent or add atomic claim mechanism like claim_phase_for_review.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "submit_review_verdict",
+          "lines": "5271-5305",
+          "pattern": "double_finalization",
+          "risk": "duplicate_phase_transitions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:53.637963",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "BUG: Duplicate verdicts possible - no unique constraint (state_db.py:308-318). review_verdicts table has no UNIQUE(review_id, reviewer_agent_id) constraint. Same reviewer can submit multiple verdicts, inflating verdict counts. check_review_complete() line 2379 just counts all verdicts, so 1 reviewer submitting 2x = looks like 2 reviewers.",
+        "data": {
+          "file": "orchestrator/state_db.py",
+          "function": "CREATE TABLE review_verdicts",
+          "lines": "308-318",
+          "fix": "Add UNIQUE(review_id, reviewer_agent_id) constraint to table schema"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:48.978325",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 5743-5751: FULL READ in get_health_status. Reads entire registry to get agents list for health monitoring. Should migrate to get_agents_for_task (state_db.py:2014) which queries SQLite agents table directly.",
+        "data": {
+          "line": 5743,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agents_for_task (state_db.py:2014)",
+          "priority": "HIGH - health monitoring reads entire registry frequently"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:43.630355",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 5675-5689: FULL READ in get_phase_handover. Reads entire registry to access phases array and get phase_id. Should migrate to get_phase (state_db.py:2974) which retrieves phase data directly from SQLite.",
+        "data": {
+          "line": 5675,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_phase (state_db.py:2974)",
+          "priority": "HIGH - handover is critical for phase transitions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:37.342940",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "Line 4667-4677: FULL READ+WRITE with LockedRegistryFile in approve_phase_review. This is a critical phase transition operation using JSON file locking. MUST migrate to SQLite update_phase_status (state_db.py:618) for atomic phase approval.",
+        "data": {
+          "line": 4667,
+          "operation": "READ+WRITE",
+          "status": "needs-migration",
+          "sqlite_equivalent": "update_phase_status (state_db.py:618)",
+          "priority": "CRITICAL - phase transitions must be atomic in SQLite"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:28.121182",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "list_real_tasks (real_mcp_server.py:3936-3937) reads GLOBAL_REGISTRY.json without any locking. Concurrent writes to this file (by health_daemon or lifecycle.py) can cause partial reads, resulting in JSON parse errors or inconsistent data. Should migrate to SQLite or use LockedRegistryFile for reads too.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "list_real_tasks",
+          "lines": "3936-3937",
+          "pattern": "unlocked_read",
+          "risk": "partial_read_corruption"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:23.477125",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "low",
+        "message": "Line 4047-4049: DISCOVERY READ in health monitoring daemon. Scans workspace for AGENT_REGISTRY.json files to find all tasks. This is a discovery operation, acceptable for health daemon background scanning.",
+        "data": {
+          "line": 4047,
+          "operation": "READ",
+          "status": "intentional-discovery",
+          "sqlite_equivalent": "Could use global registry but glob is acceptable",
+          "priority": "LOW - health daemon background task"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:20.078091",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "BUG: abort_stalled_review reads stale data (real_mcp_server.py:5593-5601). After aborting review in SQLite (line 5586), it reads task_snapshot from SQLite for phase info but accesses 'phases' which contains stale status. The abort_review() doesn't update task_snapshot, so current_phase status check at line 5603 uses old data.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "abort_stalled_review",
+          "lines": "5593-5615",
+          "impact": "Phase status determination after abort may use pre-abort status"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:17.442308",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Line 2915-2929: READ in update_agent_progress for peer coordination. Reads registry to show peer progress/findings. This is coordination data, could migrate to SQLite load_recent_progress_latest (state_db.py:1222) but current implementation works.",
+        "data": {
+          "line": 2915,
+          "operation": "READ",
+          "status": "could-migrate",
+          "sqlite_equivalent": "load_recent_progress_latest (state_db.py:1222)",
+          "priority": "MEDIUM - works but could be more efficient"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:17.420459",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Functions returning None/empty data on any exception - makes debugging impossible. state_db.py:405-417 (_read_json_with_retries), 420-439 (_read_last_jsonl_entry) catch ALL exceptions and return None. Cannot distinguish file-not-found vs corrupted-file vs permission-denied. Callers receive None and proceed with empty data, masking real errors.",
+        "data": {
+          "affected_functions": [
+            "_read_json_with_retries (state_db.py:405-417)",
+            "_read_last_jsonl_entry (state_db.py:420-439)"
+          ],
+          "pattern": "catch Exception \u2192 return None",
+          "impact": "Silent data loss, impossible to debug file access issues, corrupted state goes unnoticed",
+          "recommendation": "Return Result type or raise specific exceptions for different failure modes"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:10.643299",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 2798-2809: FULL READ in get_task_findings. Reads entire registry then iterates agents to collect findings. Should migrate to get_agent_findings (state_db.py:1344) which queries SQLite directly with filters.",
+        "data": {
+          "line": 2798,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agent_findings (state_db.py:1344)",
+          "priority": "HIGH - inefficient full registry read, SQLite has filtered query"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:57:05.424715",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Multiple paths calling _auto_spawn_phase_reviewers can race (real_mcp_server.py:3532-3542 + 3587-3594): Both the main path (line 3587) and the retry worker thread (line 3532) can call _auto_spawn_phase_reviewers. While claim_phase_for_review() prevents duplicate spawns WITHIN this function, the retry worker checks _maybe_auto_submit_phase_for_review_sqlite() first (which has its own race condition reported earlier). Multiple agents completing + retry workers = multiple code paths trying to transition/spawn.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "lines": "3532, 3587",
+          "pattern": "multiple_spawn_paths",
+          "risk": "concurrent_spawn_attempts"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:59.513121",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 2370-2379: FULL READ with LockedRegistryFile in get_agent_output. Reads registry to find agent by ID. Should migrate to SQLite get_agent_by_id (state_db.py:2038) which is atomic and doesn't require file locking.",
+        "data": {
+          "line": 2370,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agent_by_id (state_db.py:2038)",
+          "priority": "HIGH - uses file locking, SQLite is lock-free"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:53.671685",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "low",
+        "message": "Line 2275-2278: BEST-EFFORT READ in get_phase_status. Used only for non-critical fields (hierarchy/spiral/limits). Has proper try-catch fallback to empty dict. This is acceptable as documented best-effort metadata cache.",
+        "data": {
+          "line": 2275,
+          "operation": "READ",
+          "status": "intentional-best-effort",
+          "sqlite_equivalent": "Not needed - metadata only",
+          "priority": "LOW - documented as best-effort cache"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:53.114717",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "TOCTOU in _maybe_auto_submit_phase_for_review_sqlite (real_mcp_server.py:3463-3488): Reads phase status at line 3474-3480 (get_phase), then updates status at 3484-3488 (update_phase_status). Race window exists where two concurrent agents completing could both read 'ACTIVE' status, both pass the check, and both try to update to 'AWAITING_REVIEW'. This can cause duplicate reviewer spawn attempts.",
+        "data": {
+          "file": "real_mcp_server.py",
+          "function": "_maybe_auto_submit_phase_for_review_sqlite",
+          "lines": "3463-3488",
+          "pattern": "TOCTOU",
+          "risk": "duplicate_review_submissions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:47.238997",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "Line 1941-1949: FULL READ in kill_real_agent. Reads entire AGENT_REGISTRY.json to find agent by ID. This MUST be migrated to SQLite get_agent_by_id which already exists in state_db.py line 2038.",
+        "data": {
+          "line": 1941,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "get_agent_by_id (state_db.py:2038)",
+          "priority": "CRITICAL - core operation, SQLite function already exists"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:41.498320",
+        "agent_id": "review-flow-auditor-115404-8d0c0d",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "BUG: 'needs_revision' verdict ignored in aggregation (state_db.py:2382-2390). check_review_complete() only counts 'approved' and 'rejected' verdicts. If both reviewers submit 'needs_revision', final verdict becomes 'approved' (0 approve >= 0 reject = ties go to approved). This bypasses the entire revision flow.",
+        "data": {
+          "file": "orchestrator/state_db.py",
+          "function": "check_review_complete",
+          "lines": "2382-2390",
+          "impact": "If reviewers use 'needs_revision' verdict, the phase is incorrectly approved instead of requiring revisions"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:41.320732",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "Line 1518-1525: FALLBACK READ in deploy_claude_tmux_agent. When SQLite load_task_snapshot fails, falls back to reading AGENT_REGISTRY.json. This should be migrated - if SQLite is empty, the task doesn't exist, not a valid fallback scenario.",
+        "data": {
+          "line": 1518,
+          "operation": "READ",
+          "status": "needs-migration",
+          "sqlite_equivalent": "load_task_snapshot should be authoritative",
+          "priority": "HIGH - fallback defeats SQLite as source of truth"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:35.004730",
+        "agent_id": "sqlite-migration-che-115406-83d900",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "Line 766: BACKWARD COMPAT write to AGENT_REGISTRY.json in create_real_task. This is intentional for legacy components still reading JSON, but marked with TODO for removal. SQLite equivalent: create_task_with_phases in state_db.py already handles the real write.",
+        "data": {
+          "line": 766,
+          "operation": "WRITE",
+          "status": "intentional-compat",
+          "sqlite_equivalent": "create_task_with_phases",
+          "priority": "LOW - marked with TODO for future cleanup"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:24.964569",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "critical",
+        "message": "TOCTOU Race Condition in deploy_claude_tmux_agent (real_mcp_server.py:1027-1033 vs 1155+): check_can_spawn_agent() checks constraints BUT returns BEFORE agent is inserted. Between check (line 1027-1033) and INSERT (via deploy_agent_atomic called later around line 1155+), another concurrent request can pass the same check. Both will think they can spawn, causing duplicate agents that violate max_concurrent/max_agents limits.",
+        "data": {
+          "file": "real_mcp_server.py + state_db.py",
+          "pattern": "TOCTOU",
+          "check_location": "real_mcp_server.py:1027-1033",
+          "insert_location": "deploy_agent_atomic in state_db.py:2144-2190",
+          "risk": "duplicate_agents_beyond_limits"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:21.255525",
+        "agent_id": "error-handler-audito-115409-44d39b",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "30+ bare 'except:' blocks that catch ALL exceptions including KeyboardInterrupt and SystemExit. These prevent proper error propagation and debugging. Critical locations: orchestrator/status.py:229,236 (silent pass), orchestrator/lifecycle.py:479,595,520,628,653 (returns generic errors), real_mcp_server.py:2920,2834,2853,2940 (continue on failure), orchestrator/state_db.py:2732,2922,3005 (fallback to empty data)",
+        "data": {
+          "bare_except_locations": [
+            "orchestrator/status.py:229,236",
+            "orchestrator/lifecycle.py:479,595,520,628,653,758,780",
+            "orchestrator/coordination.py:267",
+            "orchestrator/workspace.py:375",
+            "orchestrator/prompts.py:159",
+            "orchestrator/state_db.py:2732,2922,3005",
+            "orchestrator/registry.py:995,1054,1070",
+            "orchestrator/health_daemon.py:327",
+            "real_mcp_server.py:1629,1647,2193,2834,2853,2920,2940,3036,3061,3160,3182,3983,4001,4827,5623"
+          ],
+          "risk": "Catches KeyboardInterrupt, SystemExit, MemoryError - prevents graceful shutdown and proper debugging",
+          "recommendation": "Replace with 'except Exception as e:' and log the exception details"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:56:03.239898",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "medium",
+        "message": "health_daemon.py:788,837,897 - LockedRegistryFile still used for global registry updates. These JSON file locks are NOT migrated to SQLite despite the migration effort. Can cause lock contention when health daemon runs concurrently with MCP server operations.",
+        "data": {
+          "file": "orchestrator/health_daemon.py",
+          "lines": "788, 837, 897",
+          "pattern": "json_file_locks",
+          "risk": "lock_contention"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      },
+      {
+        "timestamp": "2026-01-13T11:55:57.409954",
+        "agent_id": "race-condition-hunte-115400-cfc373",
+        "finding_type": "issue",
+        "severity": "high",
+        "message": "lifecycle.py:990-1118 - NESTED LockedRegistryFile pattern still in use. Main lock at line 990, then NESTED locks at lines 1085 and 1100 for cleanup result updates. If cleanup fails, inner lock acquisition at 1100 can deadlock if same process already holds outer lock (reentrant lock scenario depends on fcntl implementation).",
+        "data": {
+          "file": "orchestrator/lifecycle.py",
+          "lines": "990, 1085, 1100, 1118",
+          "pattern": "nested_locks",
+          "risk": "potential_deadlock"
+        },
+        "phase_id": "phase-0",
+        "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+      }
+    ]
+  },
+  "all_findings": [
+    {
+      "timestamp": "2026-01-13T11:58:46.970255",
+      "agent_id": "review-flow-auditor-115404-8d0c0d",
+      "finding_type": "recommendation",
+      "severity": "critical",
+      "message": "REVIEW FLOW AUDIT SUMMARY - 5 bugs found: (1) CRITICAL: needs_revision verdict ignored in aggregation - always approved (state_db.py:2382-2390); (2) HIGH: Duplicate verdicts allowed - no UNIQUE constraint (state_db.py:308-318); (3) HIGH: No reviewer authorization check (real_mcp_server.py:5253-5268); (4) MEDIUM: abort_stalled_review uses stale phase data (real_mcp_server.py:5593-5615); (5) MEDIUM: finalize_review never uses REJECTED status, only REVISING (state_db.py:2449)",
+      "data": {
+        "priority_fixes": [
+          "1. Fix check_review_complete to count needs_revision as rejection",
+          "2. Add UNIQUE(review_id, reviewer_agent_id) to review_verdicts table",
+          "3. Add reviewer authorization check before recording verdict",
+          "4. Re-fetch phase data after abort_review call",
+          "5. Decide REJECTED vs REVISING semantics and be consistent"
+        ]
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:34.072389",
+      "agent_id": "error-handler-audito-115409-44d39b",
+      "finding_type": "insight",
+      "severity": "medium",
+      "message": "POSITIVE: SQLite transaction handling is GOOD. All BEGIN IMMEDIATE blocks properly paired with COMMIT/ROLLBACK in except handlers (state_db.py:491-559, 2150-2187, 2305-2343, 2420-2485). No leaked transactions or missing rollbacks found. The SQLite layer has proper atomic operation handling.",
+      "data": {
+        "verified_functions": [
+          "create_task_sqlite (491-559)",
+          "record_agent_sqlite (2150-2187)",
+          "record_review_verdict (2305-2343)",
+          "finalize_review_and_advance (2420-2485)"
+        ],
+        "pattern": "BEGIN IMMEDIATE \u2192 try/except \u2192 COMMIT on success, ROLLBACK on exception",
+        "assessment": "SQLite operations have robust error handling",
+        "note": "This is a strength of the codebase - the database layer is well-designed"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:27.203820",
+      "agent_id": "review-flow-auditor-115404-8d0c0d",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "INCONSISTENCY: finalize_review never sets REJECTED status (state_db.py:2449). When final_verdict='rejected', finalize_review sets phase to 'REVISING', but health_daemon.py:997 sets to 'REJECTED'. The state machine defines REJECTED as valid (line 62), but normal flow never uses it. May confuse state tracking.",
+      "data": {
+        "file1": "orchestrator/state_db.py",
+        "line1": "2449",
+        "file2": "orchestrator/health_daemon.py",
+        "line2": "997",
+        "impact": "Phase state inconsistency between review paths",
+        "suggestion": "Decide if REJECTED should exist - if yes, use it in finalize_review; if no, remove from state machine"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:23.601525",
+      "agent_id": "error-handler-audito-115409-44d39b",
+      "finding_type": "recommendation",
+      "severity": "high",
+      "message": "ARCHITECTURE: Mixed error handling strategy causes inconsistency. Some functions raise exceptions (good), others return {\"success\": False, \"error\": str} dicts (acceptable for MCP tools), others return None (bad). No consistent Result type or error hierarchy. Recommendation: (1) Define Result[T, E] type for fallible operations, (2) Replace bare 'except:' with 'except Exception:', (3) Always log exception details before swallowing, (4) Document which functions raise vs return errors",
+      "data": {
+        "patterns_found": {
+          "raising": "Migration functions, some SQLite ops",
+          "returning_dict": "MCP tool functions, some utility functions",
+          "returning_none": "File readers, helper functions"
+        },
+        "consistency_score": "3/10 - very inconsistent",
+        "recommendation_priority": "HIGH - establish consistent error handling conventions before more code is written",
+        "suggested_approach": "Use Result type pattern from Rust/TypeScript for fallible operations, reserve exceptions for truly exceptional conditions"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:17.196329",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "recommendation",
+      "severity": "critical",
+      "message": "RACE CONDITION FIX SUMMARY: (1) TOCTOU in deploy - merge check_can_spawn_agent and deploy_agent_atomic into single transaction with INSERT...SELECT WHERE; (2) TOCTOU in phase review - merge get_phase + update_phase_status into atomic claim like claim_phase_for_review; (3) NESTED LOCKS in lifecycle.py - refactor to single lock or migrate to SQLite; (4) GLOBAL REGISTRY - migrate remaining LockedRegistryFile usages in health_daemon.py to SQLite; (5) REVIEW FINALIZATION - add claim_review_finalization() to prevent double finalize.",
+      "data": {
+        "total_issues": 7,
+        "critical": 1,
+        "high": 4,
+        "medium": 2,
+        "fix_pattern": "Atomic check-and-modify operations using SQLite transactions or fcntl-based claims"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:11.948375",
+      "agent_id": "error-handler-audito-115409-44d39b",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "health_daemon.py:271-291 _read_last_jsonl_entry duplicates same pattern as state_db.py - returns None on ALL exceptions. Also at line 252 catches Exception and sets agent=None silently, then continues loop. This masks real errors like permission denied or corrupted files in health checks.",
+      "data": {
+        "affected_functions": [
+          "health_daemon.py:271-291 (_read_last_jsonl_entry)",
+          "health_daemon.py:252-253 (get_agent exception handler)"
+        ],
+        "pattern": "catch Exception \u2192 return None or continue",
+        "impact": "Health monitoring silently fails without alerting operators",
+        "recommendation": "Log specific exception types before returning None, distinguish between expected (file not found) vs unexpected (corruption) errors"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:07.918667",
+      "agent_id": "review-flow-auditor-115404-8d0c0d",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "SECURITY: No validation of reviewer authorization (real_mcp_server.py:5253-5268, state_db.py:2305-2320). submit_review_verdict and record_review_verdict don't verify: (1) review_id exists in reviews table, (2) reviewer_agent_id is in that review's reviewer_agent_ids. Any agent can submit verdicts to any review.",
+      "data": {
+        "file1": "real_mcp_server.py",
+        "function1": "submit_review_verdict",
+        "file2": "orchestrator/state_db.py",
+        "function2": "record_review_verdict",
+        "impact": "Unauthorized agents can manipulate review outcomes",
+        "fix": "Add validation: SELECT review_id FROM reviews WHERE review_id=? AND reviewer_agent_ids LIKE ?"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:05.630749",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "Potential race in submit_review_verdict (real_mcp_server.py:5271-5305): check_review_complete is called AFTER record_review_verdict's transaction commits. If two reviewers submit at same time, both could see is_complete=True and both could call finalize_review. While SQLite likely handles this via transactions, the finalize_review could be called twice. Should verify finalize_review is idempotent or add atomic claim mechanism like claim_phase_for_review.",
+      "data": {
+        "file": "real_mcp_server.py",
+        "function": "submit_review_verdict",
+        "lines": "5271-5305",
+        "pattern": "double_finalization",
+        "risk": "duplicate_phase_transitions"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:58:04.898507",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "recommendation",
+      "severity": "critical",
+      "message": "MIGRATION PRIORITY SUMMARY: Found 14 AGENT_REGISTRY.json references. CRITICAL migrations needed: (1) Line 1941 kill_real_agent, (2) Line 4667 approve_phase_review. HIGH priority: Lines 1518, 2370, 2798, 5675, 5743. MEDIUM: Lines 2915. LOW/Intentional: Lines 766, 2275, 4047, 4121, 4399. All SQLite equivalents exist in state_db.py.",
+      "data": {
+        "total_references": 14,
+        "critical": 2,
+        "high": 5,
+        "medium": 1,
+        "low_intentional": 5,
+        "already_migrated": 1,
+        "migration_blockers": "None - all SQLite functions exist",
+        "estimated_effort": "2-3 hours for critical+high migrations"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:53.637963",
+      "agent_id": "review-flow-auditor-115404-8d0c0d",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "BUG: Duplicate verdicts possible - no unique constraint (state_db.py:308-318). review_verdicts table has no UNIQUE(review_id, reviewer_agent_id) constraint. Same reviewer can submit multiple verdicts, inflating verdict counts. check_review_complete() line 2379 just counts all verdicts, so 1 reviewer submitting 2x = looks like 2 reviewers.",
+      "data": {
+        "file": "orchestrator/state_db.py",
+        "function": "CREATE TABLE review_verdicts",
+        "lines": "308-318",
+        "fix": "Add UNIQUE(review_id, reviewer_agent_id) constraint to table schema"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:48.978325",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "Line 5743-5751: FULL READ in get_health_status. Reads entire registry to get agents list for health monitoring. Should migrate to get_agents_for_task (state_db.py:2014) which queries SQLite agents table directly.",
+      "data": {
+        "line": 5743,
+        "operation": "READ",
+        "status": "needs-migration",
+        "sqlite_equivalent": "get_agents_for_task (state_db.py:2014)",
+        "priority": "HIGH - health monitoring reads entire registry frequently"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:43.630355",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "Line 5675-5689: FULL READ in get_phase_handover. Reads entire registry to access phases array and get phase_id. Should migrate to get_phase (state_db.py:2974) which retrieves phase data directly from SQLite.",
+      "data": {
+        "line": 5675,
+        "operation": "READ",
+        "status": "needs-migration",
+        "sqlite_equivalent": "get_phase (state_db.py:2974)",
+        "priority": "HIGH - handover is critical for phase transitions"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:37.342940",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "critical",
+      "message": "Line 4667-4677: FULL READ+WRITE with LockedRegistryFile in approve_phase_review. This is a critical phase transition operation using JSON file locking. MUST migrate to SQLite update_phase_status (state_db.py:618) for atomic phase approval.",
+      "data": {
+        "line": 4667,
+        "operation": "READ+WRITE",
+        "status": "needs-migration",
+        "sqlite_equivalent": "update_phase_status (state_db.py:618)",
+        "priority": "CRITICAL - phase transitions must be atomic in SQLite"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:31.386994",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "insight",
+      "severity": "low",
+      "message": "Lines 4121, 4399: SQLITE-BACKED reads in get_phase_status and check_phase_progress. These functions read registry_path for existence check but comment says \"SQLite-backed phase view (JSONL truth)\". The registry path is used for validation but data comes from SQLite. Already migrated.",
+      "data": {
+        "lines": [
+          4121,
+          4399
+        ],
+        "operation": "READ",
+        "status": "already-migrated",
+        "sqlite_equivalent": "load_task_snapshot, get_phase",
+        "priority": "NONE - already using SQLite"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:28.121182",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "list_real_tasks (real_mcp_server.py:3936-3937) reads GLOBAL_REGISTRY.json without any locking. Concurrent writes to this file (by health_daemon or lifecycle.py) can cause partial reads, resulting in JSON parse errors or inconsistent data. Should migrate to SQLite or use LockedRegistryFile for reads too.",
+      "data": {
+        "file": "real_mcp_server.py",
+        "function": "list_real_tasks",
+        "lines": "3936-3937",
+        "pattern": "unlocked_read",
+        "risk": "partial_read_corruption"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:23.477125",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "low",
+      "message": "Line 4047-4049: DISCOVERY READ in health monitoring daemon. Scans workspace for AGENT_REGISTRY.json files to find all tasks. This is a discovery operation, acceptable for health daemon background scanning.",
+      "data": {
+        "line": 4047,
+        "operation": "READ",
+        "status": "intentional-discovery",
+        "sqlite_equivalent": "Could use global registry but glob is acceptable",
+        "priority": "LOW - health daemon background task"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:20.078091",
+      "agent_id": "review-flow-auditor-115404-8d0c0d",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "BUG: abort_stalled_review reads stale data (real_mcp_server.py:5593-5601). After aborting review in SQLite (line 5586), it reads task_snapshot from SQLite for phase info but accesses 'phases' which contains stale status. The abort_review() doesn't update task_snapshot, so current_phase status check at line 5603 uses old data.",
+      "data": {
+        "file": "real_mcp_server.py",
+        "function": "abort_stalled_review",
+        "lines": "5593-5615",
+        "impact": "Phase status determination after abort may use pre-abort status"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:17.442308",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "Line 2915-2929: READ in update_agent_progress for peer coordination. Reads registry to show peer progress/findings. This is coordination data, could migrate to SQLite load_recent_progress_latest (state_db.py:1222) but current implementation works.",
+      "data": {
+        "line": 2915,
+        "operation": "READ",
+        "status": "could-migrate",
+        "sqlite_equivalent": "load_recent_progress_latest (state_db.py:1222)",
+        "priority": "MEDIUM - works but could be more efficient"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:17.420459",
+      "agent_id": "error-handler-audito-115409-44d39b",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "Functions returning None/empty data on any exception - makes debugging impossible. state_db.py:405-417 (_read_json_with_retries), 420-439 (_read_last_jsonl_entry) catch ALL exceptions and return None. Cannot distinguish file-not-found vs corrupted-file vs permission-denied. Callers receive None and proceed with empty data, masking real errors.",
+      "data": {
+        "affected_functions": [
+          "_read_json_with_retries (state_db.py:405-417)",
+          "_read_last_jsonl_entry (state_db.py:420-439)"
+        ],
+        "pattern": "catch Exception \u2192 return None",
+        "impact": "Silent data loss, impossible to debug file access issues, corrupted state goes unnoticed",
+        "recommendation": "Return Result type or raise specific exceptions for different failure modes"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:10.643299",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "Line 2798-2809: FULL READ in get_task_findings. Reads entire registry then iterates agents to collect findings. Should migrate to get_agent_findings (state_db.py:1344) which queries SQLite directly with filters.",
+      "data": {
+        "line": 2798,
+        "operation": "READ",
+        "status": "needs-migration",
+        "sqlite_equivalent": "get_agent_findings (state_db.py:1344)",
+        "priority": "HIGH - inefficient full registry read, SQLite has filtered query"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:57:05.424715",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "Multiple paths calling _auto_spawn_phase_reviewers can race (real_mcp_server.py:3532-3542 + 3587-3594): Both the main path (line 3587) and the retry worker thread (line 3532) can call _auto_spawn_phase_reviewers. While claim_phase_for_review() prevents duplicate spawns WITHIN this function, the retry worker checks _maybe_auto_submit_phase_for_review_sqlite() first (which has its own race condition reported earlier). Multiple agents completing + retry workers = multiple code paths trying to transition/spawn.",
+      "data": {
+        "file": "real_mcp_server.py",
+        "lines": "3532, 3587",
+        "pattern": "multiple_spawn_paths",
+        "risk": "concurrent_spawn_attempts"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:59.513121",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "Line 2370-2379: FULL READ with LockedRegistryFile in get_agent_output. Reads registry to find agent by ID. Should migrate to SQLite get_agent_by_id (state_db.py:2038) which is atomic and doesn't require file locking.",
+      "data": {
+        "line": 2370,
+        "operation": "READ",
+        "status": "needs-migration",
+        "sqlite_equivalent": "get_agent_by_id (state_db.py:2038)",
+        "priority": "HIGH - uses file locking, SQLite is lock-free"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:53.671685",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "low",
+      "message": "Line 2275-2278: BEST-EFFORT READ in get_phase_status. Used only for non-critical fields (hierarchy/spiral/limits). Has proper try-catch fallback to empty dict. This is acceptable as documented best-effort metadata cache.",
+      "data": {
+        "line": 2275,
+        "operation": "READ",
+        "status": "intentional-best-effort",
+        "sqlite_equivalent": "Not needed - metadata only",
+        "priority": "LOW - documented as best-effort cache"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:53.114717",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "TOCTOU in _maybe_auto_submit_phase_for_review_sqlite (real_mcp_server.py:3463-3488): Reads phase status at line 3474-3480 (get_phase), then updates status at 3484-3488 (update_phase_status). Race window exists where two concurrent agents completing could both read 'ACTIVE' status, both pass the check, and both try to update to 'AWAITING_REVIEW'. This can cause duplicate reviewer spawn attempts.",
+      "data": {
+        "file": "real_mcp_server.py",
+        "function": "_maybe_auto_submit_phase_for_review_sqlite",
+        "lines": "3463-3488",
+        "pattern": "TOCTOU",
+        "risk": "duplicate_review_submissions"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:47.238997",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "critical",
+      "message": "Line 1941-1949: FULL READ in kill_real_agent. Reads entire AGENT_REGISTRY.json to find agent by ID. This MUST be migrated to SQLite get_agent_by_id which already exists in state_db.py line 2038.",
+      "data": {
+        "line": 1941,
+        "operation": "READ",
+        "status": "needs-migration",
+        "sqlite_equivalent": "get_agent_by_id (state_db.py:2038)",
+        "priority": "CRITICAL - core operation, SQLite function already exists"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:41.498320",
+      "agent_id": "review-flow-auditor-115404-8d0c0d",
+      "finding_type": "issue",
+      "severity": "critical",
+      "message": "BUG: 'needs_revision' verdict ignored in aggregation (state_db.py:2382-2390). check_review_complete() only counts 'approved' and 'rejected' verdicts. If both reviewers submit 'needs_revision', final verdict becomes 'approved' (0 approve >= 0 reject = ties go to approved). This bypasses the entire revision flow.",
+      "data": {
+        "file": "orchestrator/state_db.py",
+        "function": "check_review_complete",
+        "lines": "2382-2390",
+        "impact": "If reviewers use 'needs_revision' verdict, the phase is incorrectly approved instead of requiring revisions"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/review-flow-auditor-115404-8d0c0d_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:41.320732",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "Line 1518-1525: FALLBACK READ in deploy_claude_tmux_agent. When SQLite load_task_snapshot fails, falls back to reading AGENT_REGISTRY.json. This should be migrated - if SQLite is empty, the task doesn't exist, not a valid fallback scenario.",
+      "data": {
+        "line": 1518,
+        "operation": "READ",
+        "status": "needs-migration",
+        "sqlite_equivalent": "load_task_snapshot should be authoritative",
+        "priority": "HIGH - fallback defeats SQLite as source of truth"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:35.004730",
+      "agent_id": "sqlite-migration-che-115406-83d900",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "Line 766: BACKWARD COMPAT write to AGENT_REGISTRY.json in create_real_task. This is intentional for legacy components still reading JSON, but marked with TODO for removal. SQLite equivalent: create_task_with_phases in state_db.py already handles the real write.",
+      "data": {
+        "line": 766,
+        "operation": "WRITE",
+        "status": "intentional-compat",
+        "sqlite_equivalent": "create_task_with_phases",
+        "priority": "LOW - marked with TODO for future cleanup"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/sqlite-migration-che-115406-83d900_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:24.964569",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "critical",
+      "message": "TOCTOU Race Condition in deploy_claude_tmux_agent (real_mcp_server.py:1027-1033 vs 1155+): check_can_spawn_agent() checks constraints BUT returns BEFORE agent is inserted. Between check (line 1027-1033) and INSERT (via deploy_agent_atomic called later around line 1155+), another concurrent request can pass the same check. Both will think they can spawn, causing duplicate agents that violate max_concurrent/max_agents limits.",
+      "data": {
+        "file": "real_mcp_server.py + state_db.py",
+        "pattern": "TOCTOU",
+        "check_location": "real_mcp_server.py:1027-1033",
+        "insert_location": "deploy_agent_atomic in state_db.py:2144-2190",
+        "risk": "duplicate_agents_beyond_limits"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:21.255525",
+      "agent_id": "error-handler-audito-115409-44d39b",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "30+ bare 'except:' blocks that catch ALL exceptions including KeyboardInterrupt and SystemExit. These prevent proper error propagation and debugging. Critical locations: orchestrator/status.py:229,236 (silent pass), orchestrator/lifecycle.py:479,595,520,628,653 (returns generic errors), real_mcp_server.py:2920,2834,2853,2940 (continue on failure), orchestrator/state_db.py:2732,2922,3005 (fallback to empty data)",
+      "data": {
+        "bare_except_locations": [
+          "orchestrator/status.py:229,236",
+          "orchestrator/lifecycle.py:479,595,520,628,653,758,780",
+          "orchestrator/coordination.py:267",
+          "orchestrator/workspace.py:375",
+          "orchestrator/prompts.py:159",
+          "orchestrator/state_db.py:2732,2922,3005",
+          "orchestrator/registry.py:995,1054,1070",
+          "orchestrator/health_daemon.py:327",
+          "real_mcp_server.py:1629,1647,2193,2834,2853,2920,2940,3036,3061,3160,3182,3983,4001,4827,5623"
+        ],
+        "risk": "Catches KeyboardInterrupt, SystemExit, MemoryError - prevents graceful shutdown and proper debugging",
+        "recommendation": "Replace with 'except Exception as e:' and log the exception details"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/error-handler-audito-115409-44d39b_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:56:03.239898",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "medium",
+      "message": "health_daemon.py:788,837,897 - LockedRegistryFile still used for global registry updates. These JSON file locks are NOT migrated to SQLite despite the migration effort. Can cause lock contention when health daemon runs concurrently with MCP server operations.",
+      "data": {
+        "file": "orchestrator/health_daemon.py",
+        "lines": "788, 837, 897",
+        "pattern": "json_file_locks",
+        "risk": "lock_contention"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    },
+    {
+      "timestamp": "2026-01-13T11:55:57.409954",
+      "agent_id": "race-condition-hunte-115400-cfc373",
+      "finding_type": "issue",
+      "severity": "high",
+      "message": "lifecycle.py:990-1118 - NESTED LockedRegistryFile pattern still in use. Main lock at line 990, then NESTED locks at lines 1085 and 1100 for cleanup result updates. If cleanup fails, inner lock acquisition at 1100 can deadlock if same process already holds outer lock (reentrant lock scenario depends on fcntl implementation).",
+      "data": {
+        "file": "orchestrator/lifecycle.py",
+        "lines": "990, 1085, 1100, 1118",
+        "pattern": "nested_locks",
+        "risk": "potential_deadlock"
+      },
+      "phase_id": "phase-0",
+      "source_file": ".agent-workspace/TASK-20260113-115259-3b48d679/archive/race-condition-hunte-115400-cfc373_findings.jsonl"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "phase_id": "phase-0",
+  "generated_at": "2026-01-20T20:38:27.870208",
+  "total_findings": 1,
+  "findings_by_severity": {
+    "low": [
+      {
+        "timestamp": "2026-01-20T20:36:52.180668",
+        "agent_id": "investigator-203633-90067d",
+        "finding_type": "insight",
+        "severity": "low",
+        "message": "debug test complete",
+        "data": {
+          "test_type": "debug",
+          "agent_type": "investigator",
+          "completion_status": "success"
+        },
+        "phase_id": "phase-0",
+        "source_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-203627-81314c69/archive/investigator-203633-90067d_findings.jsonl"
+      }
+    ]
+  },
+  "findings_by_type": {
+    "insight": [
+      {
+        "timestamp": "2026-01-20T20:36:52.180668",
+        "agent_id": "investigator-203633-90067d",
+        "finding_type": "insight",
+        "severity": "low",
+        "message": "debug test complete",
+        "data": {
+          "test_type": "debug",
+          "agent_type": "investigator",
+          "completion_status": "success"
+        },
+        "phase_id": "phase-0",
+        "source_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-203627-81314c69/archive/investigator-203633-90067d_findings.jsonl"
+      }
+    ]
+  },
+  "all_findings": [
+    {
+      "timestamp": "2026-01-20T20:36:52.180668",
+      "agent_id": "investigator-203633-90067d",
+      "finding_type": "insight",
+      "severity": "low",
+      "message": "debug test complete",
+      "data": {
+        "test_type": "debug",
+        "agent_type": "investigator",
+        "completion_status": "success"
+      },
+      "phase_id": "phase-0",
+      "source_file": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-203627-81314c69/archive/investigator-203633-90067d_findings.jsonl"
+    }
+  ]
+}

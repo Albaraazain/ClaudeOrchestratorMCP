@@ -1,0 +1,1 @@
+{"timestamp": "2026-01-20T20:36:52.180668", "agent_id": "investigator-203633-90067d", "finding_type": "insight", "severity": "low", "message": "debug test complete", "data": {"test_type": "debug", "agent_type": "investigator", "completion_status": "success"}}

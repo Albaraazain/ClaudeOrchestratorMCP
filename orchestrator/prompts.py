@@ -576,6 +576,112 @@ def get_type_specific_requirements(agent_type: str) -> str:
         return get_universal_protocol()
 
 
+def format_previous_phase_handover(
+    workspace: str,
+    current_phase_index: int
+) -> str:
+    """
+    Format handover context from previous phases for injection into agent prompts.
+
+    This is CRITICAL for phase continuity - ensures agents in later phases
+    have full context from previous phases without data loss.
+
+    Args:
+        workspace: Path to task workspace directory
+        current_phase_index: The phase this agent is being deployed to
+
+    Returns:
+        Formatted markdown section with previous phase findings, or empty string
+        if this is phase 0 or no handover exists.
+    """
+    import os
+    import json
+
+    # Phase 0 agents have no previous phase to read from
+    if current_phase_index <= 0:
+        return ""
+
+    handover_sections = []
+
+    # Check each previous phase for handover data
+    for prev_phase_idx in range(current_phase_index):
+        phase_id = f"phase-{prev_phase_idx}"
+        handovers_dir = os.path.join(workspace, "handovers")
+
+        # Try to load full findings JSON (preserves all detail)
+        findings_path = os.path.join(handovers_dir, f"{phase_id}-findings.json")
+        handover_md_path = os.path.join(handovers_dir, f"{phase_id}-handover.md")
+
+        if os.path.exists(findings_path):
+            try:
+                with open(findings_path, 'r') as f:
+                    findings_data = json.load(f)
+
+                # Format key findings for prompt injection
+                all_findings = findings_data.get('all_findings', [])
+                if all_findings:
+                    # Prioritize high/critical findings, then include others
+                    high_priority = [f for f in all_findings if f.get('severity') in ('critical', 'high')]
+                    medium = [f for f in all_findings if f.get('severity') == 'medium'][:5]
+
+                    findings_text = []
+                    for finding in (high_priority + medium)[:15]:  # Limit to prevent token overflow
+                        severity = finding.get('severity', 'unknown').upper()
+                        ftype = finding.get('finding_type', 'info')
+                        message = finding.get('message', '')[:200]  # Truncate long messages
+                        findings_text.append(f"  - [{severity}] {ftype}: {message}")
+
+                    if findings_text:
+                        handover_sections.append(f"""
+### Phase {prev_phase_idx + 1} Findings (from handover)
+{chr(10).join(findings_text)}
+""")
+            except Exception:
+                pass  # Silently skip malformed handover files
+
+        # Also include handover markdown summary if exists
+        if os.path.exists(handover_md_path):
+            try:
+                with open(handover_md_path, 'r') as f:
+                    # Read just the summary section (first 50 lines max)
+                    lines = f.readlines()[:50]
+                    summary_lines = []
+                    in_summary = False
+                    for line in lines:
+                        if '## Summary' in line:
+                            in_summary = True
+                            continue
+                        if in_summary and line.startswith('## '):
+                            break
+                        if in_summary:
+                            summary_lines.append(line.rstrip())
+
+                    if summary_lines:
+                        summary_text = '\n'.join(summary_lines).strip()
+                        if summary_text:
+                            handover_sections.append(f"""
+### Phase {prev_phase_idx + 1} Summary
+{summary_text[:500]}
+""")
+            except Exception:
+                pass
+
+    if not handover_sections:
+        return ""
+
+    return f"""
+═══════════════════════════════════════════════════════════════════════════════
+📋 PREVIOUS PHASE HANDOVER - READ BEFORE STARTING
+═══════════════════════════════════════════════════════════════════════════════
+
+⚠️ MANDATORY: You MUST build on previous phase findings. Do NOT ignore or duplicate this work.
+
+{''.join(handover_sections)}
+
+📂 For complete details, read: {workspace}/handovers/
+"""
+
+
 __all__ = [
     'generate_specialization_recommendations',
     'format_task_enrichment_prompt',
@@ -585,4 +691,5 @@ __all__ = [
     'get_fixer_requirements',
     'get_universal_protocol',
     'get_type_specific_requirements',
+    'format_previous_phase_handover',
 ]

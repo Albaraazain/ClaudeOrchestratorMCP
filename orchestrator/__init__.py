@@ -83,6 +83,13 @@ from .prompts import (
     get_fixer_requirements,
     get_universal_protocol,
     get_type_specific_requirements,
+    format_previous_phase_handover,
+)
+
+from .context_accumulator import (
+    TaskContextAccumulator,
+    build_task_context_accumulator,
+    format_accumulated_context,
 )
 
 from .deployment import (
@@ -285,6 +292,11 @@ __all__ = [
     'get_fixer_requirements',
     'get_universal_protocol',
     'get_type_specific_requirements',
+    'format_previous_phase_handover',
+    # Context Accumulator (Jan 2026)
+    'TaskContextAccumulator',
+    'build_task_context_accumulator',
+    'format_accumulated_context',
     # Deployment
     'check_tmux_available',
     'create_tmux_session',
