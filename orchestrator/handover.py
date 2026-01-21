@@ -798,73 +798,97 @@ def get_previous_handover(task_workspace: str, current_phase_id: str) -> Optiona
 def collect_phase_findings(
     task_workspace: str,
     phase_id: str,
-    registry: Dict[str, Any]
+    registry: Dict[str, Any],
+    phase_index: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
     Collect all findings from agents in a specific phase.
 
-    Reads findings from {task_workspace}/findings/{agent_id}_findings.jsonl
-    for all agents bound to the specified phase.
+    Reads findings from BOTH:
+    - {task_workspace}/findings/{agent_id}_findings.jsonl (active findings)
+    - {task_workspace}/archive/{agent_id}_findings.jsonl (archived findings)
 
     Args:
         task_workspace: Path to task workspace directory
         phase_id: Phase ID to collect findings for
         registry: Registry dictionary containing agent data
+        phase_index: Optional phase index for matching (if phase_id matching fails)
 
     Returns:
         List of finding dictionaries sorted by timestamp (newest first)
     """
     findings = []
-    findings_dir = os.path.join(task_workspace, "findings")
 
-    if not os.path.exists(findings_dir):
-        logger.debug(f"Findings directory does not exist: {findings_dir}")
+    # Search BOTH findings/ and archive/ directories
+    findings_dir = os.path.join(task_workspace, "findings")
+    archive_dir = os.path.join(task_workspace, "archive")
+
+    search_dirs = []
+    if os.path.exists(findings_dir):
+        search_dirs.append(findings_dir)
+    if os.path.exists(archive_dir):
+        search_dirs.append(archive_dir)
+
+    if not search_dirs:
+        logger.debug(f"No findings or archive directories exist in: {task_workspace}")
         return findings
 
-    # Get all agents bound to this phase
-    phase_agents = [
-        agent for agent in registry.get('agents', [])
-        if agent.get('phase_id') == phase_id
-    ]
+    # Get all agents bound to this phase - support both phase_id and phase_index matching
+    phase_agents = []
+    for agent in registry.get('agents', []):
+        # Match by phase_id
+        if agent.get('phase_id') == phase_id:
+            phase_agents.append(agent)
+        # Also match by phase_index if provided
+        elif phase_index is not None and agent.get('phase_index') == phase_index:
+            phase_agents.append(agent)
 
     agent_ids = {agent.get('id') for agent in phase_agents}
-    logger.debug(f"Collecting findings for {len(agent_ids)} agents in phase {phase_id}")
+    logger.debug(f"Collecting findings for {len(agent_ids)} agents in phase {phase_id} (index={phase_index})")
 
-    # Read findings from each agent's findings file
-    for filename in os.listdir(findings_dir):
-        if not filename.endswith('_findings.jsonl'):
-            continue
+    # If no agents found by phase matching, collect ALL findings as fallback
+    # This handles cases where phase association wasn't properly recorded
+    collect_all = len(agent_ids) == 0
+    if collect_all:
+        logger.warning(f"No agents found for phase {phase_id}, collecting ALL findings as fallback")
 
-        # Extract agent_id from filename
-        agent_id = filename.replace('_findings.jsonl', '')
+    # Read findings from each directory
+    for search_dir in search_dirs:
+        for filename in os.listdir(search_dir):
+            if not filename.endswith('_findings.jsonl'):
+                continue
 
-        # Only include findings from agents in this phase
-        if agent_id not in agent_ids:
-            continue
+            # Extract agent_id from filename
+            agent_id = filename.replace('_findings.jsonl', '')
 
-        findings_file = os.path.join(findings_dir, filename)
-        try:
-            with open(findings_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        finding = json.loads(line)
-                        # Ensure phase_id is tagged
-                        finding['phase_id'] = phase_id
-                        findings.append(finding)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in findings file {filename}: {e}")
-                        continue
-        except Exception as e:
-            logger.warning(f"Error reading findings file {filename}: {e}")
-            continue
+            # Filter by phase agents unless collecting all
+            if not collect_all and agent_id not in agent_ids:
+                continue
+
+            findings_file = os.path.join(search_dir, filename)
+            try:
+                with open(findings_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            finding = json.loads(line)
+                            # Tag with phase info
+                            finding['phase_id'] = phase_id
+                            finding['source_file'] = findings_file
+                            findings.append(finding)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSON in findings file {filename}: {e}")
+                            continue
+            except Exception as e:
+                logger.warning(f"Error reading findings file {filename}: {e}")
+                continue
 
     # Sort by timestamp (newest first)
     findings.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
 
-    logger.info(f"Collected {len(findings)} findings for phase {phase_id}")
+    logger.info(f"Collected {len(findings)} findings for phase {phase_id} from {len(search_dirs)} directories")
     return findings
 
 
@@ -1155,11 +1179,72 @@ def generate_recommendations(
     return unique_recommendations
 
 
+def _save_full_findings_for_handover(
+    task_workspace: str,
+    phase_id: str,
+    findings: List[Dict[str, Any]]
+) -> Optional[str]:
+    """
+    Save complete findings data to JSON file for next phase agents to read.
+
+    This preserves ALL finding detail (not summaries) so agents in the next phase
+    can access full context without data loss.
+
+    Args:
+        task_workspace: Path to task workspace directory
+        phase_id: ID of the phase
+        findings: List of all finding dictionaries
+
+    Returns:
+        Path to saved JSON file, or None if save failed
+    """
+    try:
+        handovers_dir = os.path.join(task_workspace, "handovers")
+        os.makedirs(handovers_dir, exist_ok=True)
+
+        # Save full findings data
+        findings_path = os.path.join(handovers_dir, f"{phase_id}-findings.json")
+
+        # Structure the findings data for easy agent consumption
+        findings_data = {
+            "phase_id": phase_id,
+            "generated_at": datetime.now().isoformat(),
+            "total_findings": len(findings),
+            "findings_by_severity": {},
+            "findings_by_type": {},
+            "all_findings": findings  # Full data preserved
+        }
+
+        # Categorize findings
+        for finding in findings:
+            severity = finding.get("severity", "unknown")
+            finding_type = finding.get("finding_type", "unknown")
+
+            if severity not in findings_data["findings_by_severity"]:
+                findings_data["findings_by_severity"][severity] = []
+            findings_data["findings_by_severity"][severity].append(finding)
+
+            if finding_type not in findings_data["findings_by_type"]:
+                findings_data["findings_by_type"][finding_type] = []
+            findings_data["findings_by_type"][finding_type].append(finding)
+
+        with open(findings_path, 'w') as f:
+            json.dump(findings_data, f, indent=2, default=str)
+
+        logger.info(f"Saved {len(findings)} full findings to {findings_path}")
+        return findings_path
+
+    except Exception as e:
+        logger.error(f"Failed to save full findings for handover: {e}")
+        return None
+
+
 def auto_generate_handover(
     task_workspace: str,
     phase_id: str,
     phase_name: str,
-    registry: Dict[str, Any]
+    registry: Dict[str, Any],
+    phase_index: Optional[int] = None
 ) -> HandoverDocument:
     """
     Auto-generate a handover document from phase data.
@@ -1174,14 +1259,25 @@ def auto_generate_handover(
         phase_id: ID of the phase to generate handover for
         phase_name: Human-readable name of the phase
         registry: Registry dictionary containing phase and agent data
+        phase_index: Optional phase index for better agent matching
 
     Returns:
         HandoverDocument with all fields populated from phase data
     """
     logger.info(f"Auto-generating handover for phase {phase_id} ({phase_name})")
 
-    # Collect all findings for this phase
-    findings = collect_phase_findings(task_workspace, phase_id, registry)
+    # Extract phase_index from phase_id if not provided (e.g., "phase-0" -> 0)
+    if phase_index is None and phase_id.startswith("phase-"):
+        try:
+            phase_index = int(phase_id.split("-")[1])
+        except (IndexError, ValueError):
+            pass
+
+    # Collect all findings for this phase (searches both findings/ and archive/)
+    findings = collect_phase_findings(task_workspace, phase_id, registry, phase_index=phase_index)
+
+    # Save ALL findings to JSON for agents to read (full data, not summaries)
+    _save_full_findings_for_handover(task_workspace, phase_id, findings)
 
     # Calculate phase metrics
     metrics = calculate_phase_metrics(registry, phase_id)

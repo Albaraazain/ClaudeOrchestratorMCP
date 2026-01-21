@@ -78,6 +78,13 @@ from orchestrator.prompts import (
     format_task_enrichment_prompt,
     create_orchestration_guidance_prompt,
     get_type_specific_requirements,
+    format_previous_phase_handover,  # Legacy fallback
+)
+
+# Context accumulator (Jan 2026 - replaces filesystem-based handover)
+from orchestrator.context_accumulator import (
+    build_task_context_accumulator,
+    format_accumulated_context,
 )
 
 # Deployment functions
@@ -1133,6 +1140,24 @@ def deploy_claude_tmux_agent(
     # Get type-specific requirements for this agent type
     type_requirements = get_type_specific_requirements(agent_type)
 
+    # Build accumulated context from SQLite (replaces filesystem-based handover)
+    # This is CRITICAL for phase continuity - ensures agents have full task context
+    try:
+        accumulated_ctx = build_task_context_accumulator(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            current_phase_index=phase_index,
+            max_tokens=2500
+        )
+        handover_context = format_accumulated_context(accumulated_ctx)
+        logger.info(f"CONTEXT-ACCUMULATOR: Built context for {agent_id}, "
+                    f"phase={phase_index}, tokens~{accumulated_ctx.estimated_tokens}, "
+                    f"was_rejected={accumulated_ctx.was_rejected}")
+    except Exception as e:
+        # Fallback to legacy filesystem-based handover if accumulator fails
+        logger.warning(f"CONTEXT-ACCUMULATOR: Failed for {agent_id}, using legacy handover: {e}")
+        handover_context = format_previous_phase_handover(workspace, phase_index)
+
     # Create comprehensive agent prompt with MCP self-reporting capabilities
     agent_prompt = f"""You are a headless Claude agent in an orchestrator system.
 
@@ -1143,11 +1168,13 @@ def deploy_claude_tmux_agent(
 - Parent Agent: {parent}
 - Depth Level: {depth}
 - Workspace: {workspace}
+- Current Phase: {phase_index}
 
 📝 YOUR MISSION:
 {prompt}
 {enrichment_prompt}
 {context_prompt}
+{handover_context}
 
 {type_requirements}
 
@@ -4582,6 +4609,143 @@ def approve_phase_review(
 
 
 # ============================================================================
+# PHASE OUTCOME POPULATION - Context Accumulator Support (Jan 2026)
+# ============================================================================
+
+
+def _populate_phase_outcome(
+    workspace_base: str,
+    task_id: str,
+    phase_index: int,
+    review_id: str,
+    final_verdict: str
+) -> bool:
+    """
+    Populate phase_outcomes table after a review is finalized.
+
+    This stores structured phase results for the context accumulator,
+    enabling later phases to access comprehensive prior phase context.
+
+    Called automatically when submit_review_verdict() finalizes a review.
+
+    Args:
+        workspace_base: Base directory for task workspace
+        task_id: Task identifier
+        phase_index: Index of the phase that was reviewed
+        review_id: ID of the completed review
+        final_verdict: Final verdict (approved, rejected, needs_revision)
+
+    Returns:
+        True if outcome was populated successfully
+    """
+    try:
+        # 1. Get aggregated reviewer notes
+        review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+        review_summary = (review_data.get('reviewer_notes') or '') if review_data else ''
+
+        # 2. Get all verdicts to aggregate findings
+        verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=review_id)
+        all_review_findings = []
+        for verdict in verdicts:
+            findings_json = verdict.get('findings')
+            if findings_json:
+                try:
+                    findings = json.loads(findings_json) if isinstance(findings_json, str) else findings_json
+                    all_review_findings.extend(findings)
+                except Exception:
+                    pass
+
+            # Also include reviewer notes in summary
+            notes = verdict.get('reviewer_notes') or ''
+            if notes and notes not in review_summary:
+                review_summary += f"\n{notes}"
+
+        # 3. Get critical/high severity findings from this phase's agents
+        agent_findings = state_db.get_agent_findings(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            limit=100
+        )
+        critical_findings = []
+        for finding in agent_findings:
+            if finding.get('phase_index') != phase_index:
+                continue
+            if finding.get('severity') in ('critical', 'high'):
+                critical_findings.append({
+                    'finding_type': finding.get('finding_type'),
+                    'severity': finding.get('severity'),
+                    'message': finding.get('message', '')[:200],
+                    'agent_id': finding.get('agent_id'),
+                })
+
+        # 4. Extract key decisions from findings (type='solution' or 'recommendation')
+        key_decisions = []
+        for finding in agent_findings:
+            if finding.get('phase_index') != phase_index:
+                continue
+            if finding.get('finding_type') in ('solution', 'recommendation', 'insight'):
+                key_decisions.append(finding.get('message', '')[:150])
+
+        # Limit to top 10 decisions
+        key_decisions = key_decisions[:10]
+
+        # 5. Extract blockers (only if resolved - i.e., phase was approved)
+        blockers_resolved = []
+        if final_verdict == 'approved':
+            for finding in agent_findings:
+                if finding.get('phase_index') != phase_index:
+                    continue
+                if finding.get('finding_type') == 'blocker':
+                    blockers_resolved.append(finding.get('message', '')[:100])
+
+        # 6. Extract artifacts from finding data
+        artifacts_created = []
+        for finding in agent_findings:
+            if finding.get('phase_index') != phase_index:
+                continue
+            data = finding.get('data', {})
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except Exception:
+                    data = {}
+            if isinstance(data, dict):
+                # Look for file paths in data
+                for key in ('file', 'files', 'path', 'paths', 'created_files', 'modified_files'):
+                    val = data.get(key)
+                    if isinstance(val, str):
+                        artifacts_created.append(val)
+                    elif isinstance(val, list):
+                        artifacts_created.extend([v for v in val if isinstance(v, str)])
+
+        # Remove duplicates and limit
+        artifacts_created = list(set(artifacts_created))[:20]
+
+        # 7. Upsert phase outcome
+        state_db.upsert_phase_outcome(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            phase_index=phase_index,
+            review_verdict=final_verdict,
+            review_summary=review_summary.strip()[:500],  # Limit summary length
+            key_decisions=key_decisions,
+            blockers_resolved=blockers_resolved,
+            critical_findings=critical_findings[:15],  # Limit findings
+            artifacts_created=artifacts_created
+        )
+
+        logger.info(f"PHASE-OUTCOME: Populated outcome for task {task_id} phase {phase_index}: "
+                    f"verdict={final_verdict}, decisions={len(key_decisions)}, "
+                    f"critical_findings={len(critical_findings)}")
+        return True
+
+    except Exception as e:
+        logger.error(f"PHASE-OUTCOME: Failed to populate for {task_id} phase {phase_index}: {e}",
+                     exc_info=True)
+        return False
+
+
+# ============================================================================
 # AGENTIC REVIEW TOOLS - Automated multi-agent review system
 # ============================================================================
 
@@ -5182,35 +5346,55 @@ def submit_review_verdict(
             if next_phase and next_phase.get('status') == 'ACTIVE':
                 result_info['advanced_to_phase'] = next_phase.get('name')
 
+            # Populate phase_outcomes table for context accumulator
+            _populate_phase_outcome(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                phase_index=phase_index,
+                review_id=review_id,
+                final_verdict=final_verdict
+            )
+
             # Auto-generate handover for approved phases
             if final_verdict == 'approved':
                 try:
                     phase_name_for_handover = result_info.get('phase_name', f"Phase {phase_index + 1}")
                     phase_id = f"phase-{phase_index}"
 
-                    # Get agent findings from SQLite for handover generation
-                    agent_findings = state_db.get_agent_findings(
-                        workspace_base=workspace_base,
-                        task_id=task_id
+                    # Load registry for handover generation
+                    registry_path = os.path.join(workspace, "registry.json")
+                    registry = {}
+                    if os.path.exists(registry_path):
+                        try:
+                            with open(registry_path, 'r') as f:
+                                registry = json.load(f)
+                        except Exception as reg_err:
+                            logger.warning(f"Could not load registry for handover: {reg_err}")
+
+                    # Use auto_generate_handover which properly collects from findings/ AND archive/
+                    from orchestrator.handover import auto_generate_handover, save_handover as save_handover_doc
+                    handover_doc = auto_generate_handover(
+                        task_workspace=workspace,
+                        phase_id=phase_id,
+                        phase_name=phase_name_for_handover,
+                        registry=registry
                     )
 
-                    # Build handover document
-                    handover_doc = {
-                        "phase_id": phase_id,
-                        "phase_name": phase_name_for_handover,
-                        "completed_at": datetime.now().isoformat(),
-                        "status": "approved",
-                        "summary": f"Phase '{phase_name_for_handover}' completed and approved by reviewers",
-                        "key_findings": [f.get('message', '') for f in agent_findings[:10]],
-                        "recommendations": [],
-                        "blockers_resolved": []
-                    }
-                    save_result = save_handover(workspace, handover_doc)
+                    # Enhance handover with review verdict data
+                    review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+                    if review_data:
+                        # Add reviewer feedback to handover recommendations
+                        reviewer_notes = review_data.get('reviewer_notes', '')
+                        if reviewer_notes:
+                            handover_doc.recommendations.insert(0, f"Reviewer notes: {reviewer_notes}")
+
+                    save_result = save_handover_doc(workspace, handover_doc)
                     logger.info(f"PHASE-APPROVAL: Auto-generated handover for phase {phase_id}: {save_result.get('path', 'unknown')}")
                     result_info['handover_generated'] = True
                     result_info['handover_path'] = save_result.get('path')
+                    result_info['handover_findings_count'] = len(handover_doc.key_findings)
                 except Exception as e:
-                    logger.error(f"PHASE-APPROVAL: Failed to auto-generate handover: {e}")
+                    logger.error(f"PHASE-APPROVAL: Failed to auto-generate handover: {e}", exc_info=True)
                     result_info['handover_generated'] = False
                     result_info['handover_error'] = str(e)
         else:
@@ -5677,6 +5861,113 @@ def trigger_health_scan(task_id: Optional[str] = None) -> str:
         "message": "Health scan triggered" if success else "Failed to trigger scan",
         "daemon_status": daemon.get_status()
     }, indent=2)
+
+
+# ============================================================================
+# CONTEXT ACCUMULATOR MCP TOOL (Jan 2026)
+# ============================================================================
+
+
+@mcp.tool()
+def get_accumulated_task_context(
+    task_id: str,
+    phase_index: Optional[int] = None,
+    include_all_findings: bool = False,
+    max_tokens: int = 2000
+) -> str:
+    """
+    Get accumulated context for a task.
+
+    Use this to refresh context mid-execution or get more detail
+    than what was injected at deployment time.
+
+    This is useful for:
+    - Long-running agents that need updated findings from peers
+    - Fix agents that want full rejection context
+    - Agents that need to understand decisions from earlier phases
+
+    Args:
+        task_id: Task ID to get context for
+        phase_index: Optional - defaults to current phase
+        include_all_findings: If True, include all findings (not just critical/high)
+        max_tokens: Maximum token budget for response
+
+    Returns:
+        JSON with accumulated context including:
+        - original_task: Original task description
+        - current_phase: Current phase info with deliverables
+        - phase_summaries: Summary of previous phases
+        - critical_findings: High/critical severity findings
+        - rejection_context: If phase was rejected, what to fix
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+
+    # Get current phase index if not specified
+    if phase_index is None:
+        task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+        if task_snapshot:
+            phase_index = task_snapshot.get('current_phase_index', 0)
+        else:
+            phase_index = 0
+
+    try:
+        # Build accumulated context
+        ctx = build_task_context_accumulator(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            current_phase_index=phase_index,
+            max_tokens=max_tokens
+        )
+
+        # Build response
+        result = {
+            "success": True,
+            "task_id": task_id,
+            "phase_index": phase_index,
+
+            # Immutable core
+            "original_task": ctx.original_description[:500] if ctx.original_description else "",
+            "constraints": ctx.constraints[:5],
+            "expected_deliverables": ctx.expected_deliverables[:10],
+            "project_context": ctx.project_context,
+
+            # Current phase
+            "current_phase": {
+                "name": ctx.current_phase_name,
+                "description": ctx.current_phase_description[:200] if ctx.current_phase_description else "",
+                "deliverables": ctx.current_phase_deliverables[:10],
+                "success_criteria": ctx.current_phase_success_criteria[:10],
+            },
+
+            # Previous phases
+            "phase_summaries": ctx.phase_summaries,
+
+            # Findings
+            "critical_findings": ctx.critical_findings[:20] if include_all_findings else ctx.critical_findings[:10],
+            "active_blockers": ctx.active_blockers[:5],
+
+            # Rejection context
+            "was_rejected": ctx.was_rejected,
+            "rejection_findings": ctx.rejection_findings[:10] if ctx.was_rejected else [],
+            "rejection_notes": ctx.rejection_notes[:300] if ctx.was_rejected else "",
+
+            # Token info
+            "estimated_tokens": ctx.estimated_tokens,
+        }
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        logger.error(f"get_accumulated_task_context failed for {task_id}: {e}", exc_info=True)
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "task_id": task_id
+        })
 
 
 def cleanup_dead_agents_from_global_registry() -> Dict[str, Any]:

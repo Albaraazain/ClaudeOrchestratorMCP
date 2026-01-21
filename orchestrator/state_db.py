@@ -371,6 +371,25 @@ def _init_db(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_hierarchy_parent ON agent_hierarchy(parent_agent_id);
         CREATE INDEX IF NOT EXISTS idx_hierarchy_child ON agent_hierarchy(child_agent_id);
+
+        -- Phase outcomes for context accumulation (Jan 2026)
+        -- Stores structured phase results for passing context to later phases
+        CREATE TABLE IF NOT EXISTS phase_outcomes (
+            outcome_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            phase_index INTEGER NOT NULL,
+            review_verdict TEXT,           -- approved, rejected, needs_revision
+            review_summary TEXT,           -- Aggregated reviewer notes
+            key_decisions TEXT,            -- JSON array of decision strings
+            blockers_resolved TEXT,        -- JSON array of resolved blockers
+            critical_findings TEXT,        -- JSON array (high/critical severity findings)
+            artifacts_created TEXT,        -- JSON array of file paths created
+            created_at TEXT,
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, phase_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_phase_outcomes_task ON phase_outcomes(task_id);
         """
     )
 
@@ -988,6 +1007,10 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
     Reads:
     - AGENT_REGISTRY.json (metadata only)
     - progress/*_progress.jsonl (latest event per agent, source of truth)
+
+    CRITICAL: This function must NOT overwrite SQLite's phase advancement state
+    (current_phase_index, phase statuses) with stale JSON values. SQLite is the
+    source of truth for phase state after review/approval.
     """
     registry_path = os.path.join(task_workspace, "AGENT_REGISTRY.json")
     if not os.path.exists(registry_path):
@@ -1014,6 +1037,22 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
         )
         task_status = "ACTIVE" if has_active else registry.get("status", "INITIALIZED")
 
+        # BUG FIX: Check existing SQLite state BEFORE overwriting.
+        # SQLite's current_phase_index may be more advanced than JSON if phases
+        # were approved via submit_review_verdict (which updates SQLite but not JSON).
+        existing_task = conn.execute(
+            "SELECT current_phase_index FROM tasks WHERE task_id = ?",
+            (task_id,)
+        ).fetchone()
+
+        json_phase_index = int(registry.get("current_phase_index") or 0)
+        if existing_task:
+            # Preserve SQLite's phase index if it's more advanced (never go backwards)
+            sqlite_phase_index = existing_task[0] or 0
+            effective_phase_index = max(sqlite_phase_index, json_phase_index)
+        else:
+            effective_phase_index = json_phase_index
+
         conn.execute(
             """
             INSERT INTO tasks(task_id, workspace, workspace_base, description, status, priority, client_cwd,
@@ -1027,7 +1066,7 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
               priority=COALESCE(excluded.priority, tasks.priority),
               client_cwd=COALESCE(excluded.client_cwd, tasks.client_cwd),
               updated_at=excluded.updated_at,
-              current_phase_index=excluded.current_phase_index
+              current_phase_index=MAX(tasks.current_phase_index, excluded.current_phase_index)
             """,
             (
                 task_id,
@@ -1039,11 +1078,34 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
                 registry.get("client_cwd") or "",
                 created_at,
                 updated_at,
-                int(registry.get("current_phase_index") or 0),
+                effective_phase_index,
             ),
         )
 
         # Phases (metadata with deliverables and success criteria)
+        # BUG FIX: Pre-fetch existing phase statuses to avoid overwriting advanced statuses.
+        # Phase state machine: PENDING -> ACTIVE -> UNDER_REVIEW -> APPROVED/REJECTED/REVISING
+        # JSON may have stale "ACTIVE" or "PENDING" when SQLite already has "APPROVED".
+        existing_phase_statuses = {}
+        for row in conn.execute(
+            "SELECT phase_index, status FROM phases WHERE task_id = ?",
+            (task_id,)
+        ).fetchall():
+            existing_phase_statuses[row[0]] = row[1]
+
+        # Define status priority - higher priority statuses should never be overwritten by lower ones
+        # APPROVED is the terminal success state, should never regress
+        STATUS_PRIORITY = {
+            'PENDING': 0,
+            'ACTIVE': 1,
+            'AWAITING_REVIEW': 2,
+            'UNDER_REVIEW': 3,
+            'REVISING': 4,
+            'REJECTED': 5,
+            'ESCALATED': 6,
+            'APPROVED': 7,  # Highest - never overwrite APPROVED
+        }
+
         phases = registry.get("phases") or []
         for idx, phase in enumerate(phases):
             # Serialize deliverables and success_criteria as JSON if they exist
@@ -1051,6 +1113,17 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
             success_criteria = phase.get("success_criteria")
             deliverables_json = json.dumps(deliverables) if deliverables else None
             success_criteria_json = json.dumps(success_criteria) if success_criteria else None
+
+            # Determine effective status - preserve advanced SQLite status over stale JSON
+            json_status = phase.get("status") or "PENDING"
+            sqlite_status = existing_phase_statuses.get(idx)
+            if sqlite_status:
+                json_priority = STATUS_PRIORITY.get(json_status, 0)
+                sqlite_priority = STATUS_PRIORITY.get(sqlite_status, 0)
+                # Use whichever status is more advanced in the state machine
+                effective_status = sqlite_status if sqlite_priority >= json_priority else json_status
+            else:
+                effective_status = json_status
 
             conn.execute(
                 """
@@ -1062,10 +1135,15 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
                   description=excluded.description,
                   deliverables=excluded.deliverables,
                   success_criteria=excluded.success_criteria,
-                  status=excluded.status,
+                  status=CASE
+                    WHEN phases.status IN ('APPROVED', 'ESCALATED', 'REJECTED') THEN phases.status
+                    WHEN excluded.status IN ('APPROVED', 'ESCALATED', 'REJECTED') THEN excluded.status
+                    WHEN phases.status IN ('REVISING', 'UNDER_REVIEW', 'AWAITING_REVIEW') AND excluded.status IN ('PENDING', 'ACTIVE') THEN phases.status
+                    ELSE excluded.status
+                  END,
                   created_at=excluded.created_at,
-                  started_at=excluded.started_at,
-                  completed_at=excluded.completed_at
+                  started_at=COALESCE(phases.started_at, excluded.started_at),
+                  completed_at=COALESCE(phases.completed_at, excluded.completed_at)
                 """,
                 (
                     task_id,
@@ -1075,7 +1153,7 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
                     phase.get("description"),
                     deliverables_json,
                     success_criteria_json,
-                    phase.get("status"),
+                    effective_status,
                     _parse_dt(phase.get("created_at")),
                     _parse_dt(phase.get("started_at")),
                     _parse_dt(phase.get("completed_at")),
@@ -1501,6 +1579,143 @@ def get_latest_handover(
                     handover[field] = []
 
         return handover
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# PHASE OUTCOMES CRUD FUNCTIONS (Context Accumulator - Jan 2026)
+# ============================================================================
+
+
+def upsert_phase_outcome(
+    *,
+    workspace_base: str,
+    task_id: str,
+    phase_index: int,
+    review_verdict: Optional[str] = None,
+    review_summary: Optional[str] = None,
+    key_decisions: Optional[List[str]] = None,
+    blockers_resolved: Optional[List[str]] = None,
+    critical_findings: Optional[List[Dict[str, Any]]] = None,
+    artifacts_created: Optional[List[str]] = None
+) -> int:
+    """
+    Insert or update a phase outcome record.
+
+    This stores structured phase results for context accumulation,
+    enabling later phases to access comprehensive prior phase context.
+    """
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        now = datetime.now().isoformat()
+
+        cursor = conn.execute(
+            """
+            INSERT INTO phase_outcomes(
+                task_id, phase_index, review_verdict, review_summary,
+                key_decisions, blockers_resolved, critical_findings,
+                artifacts_created, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id, phase_index) DO UPDATE SET
+                review_verdict = excluded.review_verdict,
+                review_summary = excluded.review_summary,
+                key_decisions = excluded.key_decisions,
+                blockers_resolved = excluded.blockers_resolved,
+                critical_findings = excluded.critical_findings,
+                artifacts_created = excluded.artifacts_created,
+                created_at = excluded.created_at
+            """,
+            (
+                task_id,
+                phase_index,
+                review_verdict,
+                review_summary,
+                json.dumps(key_decisions) if key_decisions else None,
+                json.dumps(blockers_resolved) if blockers_resolved else None,
+                json.dumps(critical_findings) if critical_findings else None,
+                json.dumps(artifacts_created) if artifacts_created else None,
+                now
+            )
+        )
+        conn.commit()
+
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_phase_outcome(
+    *,
+    workspace_base: str,
+    task_id: str,
+    phase_index: int
+) -> Optional[Dict[str, Any]]:
+    """Get a single phase outcome record."""
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM phase_outcomes
+            WHERE task_id = ? AND phase_index = ?
+            """,
+            (task_id, phase_index)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        outcome = dict(row)
+
+        # Parse JSON fields
+        for field in ("key_decisions", "blockers_resolved", "critical_findings", "artifacts_created"):
+            if outcome.get(field):
+                try:
+                    outcome[field] = json.loads(outcome[field])
+                except Exception:
+                    outcome[field] = []
+
+        return outcome
+    finally:
+        conn.close()
+
+
+def get_phase_outcomes(
+    *,
+    workspace_base: str,
+    task_id: str
+) -> List[Dict[str, Any]]:
+    """Get all phase outcomes for a task, ordered by phase_index."""
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM phase_outcomes
+            WHERE task_id = ?
+            ORDER BY phase_index ASC
+            """,
+            (task_id,)
+        ).fetchall()
+
+        outcomes = []
+        for row in rows:
+            outcome = dict(row)
+
+            # Parse JSON fields
+            for field in ("key_decisions", "blockers_resolved", "critical_findings", "artifacts_created"):
+                if outcome.get(field):
+                    try:
+                        outcome[field] = json.loads(outcome[field])
+                    except Exception:
+                        outcome[field] = []
+
+            outcomes.append(outcome)
+
+        return outcomes
     finally:
         conn.close()
 
