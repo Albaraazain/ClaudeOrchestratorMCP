@@ -225,6 +225,42 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
+# ============================================================================
+# MCP CONFIG DISCOVERY (Jan 2026 - Fixes agent MCP inheritance)
+# ============================================================================
+
+def find_mcp_config(starting_dir: str, max_depth: int = 10) -> Optional[str]:
+    """
+    Find .mcp.json by traversing up from starting_dir.
+
+    Claude CLI only reads .mcp.json from CWD, so if a project is in a subdirectory
+    and .mcp.json is in a parent directory, agents won't inherit MCP servers.
+
+    This function searches upward to find the nearest .mcp.json file.
+
+    Args:
+        starting_dir: Directory to start searching from
+        max_depth: Maximum parent directories to traverse (safety limit)
+
+    Returns:
+        Absolute path to .mcp.json if found, None otherwise
+    """
+    current = Path(starting_dir).resolve()
+
+    for _ in range(max_depth):
+        mcp_config = current / '.mcp.json'
+        if mcp_config.exists() and mcp_config.is_file():
+            logger.info(f"MCP_CONFIG_FOUND: {mcp_config}")
+            return str(mcp_config)
+
+        # Stop at filesystem root or home directory
+        parent = current.parent
+        if parent == current or current == Path.home():
+            break
+        current = parent
+
+    logger.debug(f"MCP_CONFIG_NOT_FOUND: No .mcp.json found traversing up from {starting_dir}")
+    return None
 
 
 # ============================================================================
@@ -1328,14 +1364,24 @@ BEGIN YOUR WORK NOW!
         # client_project_dir was extracted earlier from task_registry.get('client_cwd') or workspace path
         calling_project_dir = client_project_dir
         claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'npx -y @anthropic-ai/claude-code')
+
+        # CRITICAL FIX (Jan 2026): Find MCP config by traversing up from client project dir
+        # This ensures agents inherit MCP servers (like Supabase) even if .mcp.json is in a parent directory
+        mcp_config_path = find_mcp_config(calling_project_dir)
+        mcp_config_flag = f"--mcp-config '{mcp_config_path}'" if mcp_config_path else ""
+        if mcp_config_path:
+            logger.info(f"Agent {agent_id} will use MCP config: {mcp_config_path}")
+        else:
+            logger.warning(f"Agent {agent_id} has no MCP config - will only have built-in tools")
+
         # Build claude flags with dynamic model selection (opus=best reasoning, sonnet=faster/cheaper)
         #
         # IMPORTANT: pass the prompt via stdin to avoid OS/shell argument-length limits.
         # Review prompts can be very large; passing them as a single CLI argument can cause the
         # tmux session to terminate immediately (agent never gets recorded/spawned).
         base_flags = '--print --output-format stream-json --input-format text --verbose --dangerously-skip-permissions'
-        claude_flags = f'{base_flags} --model {model}'
-        logger.info(f"Deploying agent {agent_id} with model: {model}")
+        claude_flags = f'{base_flags} --model {model} {mcp_config_flag}'.strip()
+        logger.info(f"Deploying agent {agent_id} with model: {model}, mcp_config: {mcp_config_path or 'none'}")
 
         # JSONL log file path - unique per agent_id
         log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
