@@ -565,6 +565,14 @@
       "has_enhanced_context": false,
       "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260120-203904-837c63e4",
       "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
+    },
+    "TASK-20260217-233748-6e352276": {
+      "description": "Test task to verify GLM model configuration",
+      "created_at": "2026-02-17T23:37:48.810891",
+      "status": "INITIALIZED",
+      "has_enhanced_context": false,
+      "workspace": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace/TASK-20260217-233748-6e352276",
+      "workspace_base": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/.agent-workspace"
     }
   },
   "agents": {
