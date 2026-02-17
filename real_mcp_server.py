@@ -27,6 +27,14 @@ import errno
 import threading
 
 # =============================================================================
+# MODEL CONFIGURATION - Customize these for your preferred models
+# =============================================================================
+# Opus-equivalent: Deep reasoning, complex tasks
+OPUS_MODEL = "glm-5"
+# Sonnet-equivalent: Fast, efficient for simpler tasks
+SONNET_MODEL = "glm-4.7"
+
+# =============================================================================
 # ORCHESTRATOR MODULE IMPORTS (consolidated from modular architecture)
 # =============================================================================
 
@@ -381,15 +389,15 @@ def _get_peer_context(workspace: str, exclude_agent_id: str, max_progress: int =
 def create_real_task(
     description: str,
     priority: str = "P2",
-    phases: Optional[List[Dict[str, Any]]] = None,
+    phases: Optional[str] = None,  # JSON string - FastMCP passes complex types as strings
     client_cwd: str = None,
     background_context: Optional[str] = None,
-    expected_deliverables: Optional[List[str]] = None,
-    success_criteria: Optional[List[str]] = None,
-    constraints: Optional[List[str]] = None,
-    relevant_files: Optional[List[str]] = None,
-    conversation_history: Optional[List[Dict[str, str]]] = None,
-    project_context: Optional[Dict[str, Any]] = None
+    expected_deliverables: Optional[str] = None,  # JSON string
+    success_criteria: Optional[str] = None,  # JSON string
+    constraints: Optional[str] = None,  # JSON string
+    relevant_files: Optional[str] = None,  # JSON string
+    conversation_history: Optional[str] = None,  # JSON string
+    project_context: Optional[str] = None  # JSON string
 ) -> Dict[str, Any]:
     """
     Create an orchestration task with mandatory phases.
@@ -453,6 +461,27 @@ def create_real_task(
     Returns:
         Task creation result with phases, validation warnings, and enhancement flags
     """
+    # Parse JSON string parameters (FastMCP passes complex types as JSON strings)
+    def parse_json_param(param_value, param_name, default=None):
+        """Parse a JSON string parameter, returning default if parsing fails."""
+        if param_value is None:
+            return default
+        if isinstance(param_value, str):
+            try:
+                return json.loads(param_value)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse {param_name} as JSON: {e}")
+                return default
+        return param_value  # Already parsed
+
+    phases = parse_json_param(phases, "phases", [])
+    expected_deliverables = parse_json_param(expected_deliverables, "expected_deliverables", [])
+    success_criteria = parse_json_param(success_criteria, "success_criteria", [])
+    constraints = parse_json_param(constraints, "constraints", [])
+    relevant_files = parse_json_param(relevant_files, "relevant_files", [])
+    conversation_history = parse_json_param(conversation_history, "conversation_history", [])
+    project_context = parse_json_param(project_context, "project_context", {})
+
     # Debug log incoming parameters to help diagnose cross-project issues
     logger.info(f"create_real_task called: description={description[:50]}..., phases={len(phases) if phases else 0}, client_cwd={client_cwd}")
 
@@ -968,7 +997,7 @@ def deploy_opus_agent(
     Returns:
         Agent deployment result
     """
-    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, "claude-opus-4-5")
+    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, OPUS_MODEL)
 
 
 @mcp.tool
@@ -1002,7 +1031,7 @@ def deploy_sonnet_agent(
     Returns:
         Agent deployment result
     """
-    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, "claude-sonnet-4-5")
+    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, SONNET_MODEL)
 
 
 def deploy_claude_tmux_agent(
@@ -1011,7 +1040,7 @@ def deploy_claude_tmux_agent(
     prompt: str,
     parent: str = "orchestrator",
     phase_index: Optional[int] = None,
-    model: str = "claude-opus-4-5",
+    model: str = OPUS_MODEL,
     agent_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
@@ -1027,17 +1056,17 @@ def deploy_claude_tmux_agent(
         prompt: Instructions for the agent
         parent: Parent agent ID
         phase_index: Phase index this agent belongs to (auto-set from SQLite if None)
-        model: Claude model to use - "claude-opus-4-5" (default) or "claude-sonnet-4-5" (faster, cheaper)
+        model: Model to use - OPUS_MODEL (default) or SONNET_MODEL (faster, cheaper)
         agent_id: Optional pre-generated agent ID. If None, one will be generated.
 
     Returns:
         Agent deployment result
     """
-    # Validate model parameter - use explicit 4.5 model names
-    valid_models = ["claude-opus-4-5", "claude-sonnet-4-5"]
+    # Validate model parameter - allow custom models (glm-5, glm-4.7) and legacy Claude models
+    valid_models = [OPUS_MODEL, SONNET_MODEL, "claude-opus-4-5", "claude-sonnet-4-5"]
     if model not in valid_models:
-        logger.warning(f"Invalid model '{model}', defaulting to 'claude-opus-4-5'. Valid: {valid_models}")
-        model = "claude-opus-4-5"
+        logger.warning(f"Invalid model '{model}', defaulting to '{OPUS_MODEL}'. Valid: {valid_models}")
+        model = OPUS_MODEL
     if not check_tmux_available():
         logger.error("tmux not available for agent deployment")
         return {
@@ -3675,7 +3704,7 @@ def spawn_opus_child_agent(task_id: str, parent_agent_id: str, child_agent_type:
     Returns:
         Child agent spawn result
     """
-    return deploy_claude_tmux_agent(task_id, child_agent_type, child_prompt, parent_agent_id, None, "claude-opus-4-5")
+    return deploy_claude_tmux_agent(task_id, child_agent_type, child_prompt, parent_agent_id, None, OPUS_MODEL)
 
 
 @mcp.tool
@@ -3699,7 +3728,7 @@ def spawn_sonnet_child_agent(task_id: str, parent_agent_id: str, child_agent_typ
     Returns:
         Child agent spawn result
     """
-    return deploy_claude_tmux_agent(task_id, child_agent_type, child_prompt, parent_agent_id, None, "claude-sonnet-4-5")
+    return deploy_claude_tmux_agent(task_id, child_agent_type, child_prompt, parent_agent_id, None, SONNET_MODEL)
 
 
 @mcp.tool
@@ -5108,7 +5137,7 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                 prompt=reviewer_prompt_with_id,
                 parent="orchestrator",
                 phase_index=-1,  # -1 indicates reviewer agent (not part of any phase)
-                model="claude-sonnet-4-5",  # Sonnet for reviewers
+                model=SONNET_MODEL,  # Sonnet for reviewers
                 agent_id=pre_generated_agent_id
             )
             logger.info(f"AUTO-PHASE-ENFORCEMENT: deploy_claude_tmux_agent returned: success={result.get('success')}, error={result.get('error', 'N/A')}")
@@ -5220,7 +5249,7 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
             prompt=critique_prompt_with_id,
             parent="orchestrator",
             phase_index=-1,  # -1 indicates review-related agent
-            model="claude-sonnet-4-5",  # Sonnet for critique
+            model=SONNET_MODEL,  # Sonnet for critique
             agent_id=pre_generated_critique_id
         )
         if result.get('success'):
@@ -5280,7 +5309,7 @@ def submit_review_verdict(
     review_id: str,
     reviewer_agent_id: str,
     verdict: str,
-    findings: List[Dict[str, Any]],
+    findings: str,  # JSON string - FastMCP passes complex types as strings
     reviewer_notes: Optional[str] = None
 ) -> str:
     """
@@ -5305,6 +5334,20 @@ def submit_review_verdict(
         Dict with submission status and review progress
     """
     from orchestrator.review import REVIEW_VERDICTS
+
+    # Parse JSON string parameters (FastMCP passes complex types as JSON strings)
+    def parse_json_param(param_value, param_name, default=None):
+        if param_value is None:
+            return default
+        if isinstance(param_value, str):
+            try:
+                return json.loads(param_value)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse {param_name} as JSON: {e}")
+                return default
+        return param_value
+
+    findings = parse_json_param(findings, "findings", [])
 
     # Validate verdict
     if verdict not in REVIEW_VERDICTS:
@@ -5472,9 +5515,9 @@ def submit_critique(
     task_id: str,
     review_id: str,
     critique_agent_id: str,
-    observations: List[Dict[str, Any]],
+    observations: str,  # JSON string - FastMCP passes complex types as strings
     summary: str,
-    recommendations: Optional[List[str]] = None
+    recommendations: Optional[str] = None  # JSON string
 ) -> str:
     """
     Submit a critique (called by the critique agent - NOT a reviewer).
@@ -5497,6 +5540,21 @@ def submit_critique(
     Returns:
         Dict with submission status
     """
+    # Parse JSON string parameters (FastMCP passes complex types as JSON strings)
+    def parse_json_param(param_value, param_name, default=None):
+        if param_value is None:
+            return default
+        if isinstance(param_value, str):
+            try:
+                return json.loads(param_value)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse {param_name} as JSON: {e}")
+                return default
+        return param_value
+
+    observations = parse_json_param(observations, "observations", [])
+    recommendations = parse_json_param(recommendations, "recommendations", [])
+
     workspace = find_task_workspace(task_id)
     if not workspace:
         return json.dumps({"success": False, "error": f"Task {task_id} not found"})
