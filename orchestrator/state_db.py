@@ -53,16 +53,42 @@ TASK_STATUSES = {
 }
 
 # Phase statuses for state machine
+# Redesigned Jan 2026: Merged AWAITING_REVIEW+UNDER_REVIEW→IN_REVIEW,
+# REJECTED+REVISING→REVISION_NEEDED, added FIXING and FAILED states.
 PHASE_STATUSES = {
     "PENDING",
     "ACTIVE",
-    "AWAITING_REVIEW",
-    "UNDER_REVIEW",
+    "IN_REVIEW",         # Replaces AWAITING_REVIEW + UNDER_REVIEW
     "APPROVED",
-    "REJECTED",
-    "REVISING",
-    "ESCALATED"
+    "REVISION_NEEDED",   # Replaces REJECTED + REVISING
+    "FIXING",            # Fix agents deployed, working on review feedback
+    "ESCALATED",
+    "FAILED",            # Terminal: explicitly abandoned
 }
+
+# Valid phase transitions - enforced in update_phase_status
+VALID_PHASE_TRANSITIONS = {
+    "PENDING":          {"ACTIVE"},
+    "ACTIVE":           {"IN_REVIEW"},
+    "IN_REVIEW":        {"APPROVED", "REVISION_NEEDED", "ESCALATED", "IN_REVIEW"},
+    "REVISION_NEEDED":  {"FIXING"},
+    "FIXING":           {"IN_REVIEW", "ESCALATED"},
+    "ESCALATED":        {"APPROVED", "IN_REVIEW", "FAILED"},
+    # APPROVED and FAILED are terminal — no outbound transitions
+    "APPROVED":         set(),
+    "FAILED":           set(),
+}
+
+# Legacy state migration map — used when reading old data
+LEGACY_STATE_MAP = {
+    "AWAITING_REVIEW": "IN_REVIEW",
+    "UNDER_REVIEW":    "IN_REVIEW",
+    "REJECTED":        "REVISION_NEEDED",
+    "REVISING":        "REVISION_NEEDED",
+}
+
+# All valid statuses including legacy (for reading old data)
+ALL_PHASE_STATUSES = PHASE_STATUSES | set(LEGACY_STATE_MAP.keys())
 
 
 def normalize_agent_status(status: Any, progress: Any = None) -> str:
@@ -299,6 +325,53 @@ def _init_db(conn: sqlite3.Connection) -> None:
                 import sys
                 print(f"[STATE_DB] Phase migration error: {e}", file=sys.stderr)
                 raise
+
+    # =========================================================================
+    # PHASE STATE MACHINE MIGRATION (Mar 2026)
+    # Add revision tracking columns + migrate legacy state names
+    # =========================================================================
+    # Re-read phase columns after potential earlier migrations
+    cursor = conn.execute("PRAGMA table_info(phases)")
+    phase_cols_after = {row[1] for row in cursor.fetchall()}
+
+    state_machine_migrations = []
+    if 'revision_round' not in phase_cols_after:
+        state_machine_migrations.append("ALTER TABLE phases ADD COLUMN revision_round INTEGER DEFAULT 0;")
+    if 'max_revision_rounds' not in phase_cols_after:
+        state_machine_migrations.append("ALTER TABLE phases ADD COLUMN max_revision_rounds INTEGER DEFAULT 3;")
+    if 'last_review_id' not in phase_cols_after:
+        state_machine_migrations.append("ALTER TABLE phases ADD COLUMN last_review_id TEXT;")
+    if 'revision_ready' not in phase_cols_after:
+        state_machine_migrations.append("ALTER TABLE phases ADD COLUMN revision_ready INTEGER DEFAULT 0;")
+
+    for migration in state_machine_migrations:
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                import sys
+                print(f"[STATE_DB] State machine migration error: {e}", file=sys.stderr)
+                raise
+
+    # Migrate legacy phase status names to new names
+    if state_machine_migrations:  # Only on first migration
+        for old_status, new_status in LEGACY_STATE_MAP.items():
+            try:
+                conn.execute(
+                    "UPDATE phases SET status = ? WHERE status = ?",
+                    (new_status, old_status)
+                )
+            except Exception:
+                pass  # Best-effort migration
+
+    # Add reviewer_retry_count column to reviews table for persistent retry tracking
+    cursor = conn.execute("PRAGMA table_info(reviews)")
+    review_cols = {row[1] for row in cursor.fetchall()}
+    if 'retry_count' not in review_cols:
+        try:
+            conn.execute("ALTER TABLE reviews ADD COLUMN retry_count INTEGER DEFAULT 0;")
+        except sqlite3.OperationalError:
+            pass
 
     # =========================================================================
     # NEW TABLES FOR FULL SQLITE MIGRATION (Jan 2026)
@@ -657,7 +730,11 @@ def update_task_phase_index(*, workspace_base: str, task_id: str, new_phase_inde
 
 
 def update_phase_status(*, workspace_base: str, task_id: str, phase_index: int, new_status: str) -> bool:
-    """Update phase status for state machine transitions."""
+    """Update phase status for state machine transitions.
+
+    Enforces valid transitions via VALID_PHASE_TRANSITIONS map.
+    Handles legacy state names transparently.
+    """
     if new_status not in PHASE_STATUSES:
         raise ValueError(f"Invalid phase status: {new_status}. Must be one of {PHASE_STATUSES}")
 
@@ -665,6 +742,27 @@ def update_phase_status(*, workspace_base: str, task_id: str, phase_index: int, 
     conn = _connect(db_path)
     try:
         now = datetime.now().isoformat()
+
+        # Read current status to enforce valid transitions
+        current_row = conn.execute(
+            "SELECT status FROM phases WHERE task_id = ? AND phase_index = ?",
+            (task_id, phase_index)
+        ).fetchone()
+
+        if current_row:
+            current_status = current_row[0]
+            # Normalize legacy states
+            current_status = LEGACY_STATE_MAP.get(current_status, current_status)
+
+            # Enforce valid transitions (skip if current is unknown/NULL)
+            if current_status in VALID_PHASE_TRANSITIONS:
+                allowed = VALID_PHASE_TRANSITIONS[current_status]
+                if new_status not in allowed and new_status != current_status:
+                    logger.warning(
+                        f"BLOCKED transition: {current_status} → {new_status} for task={task_id} phase={phase_index}. "
+                        f"Allowed: {allowed}"
+                    )
+                    return False
 
         # Update phase status
         result = conn.execute(
@@ -958,8 +1056,9 @@ def record_progress(
             (norm_status, p, ts, completed_at, agent_id, task_id),
         )
 
-        # Update task status based on agent activity
-        # If any agent is active, task should be ACTIVE
+        # Task completion is phase/review-driven. Agent activity may activate a
+        # task, but agents finishing must not mark the task complete before
+        # review approves the phase lifecycle.
         active_count = conn.execute(
             """
             SELECT COUNT(*) as count FROM agents
@@ -973,23 +1072,6 @@ def record_progress(
                 "UPDATE tasks SET status = 'ACTIVE', updated_at = ? WHERE task_id = ? AND status = 'INITIALIZED'",
                 (ts, task_id)
             )
-        else:
-            # Check if all agents are completed
-            total_agents = conn.execute(
-                "SELECT COUNT(*) as count FROM agents WHERE task_id = ?",
-                (task_id,)
-            ).fetchone()["count"]
-
-            completed_agents = conn.execute(
-                "SELECT COUNT(*) as count FROM agents WHERE task_id = ? AND status = 'completed'",
-                (task_id,)
-            ).fetchone()["count"]
-
-            if total_agents > 0 and total_agents == completed_agents:
-                conn.execute(
-                    "UPDATE tasks SET status = 'COMPLETED', updated_at = ? WHERE task_id = ?",
-                    (ts, task_id)
-                )
 
         conn.execute(
             "UPDATE tasks SET updated_at=? WHERE task_id=?",
@@ -1084,7 +1166,7 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
 
         # Phases (metadata with deliverables and success criteria)
         # BUG FIX: Pre-fetch existing phase statuses to avoid overwriting advanced statuses.
-        # Phase state machine: PENDING -> ACTIVE -> UNDER_REVIEW -> APPROVED/REJECTED/REVISING
+        # Phase state machine: PENDING → ACTIVE → IN_REVIEW → APPROVED/REVISION_NEEDED → FIXING → IN_REVIEW
         # JSON may have stale "ACTIVE" or "PENDING" when SQLite already has "APPROVED".
         existing_phase_statuses = {}
         for row in conn.execute(
@@ -1098,12 +1180,17 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
         STATUS_PRIORITY = {
             'PENDING': 0,
             'ACTIVE': 1,
+            'IN_REVIEW': 3,
+            'REVISION_NEEDED': 4,
+            'FIXING': 5,
+            'ESCALATED': 6,
+            'FAILED': 7,
+            'APPROVED': 8,  # Highest - never overwrite APPROVED
+            # Legacy states (mapped to equivalent priority)
             'AWAITING_REVIEW': 2,
             'UNDER_REVIEW': 3,
             'REVISING': 4,
-            'REJECTED': 5,
-            'ESCALATED': 6,
-            'APPROVED': 7,  # Highest - never overwrite APPROVED
+            'REJECTED': 4,
         }
 
         phases = registry.get("phases") or []
@@ -1136,9 +1223,9 @@ def reconcile_task_workspace(task_workspace: str) -> Optional[str]:
                   deliverables=excluded.deliverables,
                   success_criteria=excluded.success_criteria,
                   status=CASE
-                    WHEN phases.status IN ('APPROVED', 'ESCALATED', 'REJECTED') THEN phases.status
-                    WHEN excluded.status IN ('APPROVED', 'ESCALATED', 'REJECTED') THEN excluded.status
-                    WHEN phases.status IN ('REVISING', 'UNDER_REVIEW', 'AWAITING_REVIEW') AND excluded.status IN ('PENDING', 'ACTIVE') THEN phases.status
+                    WHEN phases.status IN ('APPROVED', 'FAILED', 'ESCALATED', 'REVISION_NEEDED', 'REJECTED') THEN phases.status
+                    WHEN excluded.status IN ('APPROVED', 'FAILED', 'ESCALATED', 'REVISION_NEEDED', 'REJECTED') THEN excluded.status
+                    WHEN phases.status IN ('FIXING', 'IN_REVIEW', 'REVISING', 'UNDER_REVIEW', 'AWAITING_REVIEW') AND excluded.status IN ('PENDING', 'ACTIVE') THEN phases.status
                     ELSE excluded.status
                   END,
                   created_at=excluded.created_at,
@@ -1278,6 +1365,24 @@ def load_task_snapshot(*, workspace_base: str, task_id: str) -> Optional[Dict[st
         ).fetchall()
         task["phases"] = [dict(r) for r in phases]
 
+        # Parse JSON fields in phases (deliverables, success_criteria are stored as JSON strings)
+        # Without this, code iterating over these fields gets individual characters instead of list items
+        for phase in task["phases"]:
+            for json_field in ['deliverables', 'success_criteria']:
+                val = phase.get(json_field)
+                if val:
+                    try:
+                        if isinstance(val, str):
+                            val = json.loads(val)
+                        # Ensure result is a list (not dict, int, etc.)
+                        if not isinstance(val, list):
+                            val = [str(val)]
+                        phase[json_field] = val
+                    except (json.JSONDecodeError, TypeError):
+                        phase[json_field] = []
+                else:
+                    phase[json_field] = []
+
         agents = conn.execute(
             "SELECT * FROM agents WHERE task_id=? ORDER BY started_at ASC",
             (task_id,),
@@ -1301,6 +1406,17 @@ def load_phase_snapshot(*, workspace_base: str, task_id: str, phase_index: int) 
     db_path = ensure_db(workspace_base)
     conn = _connect(db_path)
     try:
+        phase = conn.execute(
+            """
+            SELECT phase_index, phase_id, name, description, deliverables,
+                   success_criteria, status, created_at, started_at,
+                   completed_at, revision_round, max_revision_rounds,
+                   last_review_id, revision_ready
+              FROM phases
+             WHERE task_id=? AND phase_index=?
+            """,
+            (task_id, int(phase_index)),
+        ).fetchone()
         agents = conn.execute(
             "SELECT agent_id, type, status, progress, last_update FROM agents WHERE task_id=? AND phase_index=?",
             (task_id, int(phase_index)),
@@ -1309,7 +1425,23 @@ def load_phase_snapshot(*, workspace_base: str, task_id: str, phase_index: int) 
         completed = [a for a in agent_rows if a.get("status") in {"completed", "phase_completed"}]
         failed = [a for a in agent_rows if a.get("status") in {"failed", "error", "terminated", "killed"}]
         pending = [a for a in agent_rows if a.get("status") not in AGENT_TERMINAL_STATUSES]
-        return {
+
+        snapshot: Dict[str, Any] = {
+            "task_id": task_id,
+            "phase_index": int(phase_index),
+            "phase_id": None,
+            "name": None,
+            "description": None,
+            "deliverables": [],
+            "success_criteria": [],
+            "status": None,
+            "created_at": None,
+            "started_at": None,
+            "completed_at": None,
+            "revision_round": 0,
+            "max_revision_rounds": 3,
+            "last_review_id": None,
+            "revision_ready": 0,
             "agents": agent_rows,
             "counts": {
                 "total": len(agent_rows),
@@ -1319,6 +1451,21 @@ def load_phase_snapshot(*, workspace_base: str, task_id: str, phase_index: int) 
                 "all_done": (len(agent_rows) > 0 and len(pending) == 0),
             },
         }
+
+        if phase:
+            snapshot.update(dict(phase))
+            for field in ("deliverables", "success_criteria"):
+                value = snapshot.get(field)
+                if isinstance(value, str) and value:
+                    try:
+                        parsed = json.loads(value)
+                        snapshot[field] = parsed if isinstance(parsed, list) else [str(parsed)]
+                    except (TypeError, json.JSONDecodeError):
+                        snapshot[field] = []
+                elif not isinstance(value, list):
+                    snapshot[field] = []
+
+        return snapshot
     finally:
         conn.close()
 
@@ -1760,29 +1907,17 @@ def transition_task_to_active(*, workspace_base: str, task_id: str) -> bool:
 
 def transition_task_to_completed(*, workspace_base: str, task_id: str) -> bool:
     """
-    Transition task to COMPLETED when all agents are done.
+    Transition a task to a terminal state.
+
+    Phased tasks complete only when every phase is APPROVED. Agent terminal
+    status alone is not enough because phases must pass review first. Legacy
+    no-phase tasks keep the older all-agents-terminal fallback.
 
     Returns True if transition occurred, False if not ready or failed.
     """
     db_path = ensure_db(workspace_base)
     conn = _connect(db_path)
     try:
-        # Check if all agents are terminal
-        agents = conn.execute(
-            "SELECT agent_id, status FROM agents WHERE task_id=?",
-            (task_id,)
-        ).fetchall()
-
-        if not agents:
-            # No agents, can't complete
-            return False
-
-        # Check if all agents are in terminal status
-        non_terminal = [a for a in agents if a["status"] not in AGENT_TERMINAL_STATUSES]
-        if non_terminal:
-            # Some agents still running
-            return False
-
         # Check current task status
         row = conn.execute("SELECT status FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         if not row:
@@ -1793,21 +1928,53 @@ def transition_task_to_completed(*, workspace_base: str, task_id: str) -> bool:
             # Already in terminal state
             return False
 
-        # Determine final status based on agent outcomes
-        failed_count = sum(1 for a in agents if a["status"] in {"failed", "error", "terminated", "killed"})
-        final_status = "FAILED" if failed_count > len(agents) // 2 else "COMPLETED"
+        phases = conn.execute(
+            "SELECT phase_index, status FROM phases WHERE task_id=? ORDER BY phase_index",
+            (task_id,)
+        ).fetchall()
+
+        last_phase_index: Optional[int] = None
+        if phases:
+            normalized_statuses = [LEGACY_STATE_MAP.get(p["status"], p["status"]) for p in phases]
+            last_phase_index = max(int(p["phase_index"]) for p in phases)
+            if any(status == "FAILED" for status in normalized_statuses):
+                final_status = "FAILED"
+            elif all(status == "APPROVED" for status in normalized_statuses):
+                final_status = "COMPLETED"
+            else:
+                return False
+        else:
+            agents = conn.execute(
+                "SELECT agent_id, status FROM agents WHERE task_id=?",
+                (task_id,)
+            ).fetchall()
+
+            if not agents:
+                return False
+
+            non_terminal = [a for a in agents if a["status"] not in AGENT_TERMINAL_STATUSES]
+            if non_terminal:
+                return False
+
+            failed_count = sum(1 for a in agents if a["status"] in {"failed", "error", "terminated", "killed"})
+            final_status = "FAILED" if failed_count > len(agents) // 2 else "COMPLETED"
 
         # Transition to final status
         timestamp = datetime.now().isoformat()
-        conn.execute(
-            "UPDATE tasks SET status=?, updated_at=? WHERE task_id=?",
-            (final_status, timestamp, task_id)
-        )
+        if last_phase_index is None:
+            conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE task_id=?",
+                (final_status, timestamp, task_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE tasks SET status=?, current_phase_index=?, updated_at=? WHERE task_id=?",
+                (final_status, last_phase_index, timestamp, task_id)
+            )
         conn.commit()  # CRITICAL: Must commit to persist task completion
 
         # Log the transition
         print(f"[STATE_DB] Task {task_id} transitioned from {current_status} to {final_status}")
-        print(f"[STATE_DB]   - Total agents: {len(agents)}, Failed: {failed_count}")
         return True
     finally:
         conn.close()
@@ -1815,13 +1982,21 @@ def transition_task_to_completed(*, workspace_base: str, task_id: str) -> bool:
 
 def check_task_completion(*, workspace_base: str, task_id: str) -> bool:
     """
-    Check if all agents for a task are in terminal state.
+    Check whether a task is ready for terminal transition.
 
-    Returns True if all agents are terminal (completed/failed/terminated).
+    Phased tasks are complete only after all phases are APPROVED.
+    Legacy no-phase tasks fall back to all agents being terminal.
     """
     db_path = ensure_db(workspace_base)
     conn = _connect(db_path)
     try:
+        phases = conn.execute(
+            "SELECT status FROM phases WHERE task_id=?",
+            (task_id,)
+        ).fetchall()
+        if phases:
+            return all(LEGACY_STATE_MAP.get(p["status"], p["status"]) == "APPROVED" for p in phases)
+
         agents = conn.execute(
             "SELECT status FROM agents WHERE task_id=?",
             (task_id,)
@@ -1924,7 +2099,11 @@ def mark_agent_terminal(
             if check_task_completion(workspace_base=workspace_base, task_id=task_id):
                 # Try to transition task to completed
                 if transition_task_to_completed(workspace_base=workspace_base, task_id=task_id):
-                    result["task_transition"] = "COMPLETED"
+                    task_row = conn.execute(
+                        "SELECT status FROM tasks WHERE task_id=?",
+                        (task_id,)
+                    ).fetchone()
+                    result["task_transition"] = task_row["status"] if task_row else "TERMINAL"
 
         return result
     finally:
@@ -2086,7 +2265,7 @@ def get_task_counts(*, workspace_base: str, task_id: str) -> Dict[str, int]:
         phase_counts = conn.execute("""
             SELECT
                 COUNT(*) as total_phases,
-                SUM(CASE WHEN status IN ('ACTIVE', 'AWAITING_REVIEW', 'UNDER_REVIEW', 'REVISING') THEN 1 ELSE 0 END) as active_phases,
+                SUM(CASE WHEN status IN ('ACTIVE', 'IN_REVIEW', 'REVISION_NEEDED', 'FIXING', 'AWAITING_REVIEW', 'UNDER_REVIEW', 'REVISING') THEN 1 ELSE 0 END) as active_phases,
                 SUM(CASE WHEN status = 'APPROVED' THEN 1 ELSE 0 END) as completed_phases
             FROM phases
             WHERE task_id = ?
@@ -2714,39 +2893,68 @@ def finalize_review(
                 return True  # Still return True since finalization is done
 
             # Update phase status based on verdict
-            # BUG FIX: Handle all three verdict types explicitly
+            # Mar 2026: Both rejected and needs_revision → REVISION_NEEDED
             if final_verdict == 'approved':
                 new_phase_status = 'APPROVED'
-            elif final_verdict == 'needs_revision':
-                new_phase_status = 'REVISING'
-            else:  # rejected
-                new_phase_status = 'REJECTED'
+            else:  # rejected or needs_revision → same recovery path
+                new_phase_status = 'REVISION_NEEDED'
+
+            update_fields = "status=?"
+            update_params = [new_phase_status]
+
+            if final_verdict == 'approved':
+                update_fields += ", completed_at=?"
+                update_params.append(now)
+            else:
+                # Track revision metadata for REVISION_NEEDED
+                update_fields += ", last_review_id=?, revision_ready=0"
+                update_params.append(review_id)
+
+            update_params.extend([task_id, phase_index])
             conn.execute(
-                """
-                UPDATE phases SET status=?, completed_at=?
-                WHERE task_id=? AND phase_index=?
-                """,
-                (new_phase_status, now if final_verdict == 'approved' else None, task_id, phase_index)
+                f"UPDATE phases SET {update_fields} WHERE task_id=? AND phase_index=?",
+                update_params
             )
 
             # If approved and there's a next phase, activate it
             if final_verdict == 'approved':
-                conn.execute(
-                    """
-                    UPDATE phases SET status='ACTIVE', started_at=?
-                    WHERE task_id=? AND phase_index=? AND status='PENDING'
-                    """,
-                    (now, task_id, phase_index + 1)
-                )
+                next_phase = conn.execute(
+                    "SELECT phase_index, status FROM phases WHERE task_id=? AND phase_index=?",
+                    (task_id, phase_index + 1)
+                ).fetchone()
 
-                # Update task's current phase index
-                conn.execute(
-                    """
-                    UPDATE tasks SET current_phase_index=?, updated_at=?
-                    WHERE task_id=?
-                    """,
-                    (phase_index + 1, now, task_id)
-                )
+                if next_phase:
+                    normalized_next_status = LEGACY_STATE_MAP.get(next_phase["status"], next_phase["status"])
+                    if normalized_next_status == "PENDING":
+                        conn.execute(
+                            """
+                            UPDATE phases SET status='ACTIVE', started_at=?
+                            WHERE task_id=? AND phase_index=? AND status='PENDING'
+                            """,
+                            (now, task_id, phase_index + 1)
+                        )
+
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                           SET status='ACTIVE',
+                               current_phase_index=?,
+                               updated_at=?
+                         WHERE task_id=?
+                        """,
+                        (phase_index + 1, now, task_id)
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                           SET status='COMPLETED',
+                               current_phase_index=?,
+                               updated_at=?
+                         WHERE task_id=?
+                        """,
+                        (phase_index, now, task_id)
+                    )
 
             conn.execute("COMMIT")
             return True
@@ -2933,10 +3141,10 @@ def create_review_for_phase(
             (review_id, task_id, phase_index, phase_name, num_reviewers, 1 if auto_spawned else 0, now)
         )
 
-        # Update phase status to UNDER_REVIEW
+        # Update phase status to IN_REVIEW
         conn.execute(
             """
-            UPDATE phases SET status='UNDER_REVIEW'
+            UPDATE phases SET status='IN_REVIEW'
             WHERE task_id=? AND phase_index=?
             """,
             (task_id, phase_index)
@@ -3028,67 +3236,96 @@ def update_agent_status(
 ) -> bool:
     """
     Update an agent's status. Used to mark agents as completed, failed, etc.
-    Also updates counts atomically.
+    Counts are derived from agent rows; this function deliberately avoids
+    denormalized task counters so schema drift cannot corrupt status updates.
     """
     db_path = ensure_db(workspace_base)
     conn = _connect(db_path)
     try:
         now = datetime.now().isoformat()
 
-        # Get current status first
+        conn.execute("BEGIN IMMEDIATE")
+
         row = conn.execute(
-            "SELECT status FROM agents WHERE task_id=? AND agent_id=?",
+            "SELECT status, progress FROM agents WHERE task_id=? AND agent_id=?",
             (task_id, agent_id)
         ).fetchone()
 
         if not row:
+            conn.execute("ROLLBACK")
             return False
 
         old_status = row['status']
 
         # Only update if status is actually changing
         if old_status == new_status:
+            conn.execute("ROLLBACK")
             return True
 
-        # Determine if this is a terminal status
-        terminal_statuses = {'completed', 'failed', 'error', 'terminated', 'killed'}
-        active_statuses = {'running', 'working', 'blocked', 'reviewing'}
-
-        # Update the agent
-        if new_status in terminal_statuses:
+        if new_status in AGENT_TERMINAL_STATUSES:
             conn.execute(
                 """
                 UPDATE agents
-                SET status=?, completed_at=?
+                   SET status=?,
+                       completed_at=COALESCE(completed_at, ?),
+                       last_update=?,
+                       progress=CASE WHEN ?='completed' THEN 100 ELSE progress END
+                WHERE task_id=? AND agent_id=?
+                """,
+                (new_status, now, now, new_status, task_id, agent_id)
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE agents
+                   SET status=?,
+                       last_update=?
                 WHERE task_id=? AND agent_id=?
                 """,
                 (new_status, now, task_id, agent_id)
             )
 
-            # Update task counts if transitioning from active to terminal
-            if old_status in active_statuses:
-                conn.execute(
-                    """
-                    UPDATE tasks
-                    SET active_count = MAX(0, active_count - 1),
-                        completed_count = completed_count + 1
-                    WHERE task_id=?
-                    """,
-                    (task_id,)
-                )
-        else:
+        latest_progress = 100 if new_status == "completed" else (row["progress"] or 0)
+        conn.execute(
+            """
+            INSERT INTO agent_progress_latest(task_id, agent_id, timestamp, status, progress, message)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(task_id, agent_id) DO UPDATE SET
+              timestamp=excluded.timestamp,
+              status=excluded.status,
+              progress=excluded.progress,
+              message=excluded.message
+            """,
+            (
+                task_id,
+                agent_id,
+                now,
+                new_status,
+                latest_progress,
+                f"Status changed from {old_status} to {new_status}",
+            ),
+        )
+
+        if new_status in AGENT_ACTIVE_STATUSES:
             conn.execute(
                 """
-                UPDATE agents
-                SET status=?
-                WHERE task_id=? AND agent_id=?
+                UPDATE tasks
+                   SET status=CASE WHEN status='INITIALIZED' THEN 'ACTIVE' ELSE status END,
+                       updated_at=?
+                 WHERE task_id=?
                 """,
-                (new_status, task_id, agent_id)
+                (now, task_id),
             )
+        else:
+            conn.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (now, task_id))
 
         conn.commit()
         return True
     except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
         logger.error(f"update_agent_status error: {e}")
         return False
     finally:
@@ -3099,14 +3336,18 @@ def claim_phase_for_review(
     *,
     workspace_base: str,
     task_id: str,
-    phase_index: int
+    phase_index: int,
+    review_id: Optional[str] = None
 ) -> bool:
     """
-    ATOMIC: Claim a phase for review by transitioning AWAITING_REVIEW -> UNDER_REVIEW.
+    ATOMIC: Claim a phase for review by assigning last_review_id.
 
     This prevents race conditions where multiple threads try to spawn reviewers.
-    Returns True ONLY if this call successfully transitioned the phase.
-    Returns False if phase was already claimed or not in AWAITING_REVIEW.
+    Returns True ONLY if this call successfully claimed the phase.
+    Returns False if phase was already claimed or not ready for review.
+
+    Accepts phases in IN_REVIEW (from ACTIVE auto-submit or FIXING auto-resubmit).
+    Uses BEGIN IMMEDIATE so only one caller can inspect and write the claim.
 
     MUST be called before create_review_record to prevent duplicate reviews.
     """
@@ -3114,29 +3355,115 @@ def claim_phase_for_review(
     conn = _connect(db_path)
     try:
         now = datetime.now().isoformat()
+        claim_review_id = review_id or f"review-claim-{uuid.uuid4().hex[:12]}"
 
-        # Atomic check-and-update: only succeeds if status is AWAITING_REVIEW
+        conn.execute("BEGIN IMMEDIATE")
+
+        phase = conn.execute(
+            """
+            SELECT status, last_review_id
+              FROM phases
+             WHERE task_id=? AND phase_index=?
+            """,
+            (task_id, phase_index)
+        ).fetchone()
+
+        if not phase:
+            conn.execute("ROLLBACK")
+            return False
+
+        phase_status = LEGACY_STATE_MAP.get(phase["status"], phase["status"])
+        if phase_status != "IN_REVIEW":
+            conn.execute("ROLLBACK")
+            logger.info(
+                f"[CLAIM-PHASE] Phase {phase_index} is not claimable "
+                f"(status={phase_status}, task={task_id})"
+            )
+            return False
+
+        active_review = conn.execute(
+            """
+            SELECT review_id
+              FROM reviews
+             WHERE task_id=? AND phase_index=? AND status='in_progress'
+             LIMIT 1
+            """,
+            (task_id, phase_index)
+        ).fetchone()
+        if active_review and active_review["review_id"] != claim_review_id:
+            conn.execute("ROLLBACK")
+            logger.info(
+                f"[CLAIM-PHASE] Phase {phase_index} already has active review "
+                f"{active_review['review_id']} (task={task_id})"
+            )
+            return False
+
+        last_review_id = phase["last_review_id"]
+        if last_review_id and last_review_id != claim_review_id:
+            last_review = conn.execute(
+                "SELECT status FROM reviews WHERE review_id=?",
+                (last_review_id,)
+            ).fetchone()
+            if not last_review or last_review["status"] == "in_progress":
+                conn.execute("ROLLBACK")
+                logger.info(
+                    f"[CLAIM-PHASE] Phase {phase_index} already claimed by "
+                    f"{last_review_id} (task={task_id})"
+                )
+                return False
+
         result = conn.execute(
             """
             UPDATE phases
-            SET status = 'UNDER_REVIEW', started_at = ?
-            WHERE task_id = ? AND phase_index = ? AND status = 'AWAITING_REVIEW'
+               SET status='IN_REVIEW',
+                   started_at=COALESCE(started_at, ?),
+                   last_review_id=?,
+                   revision_ready=0
+             WHERE task_id=? AND phase_index=?
             """,
-            (now, task_id, phase_index)
+            (now, claim_review_id, task_id, phase_index)
         )
-        conn.commit()
+        conn.execute("COMMIT")
 
-        # rowcount > 0 means WE claimed it, rowcount = 0 means someone else did
         claimed = result.rowcount > 0
         if claimed:
-            logger.info(f"[CLAIM-PHASE] Successfully claimed phase {phase_index} for review (task={task_id})")
-        else:
-            logger.info(f"[CLAIM-PHASE] Phase {phase_index} already claimed or not awaiting review (task={task_id})")
-
+            logger.info(
+                f"[CLAIM-PHASE] Successfully claimed phase {phase_index} "
+                f"for review {claim_review_id} (task={task_id})"
+            )
         return claimed
     except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
         logger.error(f"claim_phase_for_review error: {e}")
         return False
+    finally:
+        conn.close()
+
+
+def clear_phase_review_claim(
+    *,
+    workspace_base: str,
+    task_id: str,
+    phase_index: int,
+    review_id: str
+) -> bool:
+    """Clear a review claim if review setup failed before agents were spawned."""
+    db_path = ensure_db(workspace_base)
+    conn = _connect(db_path)
+    try:
+        result = conn.execute(
+            """
+            UPDATE phases
+               SET last_review_id=NULL
+             WHERE task_id=? AND phase_index=? AND last_review_id=?
+            """,
+            (task_id, phase_index, review_id)
+        )
+        conn.commit()
+        return result.rowcount > 0
     finally:
         conn.close()
 
@@ -3159,6 +3486,25 @@ def create_review_record(
         now = datetime.now().isoformat()
         reviewer_ids_json = json.dumps(reviewer_agent_ids or [])
 
+        conn.execute("BEGIN IMMEDIATE")
+
+        existing = conn.execute(
+            """
+            SELECT review_id
+              FROM reviews
+             WHERE task_id=? AND phase_index=? AND status='in_progress' AND review_id <> ?
+             LIMIT 1
+            """,
+            (task_id, phase_index, review_id)
+        ).fetchone()
+        if existing:
+            conn.execute("ROLLBACK")
+            return {
+                "success": False,
+                "error": f"Review already in progress for task {task_id} phase {phase_index}: {existing['review_id']}",
+                "existing_review_id": existing["review_id"],
+            }
+
         conn.execute(
             """
             INSERT INTO reviews (review_id, task_id, phase_index, status, num_reviewers, reviewer_agent_ids, created_at)
@@ -3166,10 +3512,25 @@ def create_review_record(
             """,
             (review_id, task_id, phase_index, num_reviewers, reviewer_ids_json, now)
         )
-        conn.commit()
+        conn.execute(
+            """
+            UPDATE phases
+               SET last_review_id=?,
+                   status='IN_REVIEW',
+                   revision_ready=0,
+                   started_at=COALESCE(started_at, ?)
+             WHERE task_id=? AND phase_index=?
+            """,
+            (review_id, now, task_id, phase_index)
+        )
+        conn.execute("COMMIT")
 
         return {"success": True, "review_id": review_id}
     except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
         logger.error(f"create_review_record error: {e}")
         return {"success": False, "error": str(e)}
     finally:
@@ -3268,7 +3629,8 @@ def get_phase(
         row = conn.execute(
             """
             SELECT phase_index, name, description, status, deliverables,
-                   success_criteria, started_at, completed_at
+                   success_criteria, started_at, completed_at,
+                   revision_round, max_revision_rounds, last_review_id, revision_ready
             FROM phases
             WHERE task_id=? AND phase_index=?
             """,
@@ -3279,13 +3641,20 @@ def get_phase(
             return None
 
         result = dict(row)
-        # Parse JSON fields
+        # Parse JSON fields and ensure they are lists
         for json_field in ['deliverables', 'success_criteria']:
-            if result.get(json_field):
+            val = result.get(json_field)
+            if val:
                 try:
-                    result[json_field] = json.loads(result[json_field])
-                except:
+                    if isinstance(val, str):
+                        val = json.loads(val)
+                    if not isinstance(val, list):
+                        val = [str(val)]
+                    result[json_field] = val
+                except (json.JSONDecodeError, TypeError):
                     result[json_field] = []
+            else:
+                result[json_field] = []
 
         return result
     finally:

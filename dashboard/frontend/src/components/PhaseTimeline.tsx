@@ -2,13 +2,26 @@ import React from 'react';
 import { format } from 'date-fns';
 import clsx from 'clsx';
 
+type PhaseStatus =
+  | 'PENDING'
+  | 'ACTIVE'
+  | 'IN_REVIEW'
+  | 'APPROVED'
+  | 'REVISION_NEEDED'
+  | 'FIXING'
+  | 'ESCALATED'
+  | 'FAILED'
+  | 'AWAITING_REVIEW'
+  | 'UNDER_REVIEW'
+  | 'REJECTED'
+  | 'REVISING';
+
 interface Phase {
   id: string;
   order: number;
   name: string;
   description?: string;
-  status: 'PENDING' | 'ACTIVE' | 'AWAITING_REVIEW' | 'UNDER_REVIEW' |
-          'APPROVED' | 'REJECTED' | 'REVISING' | 'ESCALATED';
+  status: PhaseStatus;
   created_at: string;
   started_at?: string;
   completed_at?: string;
@@ -36,6 +49,8 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({
           </svg>
         );
       case 'REJECTED':
+      case 'REVISION_NEEDED':
+      case 'FAILED':
         return (
           <svg className="w-5 h-5 text-red-600" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -47,11 +62,15 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({
         );
       case 'UNDER_REVIEW':
       case 'AWAITING_REVIEW':
+      case 'IN_REVIEW':
         return (
           <svg className="w-5 h-5 text-yellow-600" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
           </svg>
         );
+      case 'FIXING':
+      case 'REVISING':
+        return <div className="w-3 h-3 bg-orange-500 rounded-full animate-pulse"></div>;
       default:
         return <div className="w-3 h-3 bg-gray-300 rounded-full"></div>;
     }
@@ -69,13 +88,17 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({
         statusClasses = 'bg-green-50 border-green-500';
         break;
       case 'REJECTED':
+      case 'REVISION_NEEDED':
+      case 'FAILED':
         statusClasses = 'bg-red-50 border-red-500';
         break;
       case 'AWAITING_REVIEW':
       case 'UNDER_REVIEW':
+      case 'IN_REVIEW':
         statusClasses = 'bg-yellow-50 border-yellow-500';
         break;
       case 'REVISING':
+      case 'FIXING':
         statusClasses = 'bg-orange-50 border-orange-500';
         break;
       case 'ESCALATED':
@@ -134,10 +157,14 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({
                 phase.status === 'ACTIVE' && 'bg-blue-100 text-blue-700',
                 phase.status === 'APPROVED' && 'bg-green-100 text-green-700',
                 phase.status === 'REJECTED' && 'bg-red-100 text-red-700',
+                phase.status === 'REVISION_NEEDED' && 'bg-red-100 text-red-700',
+                phase.status === 'FAILED' && 'bg-red-100 text-red-700',
                 phase.status === 'PENDING' && 'bg-gray-100 text-gray-700',
                 phase.status === 'AWAITING_REVIEW' && 'bg-yellow-100 text-yellow-700',
                 phase.status === 'UNDER_REVIEW' && 'bg-yellow-100 text-yellow-700',
+                phase.status === 'IN_REVIEW' && 'bg-yellow-100 text-yellow-700',
                 phase.status === 'REVISING' && 'bg-orange-100 text-orange-700',
+                phase.status === 'FIXING' && 'bg-orange-100 text-orange-700',
                 phase.status === 'ESCALATED' && 'bg-sky-100 text-sky-700'
               )}>
                 {phase.status}

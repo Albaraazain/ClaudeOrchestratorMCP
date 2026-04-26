@@ -6,7 +6,7 @@ This script is called when a Claude agent's tmux session exits.
 It immediately updates the registry based on the stream log's result marker.
 
 Usage:
-    python3 completion_notifier.py <task_id> <agent_id> <workspace> <log_file>
+    python3 completion_notifier.py <task_id> <agent_id> <workspace> <log_file> [exit_code]
 
 Called automatically by the agent's tmux command chain when Claude exits.
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from orchestrator import state_db
 
 TERMINAL_STATUSES = {'completed', 'failed', 'error', 'terminated', 'killed'}
-ACTIVE_STATUSES = {'running', 'working', 'blocked'}
+ACTIVE_STATUSES = {'running', 'working', 'blocked', 'reviewing'}
 
 
 def read_last_jsonl_entry(path: str) -> dict | None:
@@ -63,7 +63,7 @@ def read_last_jsonl_entry(path: str) -> dict | None:
         return None
 
 
-def update_agent_completion(task_id: str, agent_id: str, workspace: str, log_file: str) -> bool:
+def update_agent_completion(task_id: str, agent_id: str, workspace: str, log_file: str, exit_code: int | None = None) -> bool:
     """
     Update agent status based on stream log completion marker.
 
@@ -80,8 +80,7 @@ def update_agent_completion(task_id: str, agent_id: str, workspace: str, log_fil
 
     if not last_entry:
         logger.warning(f"No entries in log file: {log_file}")
-        # Still mark as completed since tmux session exited
-        new_status = 'completed'
+        new_status = 'failed'
         completion_reason = 'tmux_session_exited_no_log'
         result_msg = ''
     elif last_entry.get('type') == 'result':
@@ -95,10 +94,13 @@ def update_agent_completion(task_id: str, agent_id: str, workspace: str, log_fil
             new_status = 'completed'
             completion_reason = 'stream_log_result_marker'
     else:
-        # No result marker but session ended
-        new_status = 'completed'
-        completion_reason = 'tmux_session_exited'
+        new_status = 'failed'
+        completion_reason = 'tmux_session_exited_without_result_marker'
         result_msg = ''
+
+    if exit_code not in (None, 0) and new_status == 'completed':
+        new_status = 'failed'
+        completion_reason = f'cli_exit_code_{exit_code}'
 
     try:
         # Get current agent status from SQLite
@@ -137,18 +139,24 @@ def update_agent_completion(task_id: str, agent_id: str, workspace: str, log_fil
 
 
 def main():
-    if len(sys.argv) != 5:
-        print(f"Usage: {sys.argv[0]} <task_id> <agent_id> <workspace> <log_file>", file=sys.stderr)
+    if len(sys.argv) not in (5, 6):
+        print(f"Usage: {sys.argv[0]} <task_id> <agent_id> <workspace> <log_file> [exit_code]", file=sys.stderr)
         sys.exit(1)
 
     task_id = sys.argv[1]
     agent_id = sys.argv[2]
     workspace = sys.argv[3]
     log_file = sys.argv[4]
+    exit_code = None
+    if len(sys.argv) == 6:
+        try:
+            exit_code = int(sys.argv[5])
+        except ValueError:
+            logger.warning(f"Ignoring non-integer exit code: {sys.argv[5]}")
 
     logger.info(f"Processing completion for agent {agent_id} (task: {task_id})")
 
-    success = update_agent_completion(task_id, agent_id, workspace, log_file)
+    success = update_agent_completion(task_id, agent_id, workspace, log_file, exit_code)
     sys.exit(0 if success else 1)
 
 

@@ -1,6 +1,6 @@
 {
   "claude-orchestrator": {
-    "command": "/Users/albaraa/Developer/Projects/ClaudeOrchestratorMCP/venv/bin/python3",
+    "command": "/Users/pcx/Documents/Projects/ClaudeOrchestratorMCP/venv/bin/python3",
     "args": ["real_mcp_server.py"]
   }
 }

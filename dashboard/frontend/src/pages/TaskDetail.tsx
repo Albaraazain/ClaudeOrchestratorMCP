@@ -21,14 +21,27 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 
+type PhaseStatus =
+  | 'PENDING'
+  | 'ACTIVE'
+  | 'IN_REVIEW'
+  | 'APPROVED'
+  | 'REVISION_NEEDED'
+  | 'FIXING'
+  | 'ESCALATED'
+  | 'FAILED'
+  | 'AWAITING_REVIEW'
+  | 'UNDER_REVIEW'
+  | 'REJECTED'
+  | 'REVISING';
+
 // Types (mirrored from index.ts for convenience/safety)
 interface Phase {
   id: string;
   order: number;
   name: string;
   description?: string;
-  status: 'PENDING' | 'ACTIVE' | 'AWAITING_REVIEW' | 'UNDER_REVIEW' |
-          'APPROVED' | 'REJECTED' | 'REVISING' | 'ESCALATED';
+  status: PhaseStatus;
   created_at: string;
   started_at?: string;
   completed_at?: string;
@@ -234,7 +247,9 @@ const TaskDetail: React.FC = () => {
                                 "uppercase font-bold tracking-wider",
                                 phase.status === 'ACTIVE' ? "text-primary" :
                                 phase.status === 'APPROVED' ? "text-success" :
-                                phase.status === 'REJECTED' ? "text-error" : "text-textMuted"
+                                phase.status === 'REJECTED' || phase.status === 'REVISION_NEEDED' || phase.status === 'FAILED' ? "text-error" :
+                                phase.status === 'FIXING' ? "text-warning" :
+                                phase.status === 'IN_REVIEW' ? "text-warning" : "text-textMuted"
                              )}>{phase.status}</span>
                              {phase.started_at && <span>• {format(new Date(phase.started_at), 'HH:mm')}</span>}
                           </div>

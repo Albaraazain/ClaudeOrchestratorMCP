@@ -28,18 +28,23 @@ __all__ = [
 
 
 # ============================================================================
-# PHASE STATUS CONSTANTS (8-state machine per MIT-002)
+# PHASE STATUS CONSTANTS (redesigned Mar 2026)
 # ============================================================================
 
 PHASE_STATUSES = frozenset({
     'PENDING',           # Phase not yet started
     'ACTIVE',            # Phase currently in progress
-    'AWAITING_REVIEW',   # Phase work complete, awaiting review
-    'UNDER_REVIEW',      # Phase actively being reviewed
+    'IN_REVIEW',         # Phase under review (reviewers evaluating)
     'APPROVED',          # Phase passed review
-    'REJECTED',          # Phase failed review
-    'REVISING',          # Phase being revised after rejection
-    'ESCALATED',         # Phase escalated for higher-level review
+    'REVISION_NEEDED',   # Phase needs fixes (review rejected/needs_revision)
+    'FIXING',            # Fix agents deployed, working on review feedback
+    'ESCALATED',         # Phase escalated (reviewers crashed or max rounds exceeded)
+    'FAILED',            # Phase explicitly abandoned (terminal)
+    # Legacy states accepted for backward compat
+    'AWAITING_REVIEW',
+    'UNDER_REVIEW',
+    'REJECTED',
+    'REVISING',
 })
 
 

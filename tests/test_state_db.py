@@ -33,6 +33,11 @@ from orchestrator.state_db import (
     load_phase_snapshot,
     load_recent_progress_latest,
     normalize_agent_status,
+    update_agent_status,
+    claim_phase_for_review,
+    create_review_record,
+    finalize_review,
+    transition_task_to_completed,
     get_state_db_path,
     AGENT_TERMINAL_STATUSES,
     AGENT_ACTIVE_STATUSES,
@@ -128,8 +133,13 @@ class TestStateDB:
             """)
             tables = [row[0] for row in cursor.fetchall()]
 
-            expected_tables = ['agent_progress_latest', 'agents', 'phases', 'tasks']
-            assert tables == expected_tables, f"Expected tables {expected_tables}, got {tables}"
+            expected_tables = {
+                'agent_progress_latest', 'agents', 'phases', 'tasks',
+                'reviews', 'review_verdicts', 'critique_submissions',
+                'agent_findings', 'handovers', 'task_config',
+                'agent_hierarchy', 'phase_outcomes'
+            }
+            assert expected_tables.issubset(set(tables)), f"Missing tables: {expected_tables - set(tables)}"
 
             # Verify tasks table columns
             cursor = conn.execute("PRAGMA table_info(tasks)")
@@ -286,7 +296,7 @@ class TestStateDB:
             row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             assert row is not None
             assert dict(row)["task_id"] == task_id
-            assert dict(row)["status"] == "INITIALIZED"
+            assert dict(row)["status"] == "ACTIVE"
             assert dict(row)["priority"] == "P1"
 
             # Check phases
@@ -451,6 +461,182 @@ class TestStateDB:
 
             finally:
                 conn.close()
+
+    def test_update_agent_status_uses_derived_counts(self, temp_workspace):
+        """update_agent_status must not write nonexistent denormalized task counters."""
+        db_path = ensure_db(temp_workspace)
+        task_id = "TASK-derived-counts-test"
+        agent_id = "agent-derived-counts-test"
+
+        conn = _connect(db_path)
+        try:
+            conn.execute("""
+                INSERT INTO tasks(task_id, workspace, workspace_base, status, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+            """, (task_id, "workspace", temp_workspace, "INITIALIZED",
+                  datetime.now().isoformat(), datetime.now().isoformat()))
+            conn.execute("""
+                INSERT INTO agents(agent_id, task_id, type, status, progress, started_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+            """, (agent_id, task_id, "worker", "running", 0, datetime.now().isoformat()))
+        finally:
+            conn.close()
+
+        assert update_agent_status(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            agent_id=agent_id,
+            new_status="completed"
+        )
+
+        conn = _connect(db_path)
+        try:
+            agent = conn.execute(
+                "SELECT status, progress, completed_at FROM agents WHERE agent_id=?",
+                (agent_id,)
+            ).fetchone()
+            assert agent["status"] == "completed"
+            assert agent["progress"] == 100
+            assert agent["completed_at"] is not None
+        finally:
+            conn.close()
+
+    def test_agent_completion_does_not_complete_phased_task_before_review(self, temp_workspace):
+        """A phased task cannot finish just because its agents finished."""
+        db_path = ensure_db(temp_workspace)
+        task_id = "TASK-agent-before-review"
+        agent_id = "agent-before-review"
+
+        conn = _connect(db_path)
+        try:
+            conn.execute("""
+                INSERT INTO tasks(task_id, workspace, workspace_base, status, created_at, updated_at, current_phase_index)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+            """, (task_id, "workspace", temp_workspace, "ACTIVE",
+                  datetime.now().isoformat(), datetime.now().isoformat(), 0))
+            conn.execute("""
+                INSERT INTO phases(task_id, phase_index, name, status, created_at)
+                VALUES(?, ?, ?, ?, ?)
+            """, (task_id, 0, "Implementation", "ACTIVE", datetime.now().isoformat()))
+            conn.execute("""
+                INSERT INTO agents(agent_id, task_id, type, status, progress, phase_index, started_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+            """, (agent_id, task_id, "worker", "running", 0, 0, datetime.now().isoformat()))
+        finally:
+            conn.close()
+
+        assert update_agent_status(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            agent_id=agent_id,
+            new_status="completed"
+        )
+        assert not transition_task_to_completed(workspace_base=temp_workspace, task_id=task_id)
+
+        conn = _connect(db_path)
+        try:
+            task = conn.execute("SELECT status FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            assert task["status"] == "ACTIVE"
+        finally:
+            conn.close()
+
+    def test_claim_phase_for_review_is_exclusive(self, temp_workspace):
+        """Only one in-progress review may claim a phase."""
+        db_path = ensure_db(temp_workspace)
+        task_id = "TASK-exclusive-review"
+
+        conn = _connect(db_path)
+        try:
+            conn.execute("""
+                INSERT INTO tasks(task_id, workspace, workspace_base, status, created_at, updated_at, current_phase_index)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+            """, (task_id, "workspace", temp_workspace, "ACTIVE",
+                  datetime.now().isoformat(), datetime.now().isoformat(), 0))
+            conn.execute("""
+                INSERT INTO phases(task_id, phase_index, name, status, created_at)
+                VALUES(?, ?, ?, ?, ?)
+            """, (task_id, 0, "Reviewable", "IN_REVIEW", datetime.now().isoformat()))
+        finally:
+            conn.close()
+
+        assert claim_phase_for_review(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            phase_index=0,
+            review_id="review-1"
+        )
+        assert not claim_phase_for_review(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            phase_index=0,
+            review_id="review-2"
+        )
+
+        create_result = create_review_record(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            review_id="review-1",
+            phase_index=0,
+            num_reviewers=1
+        )
+        assert create_result["success"]
+
+        duplicate_result = create_review_record(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            review_id="review-2",
+            phase_index=0,
+            num_reviewers=1
+        )
+        assert not duplicate_result["success"]
+
+    def test_finalize_final_phase_completes_task(self, temp_workspace):
+        """Approving the final phase should complete the task without advancing past the last phase."""
+        db_path = ensure_db(temp_workspace)
+        task_id = "TASK-final-phase"
+        review_id = "review-final-phase"
+
+        conn = _connect(db_path)
+        try:
+            conn.execute("""
+                INSERT INTO tasks(task_id, workspace, workspace_base, status, created_at, updated_at, current_phase_index)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+            """, (task_id, "workspace", temp_workspace, "ACTIVE",
+                  datetime.now().isoformat(), datetime.now().isoformat(), 0))
+            conn.execute("""
+                INSERT INTO phases(task_id, phase_index, name, status, created_at, last_review_id)
+                VALUES(?, ?, ?, ?, ?, ?)
+            """, (task_id, 0, "Final Testing", "IN_REVIEW", datetime.now().isoformat(), review_id))
+            conn.execute("""
+                INSERT INTO reviews(review_id, task_id, phase_index, status, num_reviewers, created_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+            """, (review_id, task_id, 0, "in_progress", 1, datetime.now().isoformat()))
+        finally:
+            conn.close()
+
+        assert finalize_review(
+            workspace_base=temp_workspace,
+            task_id=task_id,
+            review_id=review_id,
+            phase_index=0,
+            final_verdict="approved"
+        )
+
+        conn = _connect(db_path)
+        try:
+            task = conn.execute(
+                "SELECT status, current_phase_index FROM tasks WHERE task_id=?",
+                (task_id,)
+            ).fetchone()
+            phase = conn.execute(
+                "SELECT status FROM phases WHERE task_id=? AND phase_index=0",
+                (task_id,)
+            ).fetchone()
+            assert task["status"] == "COMPLETED"
+            assert task["current_phase_index"] == 0
+            assert phase["status"] == "APPROVED"
+        finally:
+            conn.close()
 
     def test_count_queries_accuracy(self, temp_workspace):
         """Test that count queries return accurate values."""
@@ -706,6 +892,16 @@ class TestStateDB:
             """, (task_id, "workspace", temp_workspace, "ACTIVE",
                   datetime.now().isoformat(), datetime.now().isoformat(), 0))
 
+            # Insert phase metadata
+            conn.execute("""
+                INSERT INTO phases(task_id, phase_index, name, status, created_at)
+                VALUES(?, ?, ?, ?, ?)
+            """, (task_id, 0, "Phase Zero", "ACTIVE", datetime.now().isoformat()))
+            conn.execute("""
+                INSERT INTO phases(task_id, phase_index, name, status, created_at)
+                VALUES(?, ?, ?, ?, ?)
+            """, (task_id, 1, "Phase One", "PENDING", datetime.now().isoformat()))
+
             # Insert agents for phase 0
             phase0_agents = [
                 ("agent-p0-1", "completed", 100),
@@ -736,6 +932,8 @@ class TestStateDB:
 
         # Test phase 0 snapshot
         phase0_snapshot = load_phase_snapshot(workspace_base=temp_workspace, task_id=task_id, phase_index=0)
+        assert phase0_snapshot["name"] == "Phase Zero"
+        assert phase0_snapshot["status"] == "ACTIVE"
         assert len(phase0_snapshot["agents"]) == 3
         assert phase0_snapshot["counts"]["total"] == 3
         assert phase0_snapshot["counts"]["completed"] == 2

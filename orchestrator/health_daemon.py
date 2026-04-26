@@ -27,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 # Agent statuses
 AGENT_TERMINAL_STATUSES = {'completed', 'failed', 'error', 'terminated', 'killed'}
-AGENT_ACTIVE_STATUSES = {'running', 'working', 'blocked'}
+AGENT_ACTIVE_STATUSES = {'running', 'working', 'blocked', 'reviewing'}
 
 # Health check configuration
 DEFAULT_SCAN_INTERVAL = 30  # seconds between health scans
 STUCK_AGENT_THRESHOLD = 900  # 15 minutes without log activity = stuck (increased from 5 min for complex reasoning tasks)
 LOG_CHECK_INTERVAL = 60  # check log files every 60 seconds
+REVIEW_TIMEOUT_SECONDS = 600  # 10 minutes - max time for a review before timeout handling
+MAX_REVIEWER_RETRIES = 2  # Max times to respawn crashed reviewers before escalating
 
 
 class HealthDaemon:
@@ -52,6 +54,7 @@ class HealthDaemon:
         self.stop_event = threading.Event()
         self.monitored_tasks = set()  # Task IDs being monitored
         self.last_log_check = {}  # Track last log modification times
+        self._review_retry_counts = {}  # Track retry attempts per review: "task_id:review_id" -> count
         self.is_running = False
 
         logger.info(f"HealthDaemon initialized for workspace: {self.workspace_base}")
@@ -164,6 +167,13 @@ class HealthDaemon:
                     except Exception as e:
                         logger.error(f"Error scanning task {task_id}: {e}")
 
+                # Proactively check for timed-out reviews (not just when agents die)
+                for task_id in list(self.monitored_tasks):
+                    try:
+                        self._check_review_timeouts(task_id)
+                    except Exception as e:
+                        logger.error(f"Error checking review timeouts for {task_id}: {e}")
+
                 # Periodically clean up dead agents from global registry
                 scan_count += 1
                 if scan_count >= GLOBAL_CLEANUP_INTERVAL:
@@ -189,7 +199,7 @@ class HealthDaemon:
         Args:
             task_id: Task ID to scan
         """
-        workspace = find_task_workspace(task_id, self.workspace_base)
+        workspace = find_task_workspace(task_id)
         if not workspace:
             logger.warning(f"Task {task_id} workspace not found, unregistering")
             self.unregister_task(task_id)
@@ -509,7 +519,9 @@ class HealthDaemon:
         Returns:
             Health status dict with 'healthy' bool and 'reason' if unhealthy
         """
-        agent_id = agent_info['id']
+        agent_id = agent_info.get('agent_id') or agent_info.get('id')
+        if not agent_id:
+            return {'healthy': False, 'reason': 'no_agent_id', 'details': {}}
 
         # 1. Check tmux session exists
         if 'tmux_session' in agent_info:
@@ -578,9 +590,34 @@ class HealthDaemon:
 
         return {'healthy': True}
 
+    def _get_active_tmux_sessions(self) -> set:
+        """
+        Get all active tmux session names in a single subprocess call.
+        Much more efficient than checking each session individually.
+
+        Returns:
+            Set of active session names
+        """
+        if not hasattr(self, '_tmux_sessions_cache_time') or \
+           (time.time() - self._tmux_sessions_cache_time) > 5:
+            try:
+                result = subprocess.run(
+                    ['tmux', 'list-sessions', '-F', '#{session_name}'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    self._tmux_sessions_cache = set(result.stdout.strip().split('\n')) if result.stdout.strip() else set()
+                else:
+                    self._tmux_sessions_cache = set()
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                self._tmux_sessions_cache = set()
+            self._tmux_sessions_cache_time = time.time()
+        return self._tmux_sessions_cache
+
     def _check_tmux_session_exists(self, session_name: str) -> bool:
         """
-        Check if a tmux session exists.
+        Check if a tmux session exists using the cached session list.
+        Falls back to individual check if cache is unavailable.
 
         Args:
             session_name: Name of tmux session
@@ -588,15 +625,7 @@ class HealthDaemon:
         Returns:
             True if session exists, False otherwise
         """
-        try:
-            result = subprocess.run(
-                ['tmux', 'has-session', '-t', session_name],
-                capture_output=True,
-                timeout=2
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return False
+        return session_name in self._get_active_tmux_sessions()
 
     def _check_process_alive(self, pid: int) -> bool:
         """
@@ -677,14 +706,19 @@ class HealthDaemon:
             # ===== AUTOMATIC PHASE ENFORCEMENT =====
             # Check if ALL agents in current phase are now in terminal state
             try:
-                task_data = state_db.get_task(workspace_base=workspace_base, task_id=task_id)
+                task_data = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
                 current_phase_idx = task_data.get('current_phase_index', 0) if task_data else 0
 
                 phase_state = state_db.load_phase_snapshot(
                     workspace_base=workspace_base, task_id=task_id, phase_index=current_phase_idx
                 )
 
-                if phase_state and phase_state.get('status') == 'ACTIVE':
+                phase_status = phase_state.get('status', '') if phase_state else ''
+                # Normalize legacy states
+                if phase_status in ('REJECTED', 'REVISING'):
+                    phase_status = 'REVISION_NEEDED'
+
+                if phase_state and phase_status in ('ACTIVE', 'FIXING'):
                     counts = phase_state.get("counts", {}) or {}
                     total_agents = int(counts.get("total", 0))
                     completed_count = int(counts.get("completed", 0))
@@ -692,17 +726,57 @@ class HealthDaemon:
 
                     logger.info(
                         f"Phase {current_phase_idx} health check (SQLite): "
-                        f"{completed_count}/{total_agents} completed, {failed_count} failed"
+                        f"{completed_count}/{total_agents} completed, {failed_count} failed, status={phase_status}"
                     )
 
                     # All agents in terminal state?
+                    should_auto_submit = False
                     if total_agents > 0 and bool(counts.get("all_done")):
+                        if phase_status == 'ACTIVE':
+                            should_auto_submit = True
+                        elif phase_status == 'FIXING':
+                            # For FIXING phases, check revision_ready flag before auto-submitting
+                            phase_data = state_db.get_phase(
+                                workspace_base=workspace_base,
+                                task_id=task_id,
+                                phase_index=current_phase_idx
+                            )
+                            if not phase_data or not phase_data.get('revision_ready'):
+                                logger.info(f"Phase {current_phase_idx} is FIXING and all agents done, but revision_ready not set — skipping auto-submit")
+                            else:
+                                # Check revision round limits
+                                revision_round = (phase_data.get('revision_round') or 0) + 1
+                                max_rounds = phase_data.get('max_revision_rounds') or 3
+                                if revision_round > max_rounds:
+                                    logger.warning(f"Phase {current_phase_idx} exceeded max revision rounds ({max_rounds}) — ESCALATING")
+                                    state_db.update_phase_status(
+                                        workspace_base=workspace_base,
+                                        task_id=task_id,
+                                        phase_index=current_phase_idx,
+                                        new_status='ESCALATED'
+                                    )
+                                else:
+                                    # Update revision_round
+                                    db_path = state_db.ensure_db(workspace_base)
+                                    conn = state_db._connect(db_path)
+                                    try:
+                                        conn.execute(
+                                            "UPDATE phases SET revision_round = ? WHERE task_id = ? AND phase_index = ?",
+                                            (revision_round, task_id, current_phase_idx)
+                                        )
+                                        conn.commit()
+                                    finally:
+                                        conn.close()
+                                    logger.info(f"FIXING phase {current_phase_idx} auto-submitting for re-review (round {revision_round}/{max_rounds})")
+                                    should_auto_submit = True
+
+                    if should_auto_submit:
                         # AUTO-SUBMIT PHASE FOR REVIEW - update phase status in SQLite
                         state_db.update_phase_status(
                             workspace_base=workspace_base,
                             task_id=task_id,
                             phase_index=current_phase_idx,
-                            new_status='AWAITING_REVIEW'
+                            new_status='IN_REVIEW'
                         )
 
                         pending_phase_check = {
@@ -726,12 +800,15 @@ class HealthDaemon:
             self._update_global_registry(workspace, failed_agents)
 
             # ===== CHECK FOR STALLED REVIEWS =====
-            # If any failed agents are reviewers, check if review can be finalized with partial verdicts
-            reviewer_agent_ids = [
-                f['agent'].get('agent_id') or f['agent'].get('id')
-                for f in failed_agents
-                if 'reviewer' in (f['agent'].get('agent_type') or f['agent'].get('type', '')).lower()
-            ]
+            # If any failed agents are reviewers (NOT critique agents), check if review can be finalized
+            # Critique agents provide non-binding observations - their crashes don't affect review verdicts
+            reviewer_agent_ids = []
+            for f in failed_agents:
+                agent = f['agent']
+                agent_type = (agent.get('agent_type') or agent.get('type', '')).lower()
+                agent_id = agent.get('agent_id') or agent.get('id')
+                if agent_id and 'reviewer' in agent_type and 'critique' not in agent_type:
+                    reviewer_agent_ids.append(agent_id)
             if reviewer_agent_ids:
                 self._check_stalled_reviews(task_id, workspace, reviewer_agent_ids)
 
@@ -787,7 +864,10 @@ class HealthDaemon:
 
             with LockedRegistryFile(global_reg_path) as (global_reg, gf):
                 for failed_info in failed_agents:
-                    agent_id = failed_info['agent']['id']
+                    agent = failed_info['agent']
+                    agent_id = agent.get('agent_id') or agent.get('id')
+                    if not agent_id:
+                        continue
 
                     if agent_id in global_reg.get('agents', {}):
                         global_reg['agents'][agent_id]['status'] = 'failed'
@@ -878,162 +958,321 @@ class HealthDaemon:
         except Exception as e:
             logger.error(f"Global registry daemon cleanup failed: {e}")
 
+    def _check_review_timeouts(self, task_id: str):
+        """
+        Proactively check for reviews that have exceeded the timeout threshold.
+
+        This runs every daemon cycle and catches reviews where reviewers are alive
+        but stuck (not crashed, just not progressing). Unlike _check_stalled_reviews
+        which is reactive (triggered by dead agents), this is proactive.
+
+        Strategy:
+        - Review running > REVIEW_TIMEOUT_SECONDS with 0 verdicts → check if reviewers are actually alive
+        - If reviewers' tmux sessions are dead but not yet marked → mark them dead, triggering _check_stalled_reviews
+        - If reviewers are alive but stuck → kill them (they'll be caught as dead on next scan)
+        """
+        workspace = find_task_workspace(task_id)
+        if not workspace:
+            return
+
+        workspace_base = get_workspace_base_from_task_workspace(workspace)
+
+        try:
+            reviews = state_db.get_reviews_for_task(workspace_base=workspace_base, task_id=task_id)
+
+            for review in reviews:
+                if review.get('status') != 'in_progress':
+                    continue
+
+                review_id = review.get('review_id')
+                created_at_str = review.get('created_at')
+                if not created_at_str:
+                    continue
+
+                # Check if review has exceeded timeout
+                try:
+                    created_at = datetime.fromisoformat(created_at_str)
+                except (ValueError, TypeError):
+                    continue
+
+                elapsed = (datetime.now() - created_at).total_seconds()
+                if elapsed < REVIEW_TIMEOUT_SECONDS:
+                    continue
+
+                # Review has timed out - check reviewer status
+                reviewer_agent_ids = review.get('reviewer_agent_ids', [])
+                verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=review_id)
+                submitted_ids = {v.get('reviewer_agent_id') for v in verdicts}
+                pending_ids = [rid for rid in reviewer_agent_ids if rid not in submitted_ids]
+
+                if not pending_ids:
+                    continue  # All verdicts in, will be finalized elsewhere
+
+                logger.warning(
+                    f"Review {review_id} timed out after {elapsed:.0f}s. "
+                    f"{len(pending_ids)} pending reviewers: {pending_ids}"
+                )
+
+                # Check if pending reviewers have dead tmux sessions (using cached batch check)
+                active_sessions = self._get_active_tmux_sessions()
+                dead_reviewer_ids = []
+                for agent_id in pending_ids:
+                    session_name = f"agent_{agent_id}"
+                    if session_name not in active_sessions:
+                        # Session dead - mark agent as failed
+                        logger.warning(f"Timed-out reviewer {agent_id} has dead tmux session")
+                        state_db.update_agent_status(
+                            workspace_base=workspace_base,
+                            task_id=task_id,
+                            agent_id=agent_id,
+                            new_status='failed'
+                        )
+                        dead_reviewer_ids.append(agent_id)
+                    else:
+                        # Session alive but not submitting - kill it
+                        logger.warning(f"Killing stuck reviewer {agent_id} (alive but timed out)")
+                        try:
+                            subprocess.run(
+                                ["tmux", "kill-session", "-t", session_name],
+                                capture_output=True, timeout=5
+                            )
+                        except Exception as e:
+                            logger.error(f"Error killing tmux for reviewer {agent_id}: {e}")
+                        state_db.update_agent_status(
+                            workspace_base=workspace_base,
+                            task_id=task_id,
+                            agent_id=agent_id,
+                            new_status='failed'
+                        )
+                        dead_reviewer_ids.append(agent_id)
+                        # Invalidate cache since we killed a session
+                        self._tmux_sessions_cache_time = 0
+
+                # Trigger stalled review handling for the dead reviewers
+                if dead_reviewer_ids:
+                    self._check_stalled_reviews(task_id, workspace, dead_reviewer_ids)
+
+        except Exception as e:
+            logger.error(f"Error in _check_review_timeouts for {task_id}: {e}")
+
     def _check_stalled_reviews(self, task_id: str, workspace: str, dead_reviewer_ids: List[str]):
         """
-        Check if any reviews are stalled due to dead reviewers and finalize with partial verdicts.
+        Check if any reviews are stalled due to dead reviewers.
 
-        This is called when the health daemon detects that reviewer agents have died.
-        If a review has some verdicts submitted and all remaining reviewers are dead,
-        we finalize the review with the partial verdicts available.
+        SQLITE MIGRATION: Now uses SQLite instead of JSON registry.
+
+        Recovery strategy:
+        1. If some verdicts submitted + all remaining reviewers dead → finalize with partial verdicts
+        2. If zero verdicts + all reviewers dead + retries remaining → auto-respawn replacement reviewers
+        3. If zero verdicts + all reviewers dead + retries exhausted → escalate
 
         Args:
             task_id: Task ID
             workspace: Task workspace path
             dead_reviewer_ids: List of reviewer agent IDs that were just marked as failed
         """
-        registry_path = os.path.join(workspace, "AGENT_REGISTRY.json")
+        workspace_base = get_workspace_base_from_task_workspace(workspace)
 
         try:
-            with LockedRegistryFile(registry_path) as (registry, f):
-                reviews = registry.get('reviews', [])
-                modified = False
+            # Get all in-progress reviews for this task from SQLite
+            reviews = state_db.get_reviews_for_task(workspace_base=workspace_base, task_id=task_id)
 
-                for review in reviews:
-                    # Only check in-progress reviews
-                    if review.get('status') != 'in_progress':
-                        continue
+            for review in reviews:
+                if review.get('status') != 'in_progress':
+                    continue
 
-                    review_id = review.get('id')
-                    verdicts = review.get('verdicts', [])
-                    reviewers = review.get('reviewers', [])
+                review_id = review.get('review_id')
+                reviewer_agent_ids = review.get('reviewer_agent_ids', [])
+                phase_index = review.get('phase_index')
 
-                    if not reviewers:
-                        continue
+                if not reviewer_agent_ids:
+                    continue
 
-                    # Get all reviewer agent IDs for this review
-                    reviewer_agent_ids = [r.get('agent_id') for r in reviewers]
-                    submitted_reviewer_ids = [v.get('reviewer_agent_id') for v in verdicts]
+                # Get submitted verdicts from SQLite
+                verdicts = state_db.get_review_verdicts(workspace_base=workspace_base, review_id=review_id)
+                submitted_reviewer_ids = [v.get('reviewer_agent_id') for v in verdicts]
 
-                    # Find reviewers that haven't submitted yet
-                    pending_reviewer_ids = [rid for rid in reviewer_agent_ids if rid not in submitted_reviewer_ids]
+                # Find reviewers that haven't submitted yet
+                pending_reviewer_ids = [rid for rid in reviewer_agent_ids if rid not in submitted_reviewer_ids]
 
-                    if not pending_reviewer_ids:
-                        # All submitted - this shouldn't happen but just in case
-                        continue
+                if not pending_reviewer_ids:
+                    continue
 
-                    # Check if any of the dead reviewers are in this review's pending list
-                    dead_in_this_review = [rid for rid in pending_reviewer_ids if rid in dead_reviewer_ids]
+                # Check if any of the dead reviewers are in this review's pending list
+                dead_in_this_review = [rid for rid in pending_reviewer_ids if rid in dead_reviewer_ids]
+                if not dead_in_this_review:
+                    continue
 
-                    if not dead_in_this_review:
-                        # The dead reviewers aren't part of this review
-                        continue
+                # Check if ALL pending reviewers are now dead (check SQLite for agent status)
+                all_pending_dead = True
+                for pending_id in pending_reviewer_ids:
+                    agent = state_db.get_agent_by_id(
+                        workspace_base=workspace_base,
+                        task_id=task_id,
+                        agent_id=pending_id
+                    )
+                    if agent and agent.get('status') not in AGENT_TERMINAL_STATUSES:
+                        all_pending_dead = False
+                        break
 
-                    # Check if ALL pending reviewers are now dead (check registry for all agents)
-                    all_pending_dead = True
-                    for pending_id in pending_reviewer_ids:
-                        # Check if this pending reviewer is dead
-                        for agent in registry.get('agents', []):
-                            if agent.get('id') == pending_id:
-                                if agent.get('status') not in {'failed', 'error', 'terminated', 'killed'}:
-                                    all_pending_dead = False
-                                break
+                if not all_pending_dead:
+                    continue
 
-                    if all_pending_dead and len(verdicts) > 0:
-                        # We have partial verdicts and all remaining reviewers are dead
-                        # Finalize with what we have
-                        logger.warning(f"Review {review_id} has stalled - {len(verdicts)}/{len(reviewer_agent_ids)} "
-                                      f"verdicts submitted, {len(pending_reviewer_ids)} reviewers dead. "
-                                      f"Finalizing with partial verdicts.")
+                if len(verdicts) > 0:
+                    # CASE 1: Partial verdicts available - finalize with what we have
+                    logger.warning(f"Review {review_id} stalled - {len(verdicts)}/{len(reviewer_agent_ids)} "
+                                  f"verdicts submitted, {len(pending_reviewer_ids)} reviewers dead. "
+                                  f"Finalizing with partial verdicts.")
 
-                        # Aggregate partial verdicts
-                        approved_count = sum(1 for v in verdicts if v.get('verdict') == 'approved')
-                        rejected_count = sum(1 for v in verdicts if v.get('verdict') == 'rejected')
-                        needs_revision_count = sum(1 for v in verdicts if v.get('verdict') == 'needs_revision')
+                    approved_count = sum(1 for v in verdicts if v.get('verdict') == 'approved')
+                    rejected_count = sum(1 for v in verdicts if v.get('verdict') == 'rejected')
+                    needs_revision_count = sum(1 for v in verdicts if v.get('verdict') == 'needs_revision')
 
-                        # Collect all findings
-                        all_findings = []
-                        for v in verdicts:
-                            all_findings.extend(v.get('findings', []))
+                    # Determine final outcome (simple majority from submitted verdicts)
+                    if approved_count > (rejected_count + needs_revision_count):
+                        final_outcome = 'APPROVED'
+                    else:
+                        final_outcome = 'REVISION_NEEDED'
 
-                        # Determine final outcome (simple majority from submitted verdicts)
-                        if rejected_count > approved_count and rejected_count > needs_revision_count:
-                            final_outcome = 'REJECTED'
-                        elif needs_revision_count > approved_count:
-                            final_outcome = 'REJECTED'  # Treat needs_revision as rejection
-                        elif approved_count > 0:
-                            final_outcome = 'APPROVED'
+                    # Update review in SQLite
+                    final_verdict_str = 'approved' if final_outcome == 'APPROVED' else 'rejected'
+                    notes = (f"Partial verdict: {approved_count} approved, {rejected_count} rejected, "
+                             f"{needs_revision_count} needs_revision. "
+                             f"Dead reviewers: {pending_reviewer_ids}")
+                    state_db.update_review(
+                        workspace_base=workspace_base,
+                        review_id=review_id,
+                        status='completed',
+                        verdict=final_verdict_str,
+                        reviewer_notes=notes
+                    )
+
+                    # Update phase status in SQLite
+                    if phase_index is not None:
+                        if final_outcome == 'APPROVED':
+                            state_db.update_phase_status(
+                                workspace_base=workspace_base,
+                                task_id=task_id,
+                                phase_index=phase_index,
+                                new_status='APPROVED'
+                            )
+                            logger.info(f"Phase {phase_index} APPROVED via partial verdict "
+                                       f"({approved_count}/{len(verdicts)} approved)")
                         else:
-                            final_outcome = 'REJECTED'  # Default to rejection if unclear
+                            # Use finalize_review to properly set REVISION_NEEDED + metadata
+                            state_db.finalize_review(
+                                workspace_base=workspace_base,
+                                task_id=task_id,
+                                review_id=review_id,
+                                phase_index=phase_index,
+                                final_verdict=final_verdict_str,
+                                reviewer_notes=notes
+                            )
+                            logger.info(f"Phase {phase_index} REVISION_NEEDED via partial verdict")
 
-                        # Update review record
-                        review['status'] = 'completed'
-                        review['partial_verdict'] = True
-                        review['dead_reviewers'] = pending_reviewer_ids
-                        review['final_outcome'] = final_outcome
-                        review['final_verdict'] = {
-                            'approved_count': approved_count,
-                            'rejected_count': rejected_count,
-                            'needs_revision_count': needs_revision_count,
-                            'total_expected': len(reviewer_agent_ids),
-                            'total_submitted': len(verdicts),
-                            'outcome': final_outcome,
-                            'aggregated_findings': all_findings
-                        }
-                        review['completed_at'] = datetime.now().isoformat()
-                        review['completion_reason'] = 'Partial verdict finalization - remaining reviewers dead'
+                else:
+                    # CASE 2: Zero verdicts - all reviewers crashed without submitting anything
+                    # Check retry count from SQLite (persists across restarts)
+                    review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+                    retry_count = (review_data.get('retry_count') or 0) if review_data else 0
 
-                        # Update phase status based on outcome
-                        phase_index = review.get('phase_index')
-                        if phase_index is not None and phase_index < len(registry.get('phases', [])):
-                            phase = registry['phases'][phase_index]
+                    if retry_count < MAX_REVIEWER_RETRIES:
+                        # AUTO-RETRY: Abort the stalled review and respawn reviewers
+                        new_retry_count = retry_count + 1
+                        logger.warning(
+                            f"Review {review_id} RETRY {new_retry_count}/{MAX_REVIEWER_RETRIES}: "
+                            f"All {len(reviewer_agent_ids)} reviewers died without submitting verdicts. "
+                            f"Aborting review and respawning reviewers."
+                        )
 
-                            if final_outcome == 'APPROVED':
-                                phase['status'] = 'APPROVED'
-                                phase['approved_at'] = datetime.now().isoformat()
-                                phase['approval_type'] = 'partial_verdict'
-                                logger.info(f"Phase {phase_index} APPROVED via partial verdict "
-                                           f"({approved_count}/{len(verdicts)} approved)")
-                            else:
-                                phase['status'] = 'REJECTED'
-                                phase['rejected_at'] = datetime.now().isoformat()
-                                phase['rejection_type'] = 'partial_verdict'
-                                phase['rejection_findings'] = [f for f in all_findings
-                                                               if f.get('type') == 'blocker' or
-                                                               f.get('severity') in ['critical', 'high']]
-                                logger.info(f"Phase {phase_index} REJECTED via partial verdict "
-                                           f"({rejected_count + needs_revision_count}/{len(verdicts)} rejected/needs_revision)")
+                        # Abort the current review and persist retry count in SQLite
+                        state_db.update_review(
+                            workspace_base=workspace_base,
+                            review_id=review_id,
+                            status='aborted',
+                            reviewer_notes=f"Auto-aborted: all reviewers crashed (retry {new_retry_count})"
+                        )
+                        # Persist retry count in SQLite (survives server restarts)
+                        db_path = state_db.ensure_db(workspace_base)
+                        conn = state_db._connect(db_path)
+                        try:
+                            conn.execute(
+                                "UPDATE reviews SET retry_count = ? WHERE review_id = ?",
+                                (new_retry_count, review_id)
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
 
-                        modified = True
+                        # Return phase to IN_REVIEW so it can have new reviewers spawned
+                        if phase_index is not None:
+                            # Bypass transition enforcement for retry recovery
+                            db_path = state_db.ensure_db(workspace_base)
+                            conn = state_db._connect(db_path)
+                            try:
+                                conn.execute(
+                                    "UPDATE phases SET status = 'IN_REVIEW', last_review_id = NULL WHERE task_id = ? AND phase_index = ?",
+                                    (task_id, phase_index)
+                                )
+                                conn.commit()
+                            finally:
+                                conn.close()
 
-                    elif len(verdicts) == 0 and all_pending_dead:
-                        # All reviewers dead and none submitted - this is a critical failure
-                        logger.error(f"Review {review_id} CRITICAL: All {len(reviewer_agent_ids)} reviewers died "
-                                    f"without submitting ANY verdicts!")
+                            # Get phase info for respawning
+                            phase_data = state_db.get_phase(
+                                workspace_base=workspace_base,
+                                task_id=task_id,
+                                phase_index=phase_index
+                            )
+                            phase_name = phase_data.get('name', f'Phase {phase_index + 1}') if phase_data else f'Phase {phase_index + 1}'
 
-                        review['status'] = 'failed'
-                        review['failed_at'] = datetime.now().isoformat()
-                        review['failure_reason'] = 'All reviewers died without submitting verdicts'
-                        review['dead_reviewers'] = pending_reviewer_ids
+                            # Respawn reviewers via _trigger_phase_review
+                            phase_snapshot = state_db.load_phase_snapshot(
+                                workspace_base=workspace_base,
+                                task_id=task_id,
+                                phase_index=phase_index
+                            )
+                            completed_count = phase_snapshot['counts']['completed']
+                            failed_count = phase_snapshot['counts']['failed']
 
-                        # Mark phase as needing manual intervention
-                        phase_index = review.get('phase_index')
-                        if phase_index is not None and phase_index < len(registry.get('phases', [])):
-                            phase = registry['phases'][phase_index]
-                            phase['status'] = 'ESCALATED'
-                            phase['escalated_at'] = datetime.now().isoformat()
-                            phase['escalation_reason'] = 'All reviewers crashed - manual review required'
-                            logger.warning(f"Phase {phase_index} ESCALATED - all reviewers crashed")
+                            self._trigger_phase_review({
+                                'task_id': task_id,
+                                'phase_index': phase_index,
+                                'phase_name': phase_name,
+                                'completed_agents': completed_count,
+                                'failed_agents': failed_count,
+                                'workspace': workspace
+                            })
+                            logger.info(f"Auto-respawned reviewers for phase {phase_index} (retry {new_retry_count})")
 
-                        modified = True
+                    else:
+                        # ESCALATE: Retries exhausted
+                        logger.error(
+                            f"Review {review_id} ESCALATED: All {len(reviewer_agent_ids)} reviewers died "
+                            f"after {MAX_REVIEWER_RETRIES} retries without submitting ANY verdicts!"
+                        )
 
-                if modified:
-                    f.seek(0)
-                    f.write(json.dumps(registry, indent=2))
-                    f.truncate()
-                    logger.info(f"Stalled review check completed - registry updated")
+                        state_db.update_review(
+                            workspace_base=workspace_base,
+                            review_id=review_id,
+                            status='failed',
+                            reviewer_notes=f"All reviewers crashed after {MAX_REVIEWER_RETRIES} retries"
+                        )
+
+                        # Mark phase as ESCALATED for manual intervention
+                        if phase_index is not None:
+                            state_db.update_phase_status(
+                                workspace_base=workspace_base,
+                                task_id=task_id,
+                                phase_index=phase_index,
+                                new_status='ESCALATED'
+                            )
+                            logger.warning(f"Phase {phase_index} ESCALATED - all reviewers crashed after retries")
 
         except Exception as e:
             logger.error(f"Error checking stalled reviews: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 # Global daemon instance

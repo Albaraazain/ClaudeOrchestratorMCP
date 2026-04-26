@@ -30,9 +30,9 @@ import threading
 # MODEL CONFIGURATION - Customize these for your preferred models
 # =============================================================================
 # Opus-equivalent: Deep reasoning, complex tasks
-OPUS_MODEL = "glm-5"
+OPUS_MODEL = "claude-opus-4-7"
 # Sonnet-equivalent: Fast, efficient for simpler tasks
-SONNET_MODEL = "glm-4.7"
+SONNET_MODEL = "claude-sonnet-4-6"
 
 # =============================================================================
 # ORCHESTRATOR MODULE IMPORTS (consolidated from modular architecture)
@@ -239,19 +239,23 @@ logger = logging.getLogger(__name__)
 
 def find_mcp_config(starting_dir: str, max_depth: int = 10) -> Optional[str]:
     """
-    Find .mcp.json by traversing up from starting_dir.
+    Find .mcp.json by traversing up from starting_dir and ensure CLI-compatible format.
 
     Claude CLI only reads .mcp.json from CWD, so if a project is in a subdirectory
     and .mcp.json is in a parent directory, agents won't inherit MCP servers.
 
     This function searches upward to find the nearest .mcp.json file.
 
+    IMPORTANT: Claude Code project .mcp.json uses a flat format (keys are server names),
+    but `claude --mcp-config` requires {"mcpServers": {...}} wrapping.
+    This function detects the format and creates a converted temp file if needed.
+
     Args:
         starting_dir: Directory to start searching from
         max_depth: Maximum parent directories to traverse (safety limit)
 
     Returns:
-        Absolute path to .mcp.json if found, None otherwise
+        Absolute path to a CLI-compatible .mcp.json if found, None otherwise
     """
     current = Path(starting_dir).resolve()
 
@@ -259,6 +263,21 @@ def find_mcp_config(starting_dir: str, max_depth: int = 10) -> Optional[str]:
         mcp_config = current / '.mcp.json'
         if mcp_config.exists() and mcp_config.is_file():
             logger.info(f"MCP_CONFIG_FOUND: {mcp_config}")
+            # Check if the config needs format conversion for --mcp-config flag
+            try:
+                with open(mcp_config, 'r') as f:
+                    config_data = json.load(f)
+                if 'mcpServers' not in config_data:
+                    # Flat format (Claude Code project config) - needs wrapping
+                    wrapped = {"mcpServers": config_data}
+                    # Write converted config to a stable temp file next to the original
+                    converted_path = mcp_config.parent / '.mcp-cli.json'
+                    with open(converted_path, 'w') as f:
+                        json.dump(wrapped, f, indent=2)
+                    logger.info(f"MCP_CONFIG_CONVERTED: {mcp_config} -> {converted_path} (added mcpServers wrapper)")
+                    return str(converted_path)
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Failed to read/convert MCP config {mcp_config}: {e}")
             return str(mcp_config)
 
         # Stop at filesystem root or home directory
@@ -407,9 +426,10 @@ def create_real_task(
     creation will fail with PHASES_REQUIRED error.
 
     Phase State Machine (8 states):
-        PENDING -> ACTIVE -> AWAITING_REVIEW -> UNDER_REVIEW -> APPROVED
-                                             -> REJECTED -> REVISING -> ACTIVE
-                                             -> ESCALATED
+        PENDING → ACTIVE → IN_REVIEW → APPROVED
+                                     → REVISION_NEEDED → FIXING → IN_REVIEW (auto-resubmit)
+                                     → ESCALATED (reviewers crashed or max rounds exceeded)
+                                     → FAILED (terminal, human decision)
 
     Args:
         description: Description of the task
@@ -987,6 +1007,10 @@ def deploy_opus_agent(
     - Multi-step planning and coordination
     - Tasks requiring judgment and decision-making
 
+    NOTE: If the current phase is REVISION_NEEDED, deploying an agent
+    auto-transitions the phase to FIXING. After deploying all fix agents,
+    call mark_revision_ready() to enable auto-resubmit on completion.
+
     Args:
         task_id: Task ID to deploy agent for
         agent_type: Type of agent (investigator, fixer, architect, etc.)
@@ -1020,6 +1044,10 @@ def deploy_sonnet_agent(
     - Straightforward implementations
     - Test execution and verification
     - Web searches and information retrieval
+
+    NOTE: If the current phase is REVISION_NEEDED, deploying an agent
+    auto-transitions the phase to FIXING. After deploying all fix agents,
+    call mark_revision_ready() to enable auto-resubmit on completion.
 
     Args:
         task_id: Task ID to deploy agent for
@@ -1062,7 +1090,7 @@ def deploy_claude_tmux_agent(
     Returns:
         Agent deployment result
     """
-    # Validate model parameter - allow custom models (glm-5, glm-4.7) and legacy Claude models
+    # Validate model parameter - allow current and legacy Claude models
     valid_models = [OPUS_MODEL, SONNET_MODEL, "claude-opus-4-5", "claude-sonnet-4-5"]
     if model not in valid_models:
         logger.warning(f"Invalid model '{model}', defaulting to '{OPUS_MODEL}'. Valid: {valid_models}")
@@ -1152,6 +1180,25 @@ def deploy_claude_tmux_agent(
         else:
             phase_index = 0
         logger.info(f"Auto-assigning agent {agent_id} to phase {phase_index}")
+
+    # AUTO-TRANSITION: REVISION_NEEDED → FIXING when fix agents are deployed
+    # This is the ONLY way out of REVISION_NEEDED — enforces that work must be done
+    if task_snapshot:
+        phases_list = task_snapshot.get('phases', [])
+        if phase_index < len(phases_list):
+            current_phase_status = phases_list[phase_index].get('status', '')
+            # Normalize legacy states
+            if current_phase_status in ('REJECTED', 'REVISING'):
+                current_phase_status = 'REVISION_NEEDED'
+            if current_phase_status == 'REVISION_NEEDED':
+                state_db.update_phase_status(
+                    workspace_base=workspace_base,
+                    task_id=task_id,
+                    phase_index=phase_index,
+                    new_status='FIXING'
+                )
+                logger.info(f"PHASE STATE MACHINE: Auto-transition REVISION_NEEDED → FIXING "
+                           f"(fix agent {agent_id} deployed for phase {phase_index})")
 
     # Build task_registry dict for prompt formatting (backward compat with format_task_enrichment_prompt)
     task_registry = {
@@ -1392,7 +1439,30 @@ BEGIN YOUR WORK NOW!
         # Run Claude in the CLIENT's project directory, not the MCP server's cwd
         # client_project_dir was extracted earlier from task_registry.get('client_cwd') or workspace path
         calling_project_dir = client_project_dir
-        claude_executable = os.getenv('CLAUDE_EXECUTABLE', 'npx -y @anthropic-ai/claude-code')
+        claude_executable = os.getenv('CLAUDE_EXECUTABLE', '')
+        if not claude_executable:
+            # Auto-detect claude binary: tmux sessions often lack npx/node in PATH
+            # (e.g., fnm/nvm add node to PATH via shell init which tmux may skip)
+            import shutil
+            claude_path = shutil.which('claude')
+            if claude_path:
+                # Resolve to stable absolute path (not transient fnm multishell symlinks)
+                # fnm structure: .../installation/lib/node_modules/.../cli.js
+                # stable bin:    .../installation/bin/claude
+                real_path = os.path.realpath(claude_path)
+                parts = real_path.split(os.sep)
+                stable_bin = None
+                for i, part in enumerate(parts):
+                    if part == 'lib' and i + 1 < len(parts) and parts[i + 1] == 'node_modules':
+                        candidate = os.sep.join(parts[:i]) + '/bin/claude'
+                        if os.path.exists(candidate):
+                            stable_bin = candidate
+                        break
+                claude_executable = stable_bin or os.path.realpath(claude_path)
+                logger.info(f"Auto-detected claude binary: {claude_executable}")
+            else:
+                claude_executable = 'npx -y @anthropic-ai/claude-code'
+                logger.warning(f"claude not found in PATH, falling back to npx")
 
         # CRITICAL FIX (Jan 2026): Find MCP config by traversing up from client project dir
         # This ensures agents inherit MCP servers (like Supabase) even if .mcp.json is in a parent directory
@@ -1422,9 +1492,11 @@ BEGIN YOUR WORK NOW!
         # Build command chain: Claude runs, then notifier triggers on exit
         # The notifier reads the stream log and updates registry immediately
         claude_command = (
+            f"set -o pipefail; "
             f"cd '{calling_project_dir}' && "
             f"cat '{prompt_file}' | {claude_executable} {claude_flags} | tee '{log_file}'; "
-            f"python3 '{notifier_script}' '{task_id}' '{agent_id}' '{workspace}' '{log_file}'"
+            f"exit_code=$?; "
+            f"python3 '{notifier_script}' '{task_id}' '{agent_id}' '{workspace}' '{log_file}' \"$exit_code\""
         )
         
         # Create the session in the calling project directory
@@ -1589,6 +1661,403 @@ BEGIN YOUR WORK NOW!
         }
 
 
+GEMINI_MODELS = {
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+}
+DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+
+
+def _find_gemini_executable() -> str:
+    """Find the stable absolute path to the gemini CLI binary."""
+    import shutil
+    gemini_path = shutil.which('gemini')
+    if gemini_path:
+        # Resolve to stable absolute path (not transient fnm multishell symlinks)
+        real_path = os.path.realpath(gemini_path)
+        parts = real_path.split(os.sep)
+        stable_bin = None
+        for i, part in enumerate(parts):
+            if part == 'lib' and i + 1 < len(parts) and parts[i + 1] == 'node_modules':
+                candidate = os.sep.join(parts[:i]) + '/bin/gemini'
+                if os.path.exists(candidate):
+                    stable_bin = candidate
+                break
+        return stable_bin or real_path
+    return ''
+
+
+@mcp.tool()
+def deploy_design_agent(
+    task_id: str,
+    agent_type: str,
+    prompt: str,
+    parent: str = "orchestrator",
+    phase_index: Optional[int] = None,
+    model: str = DEFAULT_GEMINI_MODEL,
+) -> Dict[str, Any]:
+    """
+    Deploy a Gemini design agent for UI/UX, visual design, and creative tasks.
+
+    Uses Google's Gemini CLI instead of Claude. Best for:
+    - Awwwards-worthy UI/UX design and sleek visual implementations
+    - Beautiful layout, typography, and styling decisions
+    - Design system creation and component design
+    - Accessibility audit from a design perspective
+    - Creative brainstorming and ideation
+    - Image analysis and visual feedback
+
+    Default model is gemini-3.1-pro-preview (best for design quality).
+    Falls back to gemini-3-flash-preview if capacity issues occur.
+
+    The agent runs in a tmux session like Claude agents, reports to the same
+    orchestrator MCP, and participates in the same phase/review lifecycle.
+
+    NOTE: If the current phase is REVISION_NEEDED, deploying an agent
+    auto-transitions the phase to FIXING. After deploying all fix agents,
+    call mark_revision_ready() to enable auto-resubmit on completion.
+
+    Args:
+        task_id: Task ID to deploy agent for
+        agent_type: Type of agent (designer, ui-reviewer, etc.)
+        prompt: Instructions for the agent
+        parent: Parent agent ID
+        phase_index: Phase index (auto-set to current phase if None)
+        model: Gemini model (default: gemini-3.1-pro-preview for best design quality)
+
+    Returns:
+        Agent deployment result
+    """
+    # Validate model
+    if model not in GEMINI_MODELS:
+        logger.warning(f"Invalid Gemini model '{model}', defaulting to '{DEFAULT_GEMINI_MODEL}'. Valid: {GEMINI_MODELS}")
+        model = DEFAULT_GEMINI_MODEL
+
+    if not check_tmux_available():
+        return {"success": False, "error": "tmux is not available - required for background execution"}
+
+    # Find task workspace
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return {"success": False, "error": f"Task {task_id} not found in any workspace location"}
+
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+
+    # ---- SQLite checks (same as Claude agents) ----
+    task_config = state_db.get_task_config(workspace_base=workspace_base, task_id=task_id)
+    max_concurrent = task_config.get('max_concurrent', 20)
+    max_agents = task_config.get('max_agents', 50)
+    max_depth = task_config.get('max_depth', 5)
+
+    can_spawn, error_msg, existing = state_db.check_can_spawn_agent(
+        workspace_base=workspace_base, task_id=task_id,
+        agent_type=agent_type, max_concurrent=max_concurrent, max_agents=max_agents
+    )
+    if not can_spawn:
+        if existing:
+            return {"success": False, "error": error_msg,
+                    "existing_agent_id": existing.get('agent_id'),
+                    "existing_agent_status": existing.get('status')}
+        return {"success": False, "error": error_msg}
+
+    # Generate agent ID
+    timestamp = datetime.now().strftime('%H%M%S')
+    unique_suffix = uuid.uuid4().hex[:6]
+    type_prefix = agent_type[:20] if len(agent_type) > 20 else agent_type
+    agent_id = f"{type_prefix}-{timestamp}-{unique_suffix}"
+    session_name = f"agent_{agent_id}"
+
+    # Calculate depth
+    depth = 1 if parent == "orchestrator" else 2
+    if parent != "orchestrator":
+        parent_agent = state_db.get_agent_by_id(workspace_base=workspace_base, task_id=task_id, agent_id=parent)
+        if parent_agent:
+            depth = (parent_agent.get('depth') or 1) + 1
+
+    # Get task context from SQLite
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    task_description = task_snapshot.get('description', '') if task_snapshot else ''
+
+    # Auto-set phase_index
+    if phase_index is None:
+        phase_index = task_snapshot.get('current_phase_index', 0) if task_snapshot else 0
+        logger.info(f"Auto-assigning Gemini agent {agent_id} to phase {phase_index}")
+
+    # AUTO-TRANSITION: REVISION_NEEDED → FIXING (same as Claude agents)
+    if task_snapshot:
+        phases_list = task_snapshot.get('phases', [])
+        if phase_index < len(phases_list):
+            current_phase_status = phases_list[phase_index].get('status', '')
+            if current_phase_status in ('REJECTED', 'REVISING'):
+                current_phase_status = 'REVISION_NEEDED'
+            if current_phase_status == 'REVISION_NEEDED':
+                state_db.update_phase_status(
+                    workspace_base=workspace_base, task_id=task_id,
+                    phase_index=phase_index, new_status='FIXING'
+                )
+                logger.info(f"PHASE STATE MACHINE: Auto-transition REVISION_NEEDED → FIXING "
+                           f"(Gemini fix agent {agent_id} deployed for phase {phase_index})")
+
+    # Build context
+    task_registry = {
+        'task_description': task_description,
+        'task_context': task_config,
+        'max_depth': max_depth,
+        'current_phase_index': phase_index,
+        'phases': task_snapshot.get('phases', []) if task_snapshot else [],
+        'agents': task_snapshot.get('agents', []) if task_snapshot else [],
+    }
+
+    # Detect working directory
+    client_project_dir = task_registry.get('client_cwd')
+    if not client_project_dir:
+        workspace_parent = os.path.dirname(workspace)
+        if workspace_parent.endswith('.agent-workspace'):
+            client_project_dir = os.path.dirname(workspace_parent)
+        else:
+            client_project_dir = os.getcwd()
+            logger.warning(f"WORKING_DIR_FALLBACK: Gemini agent {agent_id} using MCP server cwd")
+
+    # Build enrichment/context
+    try:
+        enrichment_prompt = format_task_enrichment_prompt(task_registry)
+    except Exception as e:
+        logger.error(f"Error in format_task_enrichment_prompt for Gemini agent: {e}")
+        enrichment_prompt = ""
+
+    project_context = detect_project_context(client_project_dir)
+    context_prompt = format_project_context_prompt(project_context)
+
+    try:
+        accumulated_ctx = build_task_context_accumulator(
+            workspace_base=workspace_base, task_id=task_id,
+            current_phase_index=phase_index, max_tokens=2500
+        )
+        handover_context = format_accumulated_context(accumulated_ctx)
+    except Exception as e:
+        logger.warning(f"CONTEXT-ACCUMULATOR: Failed for Gemini {agent_id}: {e}")
+        handover_context = format_previous_phase_handover(workspace, phase_index)
+
+    type_requirements = get_type_specific_requirements(agent_type)
+
+    # Build the Gemini agent prompt
+    # NOTE: Gemini does NOT have native MCP access to the orchestrator.
+    # It reports completion via a marker file that the completion notifier reads.
+    agent_prompt = f"""You are a Gemini design agent in an orchestrator system.
+
+AGENT IDENTITY:
+- Agent ID: {agent_id}
+- Agent Type: {agent_type}
+- Task ID: {task_id}
+- Parent Agent: {parent}
+- Workspace: {workspace}
+- Current Phase: {phase_index}
+
+YOUR MISSION:
+{prompt}
+{enrichment_prompt}
+{context_prompt}
+{handover_context}
+
+{type_requirements}
+
+IMPORTANT - COMPLETION PROTOCOL:
+When you finish your work, create a file at:
+  {workspace}/agent_completion_{agent_id}.json
+
+With this content:
+{{
+  "agent_id": "{agent_id}",
+  "task_id": "{task_id}",
+  "status": "completed",
+  "progress": 100,
+  "message": "<SUMMARY: List what you accomplished and any key findings>",
+  "findings": [
+    {{"type": "recommendation", "severity": "medium", "message": "Your finding here"}}
+  ]
+}}
+
+This file is how the orchestrator knows you are done. Without it, the system
+will think you are still working and the phase cannot proceed.
+
+BEGIN YOUR WORK NOW!
+"""
+
+    # Resource tracking
+    prompt_file_created = None
+    tmux_session_created = None
+
+    try:
+        import shutil
+
+        # Disk space check
+        try:
+            disk_stat = shutil.disk_usage(workspace)
+            if disk_stat.free / (1024 * 1024) < 100:
+                return {"success": False, "error": "Insufficient disk space"}
+        except Exception:
+            pass
+
+        # Create logs directory
+        logs_dir = f"{workspace}/logs"
+        os.makedirs(logs_dir, exist_ok=True)
+
+        # Write prompt file
+        prompt_file = os.path.abspath(f"{workspace}/agent_prompt_{agent_id}.txt")
+        with open(prompt_file, 'w') as f:
+            f.write(agent_prompt)
+        prompt_file_created = prompt_file
+
+        # Find gemini executable
+        gemini_executable = _find_gemini_executable()
+        if not gemini_executable:
+            return {"success": False, "error": "Gemini CLI not found. Install with: npm install -g @google/gemini-cli"}
+
+        # JSONL log file
+        log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
+
+        # Completion notifier (reuse the same one — it reads stream logs)
+        notifier_script = os.path.join(os.path.dirname(__file__), 'orchestrator', 'completion_notifier.py')
+
+        # Build gemini command with automatic fallback
+        # -y = auto-approve all tools (yolo mode)
+        # -o stream-json = streaming JSON output for log parsing
+        # -m = model selection
+        # Pipe prompt via stdin (same pattern as Claude)
+        #
+        # FALLBACK: gemini-3.1-pro-preview often hits MODEL_CAPACITY_EXHAUSTED (429).
+        # If the primary model fails, retry with gemini-2.5-pro as fallback.
+        fallback_model = "gemini-2.5-pro" if model != "gemini-2.5-pro" else "gemini-2.5-flash"
+        gemini_flags_primary = f"-y -o stream-json -m {model}"
+        gemini_flags_fallback = f"-y -o stream-json -m {fallback_model}"
+
+        # fnm env must be evaluated before gemini can run in tmux
+        # (tmux sessions don't inherit the shell's fnm path setup)
+        gemini_command = (
+            f"set -o pipefail; "
+            f"eval \"$(fnm env)\" && "
+            f"cd '{client_project_dir}' && "
+            f"cat '{prompt_file}' | {gemini_executable} {gemini_flags_primary} | tee '{log_file}' || "
+            f"(echo '[FALLBACK] {model} failed, retrying with {fallback_model}...' >> '{log_file}' && "
+            f"cat '{prompt_file}' | {gemini_executable} {gemini_flags_fallback} | tee -a '{log_file}'); "
+            f"exit_code=$?; "
+            f"python3 '{notifier_script}' '{task_id}' '{agent_id}' '{workspace}' '{log_file}' \"$exit_code\""
+        )
+
+        # Create tmux session
+        session_result = create_tmux_session(
+            session_name=session_name,
+            command=gemini_command,
+            working_dir=client_project_dir
+        )
+
+        if not session_result["success"]:
+            return {"success": False, "error": f"Failed to create Gemini agent session: {session_result['error']}"}
+
+        tmux_session_created = session_name
+        time.sleep(2)
+
+        # Verify session is running
+        if not check_tmux_session_exists(session_name):
+            if prompt_file_created and os.path.exists(prompt_file_created):
+                try:
+                    os.remove(prompt_file_created)
+                except Exception:
+                    pass
+            return {"success": False, "error": "Gemini agent session terminated immediately after creation"}
+
+        # Register in SQLite (same tracking as Claude agents)
+        deploy_result = state_db.deploy_agent_atomic(
+            workspace_base=workspace_base, task_id=task_id,
+            agent_id=agent_id, agent_type=agent_type,
+            model=f"gemini:{model}",  # Prefix with gemini: to distinguish from Claude models
+            parent=parent, depth=depth, phase_index=phase_index,
+            tmux_session=session_name,
+            prompt_preview=prompt[:200] if prompt else ""
+        )
+
+        if not deploy_result.get('success'):
+            if tmux_session_created:
+                try:
+                    subprocess.run(['tmux', 'kill-session', '-t', session_name], capture_output=True, timeout=5)
+                except Exception:
+                    pass
+            return {"success": False, "error": f"SQLite insert failed: {deploy_result.get('error', 'Unknown error')}"}
+
+        # Lifecycle: transition task to ACTIVE on first agent
+        active_count = state_db.get_active_agent_count(workspace_base=workspace_base, task_id=task_id)
+        if active_count == 1:
+            try:
+                if state_db.transition_task_to_active(workspace_base=workspace_base, task_id=task_id):
+                    logger.info(f"[LIFECYCLE] Task {task_id} transitioned to ACTIVE on first Gemini agent")
+            except Exception as e:
+                logger.warning(f"[LIFECYCLE] Failed to transition task to ACTIVE: {e}")
+
+        # Log deployment
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": "gemini_agent_deployed",
+            "agent_id": agent_id,
+            "model": f"gemini:{model}",
+            "tmux_session": session_name,
+            "command": gemini_command[:100] + "...",
+            "success": True,
+            "storage": "sqlite"
+        }
+        with open(f"{workspace}/logs/deploy_{agent_id}.json", 'w') as f:
+            json.dump(log_entry, f, indent=2)
+
+        logger.info(f"Gemini design agent {agent_id} deployed (model={model})")
+
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "tmux_session": session_name,
+            "type": agent_type,
+            "model": f"gemini:{model}",
+            "parent": parent,
+            "task_id": task_id,
+            "status": "deployed",
+            "workspace": workspace,
+            "deployment_method": "tmux session (gemini)",
+            "guidance": {
+                "current_state": "agent_deployed",
+                "next_action": f"Monitor agent progress using get_agent_output or deploy more agents",
+                "available_actions": [
+                    f"get_agent_output - Monitor agent {agent_id}",
+                    "deploy_opus_agent/deploy_sonnet_agent/deploy_design_agent - Deploy additional agents",
+                    "check_phase_progress - Check if phase is ready for review",
+                    "get_real_task_status - View all agents status"
+                ],
+                "warnings": None,
+                "blocked_reason": None,
+                "context": {
+                    "agent_id": agent_id,
+                    "agent_type": agent_type,
+                    "model": f"gemini:{model}",
+                    "tmux_session": session_name,
+                    "engine": "gemini"
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Gemini agent deployment failed: {e}")
+        if tmux_session_created:
+            try:
+                subprocess.run(['tmux', 'kill-session', '-t', tmux_session_created], capture_output=True, timeout=5)
+            except Exception:
+                pass
+        if prompt_file_created and os.path.exists(prompt_file_created):
+            try:
+                os.remove(prompt_file_created)
+            except Exception:
+                pass
+        return {"success": False, "error": f"Failed to deploy Gemini agent: {str(e)}", "cleanup_performed": True}
+
+
 @mcp.tool
 def get_real_task_status(task_id: str) -> Dict[str, Any]:
     """
@@ -1691,8 +2160,8 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
         tmux_session = agent.get('tmux_session', '')
         if not stream_completed and tmux_session:
             if not check_tmux_session_exists(tmux_session):
-                new_status = 'completed'
-                completion_reason = 'tmux_session_terminated'
+                new_status = 'failed'
+                completion_reason = 'tmux_session_terminated_without_result_marker'
 
         # Update SQLite if status changed
         if new_status:
@@ -1824,20 +2293,16 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
                 "warnings": None,
                 "blocked_reason": None
             }
-    elif phase_status == 'AWAITING_REVIEW':
+    # Normalize legacy states for guidance
+    norm_status = phase_status
+    if norm_status in ('AWAITING_REVIEW', 'UNDER_REVIEW'):
+        norm_status = 'IN_REVIEW'
+    if norm_status in ('REJECTED', 'REVISING'):
+        norm_status = 'REVISION_NEEDED'
+
+    if norm_status == 'IN_REVIEW':
         guidance = {
-            "current_state": "phase_awaiting_review",
-            "next_action": "Reviewers will be auto-spawned. Wait for UNDER_REVIEW status.",
-            "available_actions": [
-                "get_phase_status - Check review status",
-                "trigger_agentic_review - Manually trigger if not started"
-            ],
-            "warnings": None,
-            "blocked_reason": None
-        }
-    elif phase_status == 'UNDER_REVIEW':
-        guidance = {
-            "current_state": "phase_under_review",
+            "current_state": "phase_in_review",
             "next_action": "Wait for reviewer verdicts. Check progress with get_review_status.",
             "available_actions": [
                 "get_review_status - Check reviewer verdicts",
@@ -1847,15 +2312,16 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
             "warnings": None,
             "blocked_reason": None
         }
-    elif phase_status == 'APPROVED':
+    elif norm_status == 'APPROVED':
         next_phase = phases[current_phase_index + 1] if current_phase_index + 1 < len(phases) else None
         if next_phase:
             guidance = {
                 "current_state": "phase_approved_has_next",
-                "next_action": f"Advance to '{next_phase.get('name')}' using advance_to_next_phase",
+                "next_action": f"Phase auto-advanced to '{next_phase.get('name')}'. Deploy agents for this phase.",
                 "available_actions": [
-                    "advance_to_next_phase - Move to next phase",
-                    "get_phase_handover - Review phase handover"
+                    "deploy_opus_agent/deploy_sonnet_agent - Deploy agents for next phase",
+                    "get_phase_handover - Review phase handover",
+                    "get_phase_status - Check current phase details"
                 ],
                 "warnings": None,
                 "blocked_reason": None
@@ -1870,38 +2336,47 @@ def get_real_task_status(task_id: str) -> Dict[str, Any]:
                 "warnings": None,
                 "blocked_reason": None
             }
-    elif phase_status == 'REJECTED':
+    elif norm_status == 'REVISION_NEEDED':
         guidance = {
-            "current_state": "phase_rejected",
-            "next_action": "Review rejection reasons and deploy fix agents",
+            "current_state": "phase_revision_needed",
+            "next_action": "Deploy fix agents to address review findings. Phase auto-transitions to FIXING.",
             "available_actions": [
-                "get_review_status - View rejection feedback",
-                "deploy_opus_agent/deploy_sonnet_agent - Deploy agents to fix issues"
-            ],
-            "warnings": ["Phase was rejected by reviewers"],
-            "blocked_reason": "Review rejected - fixes required before re-submission"
-        }
-    elif phase_status == 'REVISING':
-        guidance = {
-            "current_state": "phase_revising",
-            "next_action": "Deploy agents to fix issues, then phase will auto-resubmit",
-            "available_actions": [
+                "get_review_status - View review feedback and findings",
                 "deploy_opus_agent/deploy_sonnet_agent - Deploy fix agents",
-                "get_review_status - View required fixes"
+            ],
+            "warnings": ["Phase review identified issues requiring fixes"],
+            "blocked_reason": "Review found issues - deploy fix agents to address them"
+        }
+    elif norm_status == 'FIXING':
+        guidance = {
+            "current_state": "phase_fixing",
+            "next_action": "Fix agents deployed. Call mark_revision_ready when all fix agents have been deployed.",
+            "available_actions": [
+                "deploy_opus_agent/deploy_sonnet_agent - Deploy more fix agents",
+                "mark_revision_ready - Signal all fix agents deployed (triggers auto-resubmit when done)",
+                "get_agent_output - Monitor fix agent progress"
             ],
             "warnings": None,
             "blocked_reason": None
         }
-    elif phase_status == 'ESCALATED':
+    elif norm_status == 'ESCALATED':
         guidance = {
             "current_state": "phase_escalated",
-            "next_action": "Manual intervention required - all reviewers failed",
+            "next_action": "Manual intervention required - all reviewers failed or max revision rounds exceeded",
             "available_actions": [
                 "approve_phase_review(force_escalated=True) - Force approval",
-                "trigger_agentic_review - Retry with new reviewers"
+                "abort_stalled_review - Abort review and retry"
             ],
-            "warnings": ["All reviewers crashed without submitting verdicts"],
+            "warnings": ["Phase escalated - requires manual decision"],
             "blocked_reason": "Escalated - manual decision required"
+        }
+    elif norm_status == 'FAILED':
+        guidance = {
+            "current_state": "phase_failed",
+            "next_action": "Phase has been explicitly abandoned. No further action possible.",
+            "available_actions": [],
+            "warnings": ["Phase terminated"],
+            "blocked_reason": "Phase failed (terminal state)"
         }
     else:
         guidance = {
@@ -3380,7 +3855,8 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
                 f"Agent {agent_id} transitioned from {previous_status} to {status}."
             )
 
-            # LIFECYCLE: Check if all agents are terminal and transition task to COMPLETED
+            # LIFECYCLE: phased tasks only become terminal after review approval;
+            # legacy no-phase tasks may still complete when all agents finish.
             try:
                 task_data = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
                 if task_data:
@@ -3389,7 +3865,7 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
 
                     if all_terminal and len(agents) > 0:
                         if state_db.transition_task_to_completed(workspace_base=workspace_base, task_id=task_id):
-                            logger.info(f"[LIFECYCLE] Task {task_id} transitioned to COMPLETED - all agents terminal")
+                            logger.info(f"[LIFECYCLE] Task {task_id} transitioned to a terminal status")
             except Exception as e:
                 logger.warning(f"[LIFECYCLE] Failed to check task completion: {e}")
 
@@ -3401,8 +3877,16 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
             if agent_data:
                 agent_type = agent_data.get('type', 'unknown')
 
-            # Run 4-layer validation (uses JSONL files, not registry)
-            validation = validate_agent_completion(workspace, agent_id, agent_type, message, None)
+            # Build a minimal registry-like dict from SQLite agent data for validation
+            validation_registry = {'agents': []}
+            if agent_data:
+                validation_registry['agents'] = [{
+                    'id': agent_data.get('agent_id', agent_id),
+                    'type': agent_data.get('type', agent_type),
+                    'started_at': agent_data.get('started_at'),
+                    'status': agent_data.get('status'),
+                }]
+            validation = validate_agent_completion(workspace, agent_id, agent_type, message, validation_registry)
 
             # In WARNING mode: log but don't block completion
             if not validation['valid'] or validation['warnings']:
@@ -3441,15 +3925,59 @@ def update_agent_progress(task_id: str, agent_id: str, status: str, message: str
                 phase_index=int(agent_phase_index)
             )
 
-            if not phase_data or phase_data.get('status') != 'ACTIVE':
+            if not phase_data:
                 return None
 
-            # Transition phase to AWAITING_REVIEW in SQLite
+            phase_status = phase_data.get('status', '')
+            # Normalize legacy states
+            if phase_status in ('AWAITING_REVIEW', 'UNDER_REVIEW'):
+                phase_status = 'IN_REVIEW'
+            if phase_status in ('REJECTED', 'REVISING'):
+                phase_status = 'REVISION_NEEDED'
+
+            # Auto-submit from ACTIVE (normal flow)
+            if phase_status == 'ACTIVE':
+                pass  # Proceed with auto-submit
+            # Auto-submit from FIXING (revision flow) — only if revision_ready is set
+            elif phase_status == 'FIXING':
+                revision_ready = phase_data.get('revision_ready', 0)
+                if not revision_ready:
+                    logger.info(f"AUTO-PHASE-ENFORCEMENT: Phase {agent_phase_index} is FIXING but revision_ready not set — waiting for mark_revision_ready")
+                    return None
+                # Increment revision_round before re-review
+                current_round = phase_data.get('revision_round', 0) or 0
+                max_rounds = phase_data.get('max_revision_rounds', 3) or 3
+                new_round = current_round + 1
+                if new_round > max_rounds:
+                    logger.warning(f"AUTO-PHASE-ENFORCEMENT: Phase {agent_phase_index} exceeded max revision rounds ({max_rounds}) — ESCALATING")
+                    state_db.update_phase_status(
+                        workspace_base=workspace_base,
+                        task_id=task_id,
+                        phase_index=int(agent_phase_index),
+                        new_status="ESCALATED"
+                    )
+                    return None
+                # Update revision_round in SQLite
+                db_path = state_db.ensure_db(workspace_base)
+                conn = state_db._connect(db_path)
+                try:
+                    conn.execute(
+                        "UPDATE phases SET revision_round = ? WHERE task_id = ? AND phase_index = ?",
+                        (new_round, task_id, int(agent_phase_index))
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                logger.info(f"AUTO-PHASE-ENFORCEMENT: FIXING phase {agent_phase_index} auto-resubmitting (round {new_round}/{max_rounds})")
+            else:
+                return None
+
+            # Transition phase to IN_REVIEW in SQLite
             state_db.update_phase_status(
                 workspace_base=workspace_base,
                 task_id=task_id,
                 phase_index=int(agent_phase_index),
-                new_status="AWAITING_REVIEW"
+                new_status="IN_REVIEW"
             )
 
             logger.info(f"AUTO-PHASE-ENFORCEMENT: Phase {agent_phase_index} submitted for review (SQLite)")
@@ -4140,44 +4668,53 @@ def get_phase_status(task_id: str) -> str:
     except Exception:
         review_details = None
 
+    # Normalize legacy states for guidance
+    normalized_status = phase_status
+    if normalized_status in ('AWAITING_REVIEW', 'UNDER_REVIEW'):
+        normalized_status = 'IN_REVIEW'
+    if normalized_status in ('REJECTED', 'REVISING'):
+        normalized_status = 'REVISION_NEEDED'
+
     # Guidance (mirrors prior semantics, but uses SQLite counts).
-    guidance = {"status": phase_status, "action": "", "blocked_reason": None}
-    if phase_status == "ACTIVE":
+    guidance = {"status": normalized_status, "action": "", "blocked_reason": None}
+    if normalized_status == "ACTIVE":
         if int(phase_state.get("counts", {}).get("total", 0)) == 0:
             guidance["action"] = "DEPLOY AGENTS: No agents deployed. Use deploy_opus_agent/deploy_sonnet_agent to start work."
         elif pending_agents > 0:
             guidance["action"] = f"WAIT: {pending_agents} agents still working. Monitor with get_agent_output."
         else:
             guidance["action"] = "REVIEW PENDING: All agents done. System will auto-trigger review."
-    elif phase_status == "AWAITING_REVIEW":
-        guidance["action"] = "REVIEWERS SPAWNING: Agentic reviewers being deployed. Wait for UNDER_REVIEW status."
-    elif phase_status == "UNDER_REVIEW":
+    elif normalized_status == "IN_REVIEW":
         if review_details:
             submitted = review_details.get("reviewers_submitted", 0)
             expected = review_details.get("reviewers_expected", 0)
             guidance["action"] = f"REVIEW IN PROGRESS: {submitted}/{expected} reviewers submitted. Wait for verdicts."
         else:
             guidance["action"] = "REVIEW IN PROGRESS: Waiting for reviewer verdicts."
-    elif phase_status == "APPROVED":
+    elif normalized_status == "APPROVED":
         if current_idx < len(phases) - 1:
             next_phase_name = phases[current_idx + 1].get("name", f"Phase {current_idx + 2}")
-            guidance["action"] = f"PROCEED: Phase approved. Use advance_to_next_phase to start '{next_phase_name}'."
+            guidance["action"] = f"PROCEED: Phase approved and auto-advanced to '{next_phase_name}'. Deploy agents for this phase."
         else:
             guidance["action"] = "TASK COMPLETE: All phases approved. Task finished successfully."
-    elif phase_status == "REVISING":
-        if review_details and review_details.get("blocker_messages"):
-            guidance["action"] = "FIX REQUIRED: Address blockers and re-submit for review."
-            guidance["blocked_reason"] = review_details.get("blocker_messages")
-        else:
-            guidance["action"] = "REVISIONS NEEDED: Reviewers requested changes. Deploy agents to fix issues."
-    elif phase_status == "REJECTED":
-        guidance["action"] = "PHASE REJECTED: Critical issues found. Review findings and deploy fix agents."
+    elif normalized_status == "REVISION_NEEDED":
+        guidance["action"] = "REVISION NEEDED: Deploy fix agents to address review findings. Phase will auto-transition to FIXING."
         if review_details:
-            guidance["blocked_reason"] = review_details.get("critical_messages", [])
-    elif phase_status == "ESCALATED":
-        guidance["action"] = "ESCALATED - MANUAL INTERVENTION REQUIRED: Check registry for details."
-        guidance["blocked_reason"] = "Escalated"
+            if review_details.get("blocker_messages"):
+                guidance["blocked_reason"] = review_details.get("blocker_messages")
+            elif review_details.get("critical_messages"):
+                guidance["blocked_reason"] = review_details.get("critical_messages", [])
+    elif normalized_status == "FIXING":
+        if pending_agents > 0:
+            guidance["action"] = f"FIXING: {pending_agents} fix agents still working. Call mark_revision_ready when all fix agents deployed."
+        else:
+            guidance["action"] = "FIXING: All fix agents done. Call mark_revision_ready to trigger re-review."
+    elif normalized_status == "ESCALATED":
+        guidance["action"] = "ESCALATED - MANUAL INTERVENTION REQUIRED: Use approve_phase_review(force_escalated=True) or deploy fix agents."
+        guidance["blocked_reason"] = "Escalated — max revision rounds exceeded or all reviewers crashed"
         guidance["escalated"] = True
+    elif normalized_status == "FAILED":
+        guidance["action"] = "FAILED: Phase explicitly abandoned. No further action possible."
     else:
         guidance["action"] = f"UNKNOWN STATE: Phase in '{phase_status}'. Check registry manually."
 
@@ -4205,133 +4742,6 @@ def get_phase_status(task_id: str) -> str:
         indent=2,
     )
 
-    with open(registry_path, 'r') as f:
-        registry = json.load(f)
-
-    phases = registry.get('phases', [])
-    current_idx = registry.get('current_phase_index', 0)
-
-    if not phases:
-        return json.dumps({
-            "success": True,
-            "has_phases": False,
-            "message": "Task has no phases defined"
-        })
-
-    current_phase = phases[current_idx] if current_idx < len(phases) else None
-    phase_status = current_phase.get('status', 'UNKNOWN') if current_phase else None
-
-    # Get phase agents
-    phase_agents = [a for a in registry.get('agents', []) if a.get('phase_index') == current_idx]
-    completed_agents = len([a for a in phase_agents if a.get('status') == 'completed'])
-    pending_agents = len([a for a in phase_agents if a.get('status') not in ['completed', 'failed', 'error', 'terminated']])
-    failed_agents = len([a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']])
-
-    # Check for active review
-    reviews = registry.get('reviews', [])
-    active_review = None
-    review_details = None
-    for rev in reviews:
-        if rev.get('review_id') == current_phase.get('active_review_id'):
-            active_review = rev
-            break
-
-    # Build detailed review info
-    if active_review:
-        verdicts = active_review.get('verdicts', [])
-        all_findings = []
-        for v in verdicts:
-            all_findings.extend(v.get('findings', []))
-
-        # Categorize findings by severity
-        critical_findings = [f for f in all_findings if f.get('severity') == 'critical']
-        high_findings = [f for f in all_findings if f.get('severity') == 'high']
-        blockers = [f for f in all_findings if f.get('type') == 'blocker']
-
-        review_details = {
-            "review_id": active_review.get('review_id'),
-            "status": active_review.get('status'),
-            "reviewers_submitted": len(verdicts),
-            "reviewers_expected": active_review.get('num_reviewers', 0),
-            "final_verdict": active_review.get('final_verdict'),
-            "findings_summary": {
-                "total": len(all_findings),
-                "critical": len(critical_findings),
-                "high": len(high_findings),
-                "blockers": len(blockers)
-            },
-            "blocker_messages": [b.get('message', '') for b in blockers[:5]],  # Top 5 blockers
-            "critical_messages": [c.get('message', '') for c in critical_findings[:5]]  # Top 5 critical
-        }
-
-    # Generate actionable guidance based on current state
-    guidance = {"status": phase_status, "action": "", "blocked_reason": None}
-
-    if phase_status == 'ACTIVE':
-        if len(phase_agents) == 0:
-            guidance["action"] = "DEPLOY AGENTS: No agents deployed. Use deploy_opus_agent/deploy_sonnet_agent to start work."
-        elif pending_agents > 0:
-            guidance["action"] = f"WAIT: {pending_agents} agents still working. Monitor with get_agent_output."
-        else:
-            guidance["action"] = "REVIEW PENDING: All agents done. System will auto-trigger review."
-    elif phase_status == 'AWAITING_REVIEW':
-        guidance["action"] = "REVIEWERS SPAWNING: Agentic reviewers being deployed. Wait for UNDER_REVIEW status."
-    elif phase_status == 'UNDER_REVIEW':
-        if review_details:
-            submitted = review_details['reviewers_submitted']
-            expected = review_details['reviewers_expected']
-            guidance["action"] = f"REVIEW IN PROGRESS: {submitted}/{expected} reviewers submitted. Wait for verdicts."
-        else:
-            guidance["action"] = "REVIEW IN PROGRESS: Waiting for reviewer verdicts."
-    elif phase_status == 'APPROVED':
-        if current_idx < len(phases) - 1:
-            next_phase_name = phases[current_idx + 1].get('name', f'Phase {current_idx + 2}')
-            guidance["action"] = f"PROCEED: Phase approved. Use advance_to_next_phase to start '{next_phase_name}'."
-        else:
-            guidance["action"] = "TASK COMPLETE: All phases approved. Task finished successfully."
-    elif phase_status == 'REVISING':
-        if review_details and review_details.get('blocker_messages'):
-            guidance["action"] = "FIX REQUIRED: Address blockers and re-submit for review."
-            guidance["blocked_reason"] = review_details['blocker_messages']
-        else:
-            guidance["action"] = "REVISIONS NEEDED: Reviewers requested changes. Deploy agents to fix issues."
-    elif phase_status == 'REJECTED':
-        guidance["action"] = "PHASE REJECTED: Critical issues found. Review findings and deploy fix agents."
-        if review_details:
-            guidance["blocked_reason"] = review_details.get('critical_messages', [])
-    elif phase_status == 'ESCALATED':
-        # This happens when all reviewers crashed without submitting verdicts
-        escalation_reason = current_phase.get('escalation_reason', 'All reviewers crashed')
-        guidance["action"] = f"ESCALATED - MANUAL INTERVENTION REQUIRED: {escalation_reason}. Options: (1) Use abort_stalled_review and trigger_agentic_review to retry with new reviewers, (2) Use approve_phase_review with force flag if work is actually complete."
-        guidance["blocked_reason"] = escalation_reason
-        guidance["escalated"] = True
-    else:
-        guidance["action"] = f"UNKNOWN STATE: Phase in '{phase_status}'. Check registry manually."
-
-    return json.dumps({
-        "success": True,
-        "has_phases": True,
-        "total_phases": len(phases),
-        "current_phase_index": current_idx,
-        "current_phase": {
-            "name": current_phase.get('name') if current_phase else None,
-            "status": phase_status,
-            "description": current_phase.get('description') if current_phase else None
-        },
-        "agents": {
-            "total": len(phase_agents),
-            "completed": completed_agents,
-            "pending": pending_agents,
-            "failed": failed_agents
-        },
-        "review": review_details,
-        "guidance": guidance,
-        "phases_summary": [
-            {"order": p.get('order'), "name": p.get('name'), "status": p.get('status')}
-            for p in phases
-        ]
-    }, indent=2)
-
 
 @mcp.tool()
 def check_phase_progress(task_id: str) -> str:
@@ -4341,10 +4751,12 @@ def check_phase_progress(task_id: str) -> str:
     Returns detailed phase completion status including:
     - All agents done (ready_for_review)
     - Pending agents still working
+    - Current phase status (ACTIVE, IN_REVIEW, REVISION_NEEDED, FIXING, etc.)
     - Recommended next action
 
-    This is the primary tool for monitoring phase progress and knowing
-    when to submit for review or advance to next phase.
+    Use this to monitor progress. The system auto-submits for review when all
+    agents complete in ACTIVE phases. For FIXING phases, call mark_revision_ready
+    first, then the system auto-resubmits when fix agents complete.
     """
     workspace = find_task_workspace(task_id)
     if not workspace:
@@ -4375,24 +4787,36 @@ def check_phase_progress(task_id: str) -> str:
     counts = phase_state.get("counts", {}) or {}
 
     all_done = bool(counts.get("all_done"))
-    ready_for_review = all_done and phase_status == "ACTIVE"
 
-    if phase_status == "APPROVED":
+    # Normalize legacy states
+    normalized_status = phase_status
+    if normalized_status in ('AWAITING_REVIEW', 'UNDER_REVIEW'):
+        normalized_status = 'IN_REVIEW'
+    if normalized_status in ('REJECTED', 'REVISING'):
+        normalized_status = 'REVISION_NEEDED'
+
+    ready_for_review = all_done and normalized_status == "ACTIVE"
+
+    if normalized_status == "APPROVED":
         if current_idx < len(phases) - 1:
-            next_action = "Phase approved. Use advance_to_next_phase to proceed."
+            next_action = "Phase approved and auto-advanced. Deploy agents for next phase."
         else:
             next_action = "All phases complete. Task finished."
-    elif phase_status == "UNDER_REVIEW":
+    elif normalized_status == "IN_REVIEW":
         next_action = "Phase under review. Wait for reviewer verdicts."
-    elif phase_status == "AWAITING_REVIEW":
-        next_action = "Phase awaiting review. Use trigger_agentic_review to spawn reviewers."
-    elif phase_status == "REVISING":
+    elif normalized_status == "REVISION_NEEDED":
+        next_action = "Deploy fix agents to address review findings. Phase auto-transitions to FIXING on first deployment."
+    elif normalized_status == "FIXING":
         if all_done:
-            next_action = "Revisions complete. Use submit_phase_for_review to re-submit."
+            next_action = "All fix agents done. Call mark_revision_ready to trigger re-review."
         else:
-            next_action = f"Revisions in progress. {int(counts.get('pending', 0))} agents still working."
+            next_action = f"Fix agents working. {int(counts.get('pending', 0))} agents still in progress. Call mark_revision_ready when all fix agents deployed."
+    elif normalized_status == "ESCALATED":
+        next_action = "Phase ESCALATED. Use approve_phase_review(force_escalated=True) to force-approve, or abort and retry."
+    elif normalized_status == "FAILED":
+        next_action = "Phase FAILED (terminal). No further action possible."
     elif ready_for_review:
-        next_action = "All agents done. Use submit_phase_for_review to request review."
+        next_action = "All agents done. System will auto-submit for review."
     elif int(counts.get("pending", 0)) > 0:
         next_action = f"Phase in progress. {int(counts.get('pending', 0))} agents still working."
     else:
@@ -4432,10 +4856,17 @@ def check_phase_progress(task_id: str) -> str:
 @mcp.tool()
 def submit_phase_for_review(task_id: str, phase_summary: Optional[str] = None) -> str:
     """
-    Submit current phase for review.
+    Submit current phase for review (ACTIVE phases only).
 
-    SQLITE MIGRATION: Now reads phase/agent data from SQLite (source of truth).
-    Transitions phase from ACTIVE to AWAITING_REVIEW.
+    Transitions phase from ACTIVE to IN_REVIEW and auto-spawns reviewer agents.
+    The orchestrator cannot manually approve — reviewers decide independently.
+
+    For revision cycles (REVISION_NEEDED/FIXING phases), do NOT call this.
+    Instead: deploy fix agents → call mark_revision_ready → system auto-resubmits.
+
+    Args:
+        task_id: Task ID
+        phase_summary: Optional summary of phase work for reviewers
     """
     workspace = find_task_workspace(task_id)
     if not workspace:
@@ -4457,11 +4888,24 @@ def submit_phase_for_review(task_id: str, phase_summary: Optional[str] = None) -
     current_phase = phases[current_idx]
     phase_status = current_phase.get('status', '')
 
-    # Allow submit from ACTIVE (normal flow) or REVISING (after rejection)
-    if phase_status not in ['ACTIVE', 'REVISING']:
+    # Normalize legacy states
+    if phase_status in ('REJECTED', 'REVISING'):
+        phase_status = 'REVISION_NEEDED'
+    if phase_status in ('AWAITING_REVIEW', 'UNDER_REVIEW'):
+        phase_status = 'IN_REVIEW'
+
+    # Only allow manual submit from ACTIVE (normal flow)
+    # REVISION_NEEDED/FIXING phases auto-resubmit via mark_revision_ready + agent completion
+    if phase_status != 'ACTIVE':
+        hint = ""
+        if phase_status == 'REVISION_NEEDED':
+            hint = "Deploy fix agents first (auto-transitions to FIXING), then call mark_revision_ready when done."
+        elif phase_status == 'FIXING':
+            hint = "Call mark_revision_ready to signal fix agents are deployed. Auto-resubmit triggers when all fix agents complete."
         return json.dumps({
             "success": False,
-            "error": f"Phase must be ACTIVE or REVISING to submit for review. Current: {phase_status}"
+            "error": f"Phase must be ACTIVE for manual review submission. Current: {phase_status}",
+            "hint": hint or "Check get_phase_status for guidance."
         })
 
     # Count phase agents from SQLite (source of truth)
@@ -4471,12 +4915,12 @@ def submit_phase_for_review(task_id: str, phase_summary: Optional[str] = None) -
     failed_agents = len([a for a in phase_agents if a.get('status') in ['failed', 'error', 'terminated']])
     phase_name = current_phase.get('name', f'Phase {current_idx + 1}')
 
-    # Transition to AWAITING_REVIEW in SQLite
+    # Transition to IN_REVIEW in SQLite
     state_db.update_phase_status(
         workspace_base=workspace_base,
         task_id=task_id,
         phase_index=current_idx,
-        new_status="AWAITING_REVIEW"
+        new_status="IN_REVIEW"
     )
 
     # MANDATORY: Auto-spawn reviewers to prevent manual approval bypass
@@ -4494,15 +4938,175 @@ def submit_phase_for_review(task_id: str, phase_summary: Optional[str] = None) -
         logger.info(f"PHASE ENFORCEMENT: Auto-review triggered: {auto_review_result}")
     except Exception as e:
         logger.error(f"PHASE ENFORCEMENT: Failed to auto-spawn reviewers: {e}")
-        # Even if reviewer spawning fails, phase is in AWAITING_REVIEW with auto_review=False
+        # Even if reviewer spawning fails, phase is in IN_REVIEW with auto_review=False
         # This will be caught by approve_phase_review which requires review completion
 
     return json.dumps({
         "success": True,
         "phase": phase_name,
-        "status": "UNDER_REVIEW",  # Will be UNDER_REVIEW after reviewers spawn
+        "status": "IN_REVIEW",
         "message": "Phase submitted for review - agentic reviewers auto-spawned",
         "enforcement": "Reviewers will independently verify phase work. Manual approval blocked."
+    }, indent=2)
+
+
+@mcp.tool()
+def mark_revision_ready(task_id: str) -> str:
+    """
+    Signal that all fix agents have been deployed for a FIXING phase.
+
+    Call this AFTER deploying all fix agents for a revision cycle.
+    When all fix agents complete AND revision_ready is set, the system
+    auto-resubmits the phase for review.
+
+    This prevents premature auto-resubmission when deploying agents in batches.
+
+    Flow:
+    1. Phase gets REVISION_NEEDED (review rejected)
+    2. Orchestrator deploys fix agent 1 → phase auto-transitions to FIXING
+    3. Orchestrator deploys fix agent 2, 3, etc.
+    4. Orchestrator calls mark_revision_ready() → sets flag
+    5. When ALL fix agents complete → system auto-submits for re-review
+
+    Args:
+        task_id: Task ID
+    """
+    workspace = find_task_workspace(task_id)
+    if not workspace:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+
+    workspace_base = get_workspace_base_from_task_workspace(workspace)
+
+    task_snapshot = state_db.load_task_snapshot(workspace_base=workspace_base, task_id=task_id)
+    if not task_snapshot:
+        return json.dumps({"success": False, "error": f"Task {task_id} not found in SQLite"})
+
+    phases = task_snapshot.get('phases', [])
+    current_idx = task_snapshot.get('current_phase_index', 0)
+
+    if not phases or current_idx >= len(phases):
+        return json.dumps({"success": False, "error": "No current phase"})
+
+    current_phase = phases[current_idx]
+    phase_status = current_phase.get('status', '')
+
+    # Normalize legacy states
+    if phase_status in ('REJECTED', 'REVISING'):
+        phase_status = 'REVISION_NEEDED'
+
+    if phase_status not in ('FIXING', 'REVISION_NEEDED'):
+        return json.dumps({
+            "success": False,
+            "error": f"Phase must be FIXING or REVISION_NEEDED. Current: {phase_status}",
+            "hint": "This tool is only for revision cycles. Deploy fix agents first."
+        })
+
+    # If still in REVISION_NEEDED (no fix agents deployed yet), that's unusual but allowed
+    # The orchestrator might call this before deploying agents — flag it
+    if phase_status == 'REVISION_NEEDED':
+        return json.dumps({
+            "success": False,
+            "error": "No fix agents deployed yet. Deploy at least one fix agent first.",
+            "hint": "Deploying an agent to a REVISION_NEEDED phase auto-transitions it to FIXING."
+        })
+
+    # Set revision_ready flag in SQLite
+    db_path = state_db.ensure_db(workspace_base)
+    conn = state_db._connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE phases SET revision_ready = 1 WHERE task_id = ? AND phase_index = ?",
+            (task_id, current_idx)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Check if all fix agents are already done — if so, trigger auto-resubmit immediately
+    phase_state = state_db.load_phase_snapshot(
+        workspace_base=workspace_base,
+        task_id=task_id,
+        phase_index=current_idx,
+    )
+    all_done = bool(phase_state.get("counts", {}).get("all_done"))
+
+    phase_name = current_phase.get('name', f'Phase {current_idx + 1}')
+    revision_round = current_phase.get('revision_round', 0) or 0
+    max_rounds = current_phase.get('max_revision_rounds', 3) or 3
+
+    if all_done:
+        # All fix agents already done — trigger immediate resubmit
+        new_round = revision_round + 1
+        if new_round > max_rounds:
+            state_db.update_phase_status(
+                workspace_base=workspace_base,
+                task_id=task_id,
+                phase_index=current_idx,
+                new_status="ESCALATED"
+            )
+            return json.dumps({
+                "success": True,
+                "revision_ready": True,
+                "phase": phase_name,
+                "status": "ESCALATED",
+                "message": f"Max revision rounds ({max_rounds}) exceeded. Phase ESCALATED for manual intervention.",
+                "revision_round": new_round,
+                "max_revision_rounds": max_rounds
+            }, indent=2)
+
+        # Update revision_round
+        conn = state_db._connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE phases SET revision_round = ? WHERE task_id = ? AND phase_index = ?",
+                (new_round, task_id, current_idx)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Transition to IN_REVIEW and spawn reviewers
+        state_db.update_phase_status(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            phase_index=current_idx,
+            new_status="IN_REVIEW"
+        )
+
+        completed_agents = int(phase_state.get("counts", {}).get("completed", 0))
+        failed_agents = int(phase_state.get("counts", {}).get("failed", 0))
+
+        try:
+            _auto_spawn_phase_reviewers(
+                task_id=task_id,
+                phase_index=current_idx,
+                phase_name=phase_name,
+                completed_agents=completed_agents,
+                failed_agents=failed_agents,
+                workspace=workspace
+            )
+        except Exception as e:
+            logger.error(f"PHASE ENFORCEMENT: Failed to auto-spawn reviewers after mark_revision_ready: {e}")
+
+        return json.dumps({
+            "success": True,
+            "revision_ready": True,
+            "phase": phase_name,
+            "status": "IN_REVIEW",
+            "message": f"All fix agents already done. Auto-resubmitted for review (round {new_round}/{max_rounds}).",
+            "revision_round": new_round,
+            "max_revision_rounds": max_rounds
+        }, indent=2)
+
+    return json.dumps({
+        "success": True,
+        "revision_ready": True,
+        "phase": phase_name,
+        "status": "FIXING",
+        "message": "Revision ready flag set. Phase will auto-resubmit when all fix agents complete.",
+        "revision_round": revision_round + 1,
+        "max_revision_rounds": max_rounds,
+        "agents_pending": int(phase_state.get("counts", {}).get("pending", 0))
     }, indent=2)
 
 
@@ -4832,15 +5436,15 @@ def _auto_spawn_phase_reviewers(
     completed_agents: int,
     failed_agents: int,
     workspace: str,
-    num_reviewers: int = 2
+    num_reviewers: int = 1
 ) -> Dict[str, Any]:
     """
     INTERNAL: Auto-spawn reviewer agents + 1 critique agent when a phase completes.
 
     This is called automatically by update_agent_progress when all phase agents finish.
     It creates a review record and spawns:
-    - 2 Sonnet REVIEWER agents (submit verdicts - approve/reject/needs_revision)
-    - 1 Sonnet CRITIQUE agent (senior dev perspective, no verdict, just observations)
+    - 1 Opus REVIEWER agent (submits verdict - approve/reject/needs_revision)
+    - 1 Opus CRITIQUE agent (senior dev perspective, no verdict, just observations)
 
     The critique agent provides birds-eye view feedback but doesn't affect phase approval.
     Only reviewer verdicts count for pass/fail decisions.
@@ -4879,12 +5483,13 @@ def _auto_spawn_phase_reviewers(
         logger.error(f"[REVIEWER-SPAWN] Phase not found in SQLite for task={task_id}, phase_index={phase_index}")
         return {"success": False, "error": "Invalid phase_index - phase not found in SQLite"}
 
-    # 2. ATOMIC CLAIM: Transition AWAITING_REVIEW -> UNDER_REVIEW
+    # 2. ATOMIC CLAIM: Ensure phase is IN_REVIEW and claim it for this reviewer spawn
     # This prevents race conditions where multiple threads try to spawn reviewers
     claimed = state_db.claim_phase_for_review(
         workspace_base=workspace_base,
         task_id=task_id,
-        phase_index=phase_index
+        phase_index=phase_index,
+        review_id=review_id
     )
 
     if not claimed:
@@ -4902,6 +5507,12 @@ def _auto_spawn_phase_reviewers(
     )
 
     if not create_result.get('success'):
+        state_db.clear_phase_review_claim(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            phase_index=phase_index,
+            review_id=review_id
+        )
         return {"success": False, "error": f"Failed to create review record: {create_result.get('error')}"}
 
     # Extract phase-specific deliverables and success criteria for reviewer context
@@ -4914,8 +5525,13 @@ def _auto_spawn_phase_reviewers(
     project_context = {}
     if task_config and task_config.get('project_context'):
         try:
-            project_context = json.loads(task_config['project_context']) if isinstance(task_config['project_context'], str) else task_config['project_context']
-        except:
+            raw_ctx = task_config['project_context']
+            project_context = json.loads(raw_ctx) if isinstance(raw_ctx, str) else raw_ctx
+            if not isinstance(project_context, dict):
+                logger.warning(f"[REVIEWER-SPAWN] project_context is {type(project_context).__name__}, expected dict - ignoring")
+                project_context = {}
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"[REVIEWER-SPAWN] Failed to parse project_context: {e}")
             project_context = {}
 
     # Get all phases from SQLite for OUT OF SCOPE section
@@ -5129,7 +5745,7 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                 pre_generated_agent_id
             )
 
-            # Use Sonnet for reviewers (faster, cheaper, sufficient for structured review tasks)
+            # Use Opus for reviewers (deep reasoning for thorough review)
             logger.info(f"AUTO-PHASE-ENFORCEMENT: Calling deploy_claude_tmux_agent for {agent_type} with pre-generated id {pre_generated_agent_id}...")
             result = deploy_claude_tmux_agent(
                 task_id=task_id,
@@ -5137,7 +5753,7 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                 prompt=reviewer_prompt_with_id,
                 parent="orchestrator",
                 phase_index=-1,  # -1 indicates reviewer agent (not part of any phase)
-                model=SONNET_MODEL,  # Sonnet for reviewers
+                model=OPUS_MODEL,  # Opus for reviewers
                 agent_id=pre_generated_agent_id
             )
             logger.info(f"AUTO-PHASE-ENFORCEMENT: deploy_claude_tmux_agent returned: success={result.get('success')}, error={result.get('error', 'N/A')}")
@@ -5152,7 +5768,7 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                     agent_id=agent_id
                 )
 
-                logger.info(f"AUTO-PHASE-ENFORCEMENT: Successfully spawned Sonnet reviewer {agent_id}")
+                logger.info(f"AUTO-PHASE-ENFORCEMENT: Successfully spawned Opus reviewer {agent_id}")
             else:
                 logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn reviewer {i+1}: {result.get('error', 'Unknown error')}")
                 logger.error(f"AUTO-PHASE-ENFORCEMENT: Full result: {result}")
@@ -5249,7 +5865,7 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
             prompt=critique_prompt_with_id,
             parent="orchestrator",
             phase_index=-1,  # -1 indicates review-related agent
-            model=SONNET_MODEL,  # Sonnet for critique
+            model=OPUS_MODEL,  # Opus for critique
             agent_id=pre_generated_critique_id
         )
         if result.get('success'):
@@ -5262,7 +5878,7 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
                 critique_agent_id=critique_agent_id
             )
 
-            logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned Sonnet critique agent {critique_agent_id}")
+            logger.info(f"AUTO-PHASE-ENFORCEMENT: Spawned Opus critique agent {critique_agent_id}")
         else:
             logger.error(f"AUTO-PHASE-ENFORCEMENT: Failed to spawn critique: {result.get('error', 'Unknown error')}")
     except Exception as e:
@@ -5273,14 +5889,14 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
     # This reduces review complexity and focuses testing where it matters.
 
     # Build message based on what was spawned
-    message_parts = [f"{len(spawned_agents)} Sonnet reviewers", "1 Sonnet critique agent"]
+    message_parts = [f"{len(spawned_agents)} Opus reviewer(s)", "1 Opus critique agent"]
 
     return {
         "success": True,
         "review_id": review_id,
         "phase": phase_name,
         "phase_index": phase_index,
-        "status": "UNDER_REVIEW",
+        "status": "IN_REVIEW",
         "num_reviewers": num_reviewers,
         "spawned_reviewer_agents": spawned_agents,
         "critique_agent_id": critique_agent_id,
@@ -5321,7 +5937,7 @@ def submit_review_verdict(
 
     Args:
         task_id: Task ID
-        review_id: Review ID from trigger_agentic_review
+        review_id: Review ID from the auto-review process
         reviewer_agent_id: The agent ID of the reviewer submitting this verdict
         verdict: "approved", "rejected", or "needs_revision"
         findings: List of findings, each with:
@@ -5489,21 +6105,27 @@ def submit_review_verdict(
         else:
             result_info['finalize_error'] = "Failed to finalize review"
 
-    # 5. Update reviewer agent status to completed in SQLite
-    # Find which agent submitted this verdict and mark them done
+    # 5. Update reviewer agent status in SQLite
     try:
-        # Get review record to find reviewer agents
-        review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
-        if review_data:
-            reviewer_agents = review_data.get('reviewer_agent_ids', [])
-            # Mark all reviewer agents for this review as completed if they're still active
-            for agent_id in reviewer_agents:
-                state_db.update_agent_status(
-                    workspace_base=workspace_base,
-                    task_id=task_id,
-                    agent_id=agent_id,
-                    new_status='completed'
-                )
+        # Mark the submitting reviewer as completed
+        state_db.update_agent_status(
+            workspace_base=workspace_base,
+            task_id=task_id,
+            agent_id=reviewer_agent_id,
+            new_status='completed'
+        )
+        # If review is fully complete, mark remaining reviewers as completed too
+        if is_complete:
+            review_data = state_db.get_review(workspace_base=workspace_base, review_id=review_id)
+            if review_data:
+                for agent_id in review_data.get('reviewer_agent_ids', []):
+                    if agent_id != reviewer_agent_id:
+                        state_db.update_agent_status(
+                            workspace_base=workspace_base,
+                            task_id=task_id,
+                            agent_id=agent_id,
+                            new_status='completed'
+                        )
     except Exception as e:
         logger.warning(f"VERDICT: Failed to update reviewer agent status: {e}")
 
@@ -5680,8 +6302,6 @@ def abort_stalled_review(
     """
     Abort a stalled review when reviewer(s) crash or fail to submit verdicts.
 
-    SQLITE MIGRATION: Now reads/writes reviews and agents via SQLite.
-
     Use this when:
     - A reviewer agent crashes without submitting a verdict
     - Review is stuck in "in_progress" state for too long
@@ -5689,8 +6309,12 @@ def abort_stalled_review(
 
     This will:
     1. Mark the review as "aborted"
-    2. Return the phase to ACTIVE or REVISING state (can re-submit for review)
+    2. Return the phase to ACTIVE (first review) or REVISION_NEEDED (revision cycle)
     3. Kill any still-running reviewer agents
+
+    After abort:
+    - If phase returns to ACTIVE: use submit_phase_for_review to retry
+    - If phase returns to REVISION_NEEDED: deploy fix agents (→ FIXING), then mark_revision_ready
 
     Args:
         task_id: Task ID
@@ -5698,7 +6322,7 @@ def abort_stalled_review(
         reason: Reason for aborting the review
 
     Returns:
-        Status of the abort operation
+        Status of the abort operation with next_action guidance
     """
     workspace = find_task_workspace(task_id)
     if not workspace:
@@ -5734,25 +6358,30 @@ def abort_stalled_review(
     phases = task_snapshot.get('phases', []) if task_snapshot else []
     current_idx = task_snapshot.get('current_phase_index', 0) if task_snapshot else 0
 
-    # Determine new phase status
+    # Determine new phase status based on context
     new_phase_status = 'ACTIVE'
     if current_idx < len(phases):
         current_phase = phases[current_idx]
         current_status = current_phase.get('status')
 
         if current_status == 'ESCALATED':
-            new_phase_status = 'AWAITING_REVIEW'
-            logger.info(f"Phase {current_idx} reset from ESCALATED to AWAITING_REVIEW")
-        elif current_phase.get('revision_count', 0) > 0:
-            new_phase_status = 'REVISING'
+            new_phase_status = 'IN_REVIEW'
+            logger.info(f"Phase {current_idx} reset from ESCALATED to IN_REVIEW for retry")
+        elif current_phase.get('revision_round', 0) > 0:
+            new_phase_status = 'REVISION_NEEDED'
+            logger.info(f"Phase {current_idx} reset to REVISION_NEEDED (revision_round > 0)")
 
-        # Update phase status in SQLite
-        state_db.update_phase_status(
-            workspace_base=workspace_base,
-            task_id=task_id,
-            phase_index=current_idx,
-            new_status=new_phase_status
-        )
+        # Update phase status in SQLite (bypasses transition enforcement for abort recovery)
+        db_path = state_db.ensure_db(workspace_base)
+        conn = state_db._connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE phases SET status = ?, last_review_id = NULL WHERE task_id = ? AND phase_index = ?",
+                (new_phase_status, task_id, current_idx)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     # Kill any running reviewer agents from this review
     killed_agents = []
@@ -5793,7 +6422,7 @@ def abort_stalled_review(
         "verdicts_received_before_abort": verdicts_received,
         "killed_reviewers": killed_agents,
         "phase_returned_to": new_phase_status,
-        "next_action": "Use submit_phase_for_review to spawn new reviewers, or deploy fix agents first"
+        "next_action": "Deploy fix agents (auto-transitions to FIXING), then call mark_revision_ready" if new_phase_status == 'REVISION_NEEDED' else "Use submit_phase_for_review to spawn new reviewers"
     }, indent=2)
 
 
@@ -6193,7 +6822,10 @@ if __name__ == "__main__":
         # Non-fatal - server can still run without health monitoring
 
     try:
-        mcp.run()
+        # Default to stdio transport (required by Claude Code)
+        # Use --http flag to run as streamable-http server instead
+        transport = "streamable-http" if "--http" in sys.argv else "stdio"
+        mcp.run(transport=transport)
     finally:
         # Clean shutdown of health daemon
         try:

@@ -12,13 +12,26 @@ import AgentTree from '../components/AgentTree';
 import { useTaskUpdates } from '../hooks/useWebSocket';
 import { useRealtimeStore } from '../stores/realtimeStore';
 
+type PhaseStatus =
+  | 'PENDING'
+  | 'ACTIVE'
+  | 'IN_REVIEW'
+  | 'APPROVED'
+  | 'REVISION_NEEDED'
+  | 'FIXING'
+  | 'ESCALATED'
+  | 'FAILED'
+  | 'AWAITING_REVIEW'
+  | 'UNDER_REVIEW'
+  | 'REJECTED'
+  | 'REVISING';
+
 interface Phase {
   id: string;
   order: number;
   name: string;
   description?: string;
-  status: 'PENDING' | 'ACTIVE' | 'AWAITING_REVIEW' | 'UNDER_REVIEW' |
-          'APPROVED' | 'REJECTED' | 'REVISING' | 'ESCALATED';
+  status: PhaseStatus;
   created_at: string;
   started_at?: string;
   completed_at?: string;
@@ -31,7 +44,7 @@ interface Agent {
   parent: string;
   depth: number;
   phase_index: number;
-  status: 'running' | 'working' | 'blocked' | 'completed' | 'failed' | 'error';
+  status: 'running' | 'working' | 'blocked' | 'reviewing' | 'completed' | 'phase_completed' | 'failed' | 'error' | 'terminated' | 'killed';
   started_at: string;
   completed_at?: string;
   progress: number;
@@ -164,15 +177,25 @@ const TaskDetailEnhanced: React.FC = () => {
       case 'running':
       case 'working':
         return 'text-blue-600 bg-blue-50';
+      case 'IN_REVIEW':
+      case 'AWAITING_REVIEW':
+      case 'UNDER_REVIEW':
+      case 'FIXING':
+      case 'REVISING':
+      case 'blocked':
+        return 'text-yellow-600 bg-yellow-50';
       case 'COMPLETED':
+      case 'APPROVED':
       case 'completed':
         return 'text-green-600 bg-green-50';
       case 'FAILED':
+      case 'REVISION_NEEDED':
+      case 'REJECTED':
       case 'failed':
       case 'error':
         return 'text-red-600 bg-red-50';
-      case 'blocked':
-        return 'text-yellow-600 bg-yellow-50';
+      case 'ESCALATED':
+        return 'text-sky-600 bg-sky-50';
       default:
         return 'text-gray-600 bg-gray-50';
     }

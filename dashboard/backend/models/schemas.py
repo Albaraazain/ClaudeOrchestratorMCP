@@ -13,8 +13,10 @@ class PhaseData(BaseModel):
     name: str
     description: Optional[str] = None
     status: Literal[
-        "PENDING", "ACTIVE", "AWAITING_REVIEW", "UNDER_REVIEW",
-        "APPROVED", "REJECTED", "REVISING", "ESCALATED"
+        "PENDING", "ACTIVE", "IN_REVIEW", "APPROVED",
+        "REVISION_NEEDED", "FIXING", "ESCALATED", "FAILED",
+        # Legacy statuses retained for old persisted tasks.
+        "AWAITING_REVIEW", "UNDER_REVIEW", "REJECTED", "REVISING"
     ]
     created_at: datetime
     started_at: Optional[datetime] = None
@@ -39,7 +41,10 @@ class AgentData(BaseModel):
     parent: str = "orchestrator"
     depth: int = 1
     phase_index: int = 0
-    status: Literal["running", "working", "blocked", "completed", "failed", "error", "terminated", "reviewing"]
+    status: Literal[
+        "running", "working", "blocked", "reviewing",
+        "completed", "phase_completed", "failed", "error", "terminated", "killed"
+    ]
     started_at: datetime
     completed_at: Optional[datetime] = None
     progress: int = Field(ge=0, le=100)
@@ -63,7 +68,7 @@ class AgentFinding(BaseModel):
     """Agent finding/discovery."""
     timestamp: datetime
     agent_id: str
-    finding_type: Literal["issue", "solution", "insight", "recommendation"]
+    finding_type: Literal["issue", "solution", "insight", "recommendation", "blocker"]
     severity: Literal["low", "medium", "high", "critical"]
     message: str
     data: Optional[Dict[str, Any]] = None
@@ -74,7 +79,7 @@ class ReviewData(BaseModel):
     """Review information."""
     review_id: str
     phase_index: int
-    status: Literal["pending", "in_progress", "completed", "aborted"]
+    status: Literal["pending", "in_progress", "completed", "aborted", "failed"]
     started_at: datetime
     reviewer_count: int
     verdicts_submitted: int
@@ -94,7 +99,7 @@ class TaskSummary(BaseModel):
     task_id: str
     description: str
     created_at: datetime
-    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED", "ARCHIVED"]
+    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED", "ARCHIVED"]
     current_phase: Optional[PhaseData] = None
     agent_count: int
     active_agents: int
@@ -109,7 +114,7 @@ class TaskDetail(BaseModel):
     workspace: str
     workspace_base: str
     client_cwd: str
-    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED", "ARCHIVED"]
+    status: Literal["INITIALIZED", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED", "ARCHIVED"]
     priority: Literal["P0", "P1", "P2", "P3", "P4"]
     phases: List[PhaseData]
     current_phase_index: int

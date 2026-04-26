@@ -5,7 +5,7 @@ export interface Agent {
   agent_id: string;
   agent_type?: string;
   type?: string;
-  status: 'pending' | 'starting' | 'running' | 'working' | 'blocked' | 'completed' | 'failed' | 'terminated' | 'error';
+  status: AgentStatus;
   progress: number;
   message?: string;
   parent?: string | null;
@@ -21,6 +21,20 @@ export interface Agent {
   model?: string;
   findings?: Finding[];
 }
+
+export type AgentStatus =
+  | 'pending'
+  | 'starting'
+  | 'running'
+  | 'working'
+  | 'blocked'
+  | 'reviewing'
+  | 'completed'
+  | 'phase_completed'
+  | 'failed'
+  | 'terminated'
+  | 'killed'
+  | 'error';
 
 export interface AgentFinding {
   timestamp: string;
@@ -86,10 +100,24 @@ export interface Task {
 export interface Phase {
   name: string;
   description?: string;
-  status: 'PENDING' | 'ACTIVE' | 'AWAITING_REVIEW' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'REVISING' | 'ESCALATED';
+  status: PhaseStatus;
   agents?: Agent[];
   review_data?: ReviewData;
 }
+
+export type PhaseStatus =
+  | 'PENDING'
+  | 'ACTIVE'
+  | 'IN_REVIEW'
+  | 'APPROVED'
+  | 'REVISION_NEEDED'
+  | 'FIXING'
+  | 'ESCALATED'
+  | 'FAILED'
+  | 'AWAITING_REVIEW'
+  | 'UNDER_REVIEW'
+  | 'REJECTED'
+  | 'REVISING';
 
 export interface ReviewData {
   review_id?: string;

@@ -1,4 +1,4 @@
-# Claude Orchestrator MCP — System Rules
+# Codex Orchestrator MCP — System Rules
 
 ## Phase State Machine (Mar 2026)
 
@@ -93,7 +93,7 @@ Why `mark_revision_ready` exists: without it, if you deploy 3 fix agents sequent
 |------|------|------|
 | Check what to do next | `get_phase_status` | Always — this is the primary guidance tool |
 | Monitor agent progress | `check_phase_progress` | While agents are working |
-| Deploy Claude agents | `deploy_opus_agent` / `deploy_sonnet_agent` | Phase is ACTIVE or REVISION_NEEDED/FIXING |
+| Deploy Codex agents | `deploy_opus_agent` / `deploy_sonnet_agent` | Phase is ACTIVE or REVISION_NEEDED/FIXING |
 | Deploy Gemini design agent | `deploy_design_agent` | UI/UX design, visual feedback, creative tasks |
 | Signal fix agents done deploying | `mark_revision_ready` | Phase is FIXING, all fix agents deployed |
 | Check review progress | `get_review_status` | Phase is IN_REVIEW |
@@ -104,22 +104,22 @@ Why `mark_revision_ready` exists: without it, if you deploy 3 fix agents sequent
 
 ## Gemini Design Agent
 
-`deploy_design_agent` uses Google's Gemini CLI instead of Claude. Use it for:
+`deploy_design_agent` uses Google's Gemini CLI instead of Codex. Use it for:
 - UI/UX design exploration and recommendations
 - Visual layout and styling decisions
 - Design system analysis and accessibility audits
 - Creative brainstorming and ideation
 - Image analysis and visual feedback
 
-The Gemini agent participates in the same phase/review lifecycle as Claude agents.
+The Gemini agent participates in the same phase/review lifecycle as Codex agents.
 It runs in tmux, is tracked in SQLite, and the completion notifier handles its exit.
 
 Available models: `gemini-3.1-pro-preview` (default — best for design), `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`
 
-Key differences from Claude agents:
+Key differences from Codex agents:
 - Uses `-y` (yolo mode) instead of `--dangerously-skip-permissions`
 - Does NOT have native MCP access to the orchestrator — reports completion via file
-- Model stored as `gemini:<model>` in SQLite to distinguish from Claude models
+- Model stored as `gemini:<model>` in SQLite to distinguish from Codex models
 - Requires `fnm env` in tmux (auto-handled)
 
 ### Legacy State Names
