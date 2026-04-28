@@ -204,6 +204,18 @@ Tests cover the state machine, review schema, and migrations. There is no end-to
 
 ---
 
+## Troubleshooting
+
+**`No module named 'fastmcp.server.tasks.routing'`** — your `fastmcp` is too old. The 2.x line lacks that submodule; we require 3.x:
+
+```bash
+pip install --upgrade 'fastmcp>=3.0.0,<4.0.0'
+```
+
+The server now fails fast at startup with this same fix command if it detects an incompatible version.
+
+---
+
 ## Known limitations
 
 - Workers run as detached `tmux` sessions on the host machine. There is **no sandboxing** — agents have the same filesystem and shell access as the user running the MCP server.

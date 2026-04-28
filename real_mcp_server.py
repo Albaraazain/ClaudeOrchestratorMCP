@@ -9,6 +9,15 @@ Author: Claude Code Orchestrator Project
 License: MIT
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from orchestrator._dependency_guard import assert_fastmcp_compatible
+
+assert_fastmcp_compatible()
+
+
 from fastmcp import FastMCP
 from typing import Dict, List, Optional, Any
 import json
@@ -19,7 +28,6 @@ import time
 import logging
 from datetime import datetime
 from pathlib import Path
-import sys
 import re
 import shutil
 import fcntl

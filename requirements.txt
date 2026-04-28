@@ -1,5 +1,8 @@
 # Core dependencies
-fastmcp>=2.0.0
+# Pinned to 3.x: 2.x lacks fastmcp.server.tasks.routing, which 3.x server init
+# imports transitively. Without this pin a fresh install resolves to 2.14.x and
+# fails at runtime with a confusing ModuleNotFoundError.
+fastmcp>=3.0.0,<4.0.0
 
 # Development dependencies (optional)
 pytest>=7.0.0
