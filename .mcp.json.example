@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "claude-orchestrator": {
+      "command": "/ABSOLUTE/PATH/TO/ClaudeOrchestratorMCP/venv/bin/python3",
+      "args": ["real_mcp_server.py"],
+      "cwd": "/ABSOLUTE/PATH/TO/ClaudeOrchestratorMCP"
+    }
+  }
+}

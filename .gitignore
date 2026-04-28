@@ -226,6 +226,20 @@ secrets.json
 .mcp/
 mcp-logs/
 *.mcp.log
+.mcp.json
+.mcp-cli.json
+
+# Orchestrator runtime artifacts
+.agent-workspace/
+dashboard-screenshot*.png
+dashboard-light-theme.png
+
+# Tauri / dashboard build artifacts
+dashboard/src-tauri/target/
+dashboard/src-tauri/sidecars/
+dashboard/src-tauri/gen/
+dashboard/frontend/dist/
+dashboard/frontend/node_modules/
 
 # Backup files
 *.backup
