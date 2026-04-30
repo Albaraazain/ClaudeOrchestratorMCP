@@ -42,6 +42,9 @@ OPUS_MODEL = "claude-opus-4-7"
 # Sonnet-equivalent: Fast, efficient for simpler tasks
 SONNET_MODEL = "claude-sonnet-4-6"
 
+# Effort levels accepted by `claude --effort <level>`. None => CLI default (no flag passed).
+VALID_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 # =============================================================================
 # ORCHESTRATOR MODULE IMPORTS (consolidated from modular architecture)
 # =============================================================================
@@ -1001,7 +1004,8 @@ def deploy_opus_agent(
     agent_type: str,
     prompt: str,
     parent: str = "orchestrator",
-    phase_index: Optional[int] = None
+    phase_index: Optional[int] = None,
+    effort: Optional[str] = "medium"
 ) -> Dict[str, Any]:
     """
     Deploy a Claude OPUS agent for COMPLEX tasks requiring deep reasoning.
@@ -1025,11 +1029,18 @@ def deploy_opus_agent(
         prompt: Instructions for the agent
         parent: Parent agent ID
         phase_index: Phase index (auto-set to current phase if None)
+        effort: Reasoning effort passed to `claude --effort`. One of
+                "low", "medium" (default), "high", "xhigh", "max". Pass None
+                to skip the flag and let the CLI pick. Use "high"+ for hard
+                reasoning work.
 
     Returns:
         Agent deployment result
     """
-    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, OPUS_MODEL)
+    return deploy_claude_tmux_agent(
+        task_id, agent_type, prompt, parent, phase_index, OPUS_MODEL,
+        effort=effort,
+    )
 
 
 @mcp.tool
@@ -1038,7 +1049,8 @@ def deploy_sonnet_agent(
     agent_type: str,
     prompt: str,
     parent: str = "orchestrator",
-    phase_index: Optional[int] = None
+    phase_index: Optional[int] = None,
+    effort: Optional[str] = "medium"
 ) -> Dict[str, Any]:
     """
     Deploy a Claude SONNET agent for MODERATE tasks requiring speed and efficiency.
@@ -1063,11 +1075,17 @@ def deploy_sonnet_agent(
         prompt: Instructions for the agent
         parent: Parent agent ID
         phase_index: Phase index (auto-set to current phase if None)
+        effort: Reasoning effort passed to `claude --effort`. One of
+                "low", "medium" (default), "high", "xhigh", "max". Pass None
+                to skip the flag. Sonnet rarely needs more than "medium".
 
     Returns:
         Agent deployment result
     """
-    return deploy_claude_tmux_agent(task_id, agent_type, prompt, parent, phase_index, SONNET_MODEL)
+    return deploy_claude_tmux_agent(
+        task_id, agent_type, prompt, parent, phase_index, SONNET_MODEL,
+        effort=effort,
+    )
 
 
 def deploy_claude_tmux_agent(
@@ -1077,7 +1095,8 @@ def deploy_claude_tmux_agent(
     parent: str = "orchestrator",
     phase_index: Optional[int] = None,
     model: str = OPUS_MODEL,
-    agent_id: Optional[str] = None
+    agent_id: Optional[str] = None,
+    effort: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Deploy a headless Claude agent using tmux for background execution.
@@ -1094,6 +1113,8 @@ def deploy_claude_tmux_agent(
         phase_index: Phase index this agent belongs to (auto-set from SQLite if None)
         model: Model to use - OPUS_MODEL (default) or SONNET_MODEL (faster, cheaper)
         agent_id: Optional pre-generated agent ID. If None, one will be generated.
+        effort: Reasoning effort for `claude --effort` (low|medium|high|xhigh|max).
+                None => CLI default (no extended thinking enforced).
 
     Returns:
         Agent deployment result
@@ -1103,6 +1124,14 @@ def deploy_claude_tmux_agent(
     if model not in valid_models:
         logger.warning(f"Invalid model '{model}', defaulting to '{OPUS_MODEL}'. Valid: {valid_models}")
         model = OPUS_MODEL
+
+    # Validate effort early so callers get a clean error rather than a tmux session
+    # that dies silently when `claude --effort <bogus>` rejects the flag.
+    if effort is not None and effort not in VALID_EFFORT_LEVELS:
+        return {
+            "success": False,
+            "error": f"Invalid effort '{effort}'. Valid: {list(VALID_EFFORT_LEVELS)} or None"
+        }
     if not check_tmux_available():
         logger.error("tmux not available for agent deployment")
         return {
@@ -1487,8 +1516,9 @@ BEGIN YOUR WORK NOW!
         # Review prompts can be very large; passing them as a single CLI argument can cause the
         # tmux session to terminate immediately (agent never gets recorded/spawned).
         base_flags = '--print --output-format stream-json --input-format text --verbose --dangerously-skip-permissions'
-        claude_flags = f'{base_flags} --model {model} {mcp_config_flag}'.strip()
-        logger.info(f"Deploying agent {agent_id} with model: {model}, mcp_config: {mcp_config_path or 'none'}")
+        effort_flag = f'--effort {effort}' if effort else ''
+        claude_flags = ' '.join(p for p in (base_flags, f'--model {model}', effort_flag, mcp_config_flag) if p)
+        logger.info(f"Deploying agent {agent_id} with model: {model}, effort: {effort or 'cli-default'}, mcp_config: {mcp_config_path or 'none'}")
 
         # JSONL log file path - unique per agent_id
         log_file = f"{logs_dir}/{agent_id}_stream.jsonl"
@@ -1588,6 +1618,7 @@ BEGIN YOUR WORK NOW!
             "action": "agent_deployed",
             "agent_id": agent_id,
             "model": model,
+            "effort": effort,
             "tmux_session": session_name,
             "command": claude_command[:100] + "...",
             "success": True,
@@ -4220,7 +4251,13 @@ def report_agent_finding(task_id: str, agent_id: str, finding_type: str, severit
     }
 
 @mcp.tool
-def spawn_opus_child_agent(task_id: str, parent_agent_id: str, child_agent_type: str, child_prompt: str) -> Dict[str, Any]:
+def spawn_opus_child_agent(
+    task_id: str,
+    parent_agent_id: str,
+    child_agent_type: str,
+    child_prompt: str,
+    effort: Optional[str] = "medium"
+) -> Dict[str, Any]:
     """
     Spawn an OPUS child agent for COMPLEX sub-tasks requiring deep reasoning.
 
@@ -4236,15 +4273,27 @@ def spawn_opus_child_agent(task_id: str, parent_agent_id: str, child_agent_type:
         parent_agent_id: ID of parent agent spawning this child
         child_agent_type: Type of child agent
         child_prompt: Prompt for child agent
+        effort: Reasoning effort passed to `claude --effort`. One of
+                "low", "medium" (default), "high", "xhigh", "max". Pass None
+                to skip the flag.
 
     Returns:
         Child agent spawn result
     """
-    return deploy_claude_tmux_agent(task_id, child_agent_type, child_prompt, parent_agent_id, None, OPUS_MODEL)
+    return deploy_claude_tmux_agent(
+        task_id, child_agent_type, child_prompt, parent_agent_id, None, OPUS_MODEL,
+        effort=effort,
+    )
 
 
 @mcp.tool
-def spawn_sonnet_child_agent(task_id: str, parent_agent_id: str, child_agent_type: str, child_prompt: str) -> Dict[str, Any]:
+def spawn_sonnet_child_agent(
+    task_id: str,
+    parent_agent_id: str,
+    child_agent_type: str,
+    child_prompt: str,
+    effort: Optional[str] = "medium"
+) -> Dict[str, Any]:
     """
     Spawn a SONNET child agent for MODERATE sub-tasks requiring speed.
 
@@ -4260,11 +4309,17 @@ def spawn_sonnet_child_agent(task_id: str, parent_agent_id: str, child_agent_typ
         parent_agent_id: ID of parent agent spawning this child
         child_agent_type: Type of child agent
         child_prompt: Prompt for child agent
+        effort: Reasoning effort passed to `claude --effort`. One of
+                "low", "medium" (default), "high", "xhigh", "max". Pass None
+                to skip the flag.
 
     Returns:
         Child agent spawn result
     """
-    return deploy_claude_tmux_agent(task_id, child_agent_type, child_prompt, parent_agent_id, None, SONNET_MODEL)
+    return deploy_claude_tmux_agent(
+        task_id, child_agent_type, child_prompt, parent_agent_id, None, SONNET_MODEL,
+        effort=effort,
+    )
 
 
 @mcp.tool
@@ -5762,7 +5817,8 @@ REVIEW THIS PHASE'S DELIVERABLES AND SUBMIT YOUR VERDICT NOW!
                 parent="orchestrator",
                 phase_index=-1,  # -1 indicates reviewer agent (not part of any phase)
                 model=OPUS_MODEL,  # Opus for reviewers
-                agent_id=pre_generated_agent_id
+                agent_id=pre_generated_agent_id,
+                effort="high",  # Verdict-bearing review benefits from extended thinking
             )
             logger.info(f"AUTO-PHASE-ENFORCEMENT: deploy_claude_tmux_agent returned: success={result.get('success')}, error={result.get('error', 'N/A')}")
             if result.get('success'):
@@ -5874,7 +5930,8 @@ The 2 reviewer agents handle the verdict. Your role is senior dev perspective.
             parent="orchestrator",
             phase_index=-1,  # -1 indicates review-related agent
             model=OPUS_MODEL,  # Opus for critique
-            agent_id=pre_generated_critique_id
+            agent_id=pre_generated_critique_id,
+            effort="high",  # Senior-dev observations benefit from extended thinking
         )
         if result.get('success'):
             critique_agent_id = result.get('agent_id')
